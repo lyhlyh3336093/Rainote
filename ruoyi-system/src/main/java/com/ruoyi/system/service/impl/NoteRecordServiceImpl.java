@@ -272,11 +272,13 @@ public class NoteRecordServiceImpl implements INoteRecordService
                                 // A列数据获取
                                 NoteColumn columnA = noteColumnMapper.selectNoteColumnById(Long.parseLong(columnAId));
                                 if (columnA != null && columnA.getType() == 26L) {
-                                    aRecordIds = getLookupLinkRecordIds(columnA, columnId, currentBackFieldId, itemMap, noteRecord.getId());
-                                    if (aRecordIds == null) {
+                                    List<String> aLinkIds = getLookupLinkRecordIds(columnA, columnId, currentBackFieldId, itemMap, noteRecord.getId());
+                                    if (aLinkIds == null) {
                                         continue;
                                     }
-                                    aValues = toLookupValues(resolveLookupValues(columnA, aRecordIds));
+                                    List<LookupResult> aResults = resolveLookupValues(columnA, aLinkIds);
+                                    aRecordIds = aResults.stream().map(LookupResult::getLinkRecordId).collect(Collectors.toList());
+                                    aValues = toLookupValues(aResults);
                                     log.info("[SET-OP-LOOKUP-A] aRecordIds={}, aValues={}", aRecordIds, aValues);
                                 } else {
                                     // type=21 双向关联列
@@ -301,11 +303,13 @@ public class NoteRecordServiceImpl implements INoteRecordService
                                 // B列数据获取
                                 NoteColumn columnB = noteColumnMapper.selectNoteColumnById(Long.parseLong(columnBId));
                                 if (columnB != null && columnB.getType() == 26L) {
-                                    bRecordIds = getLookupLinkRecordIds(columnB, columnId, currentBackFieldId, itemMap, noteRecord.getId());
-                                    if (bRecordIds == null) {
+                                    List<String> bLinkIds = getLookupLinkRecordIds(columnB, columnId, currentBackFieldId, itemMap, noteRecord.getId());
+                                    if (bLinkIds == null) {
                                         continue;
                                     }
-                                    bValues = toLookupValues(resolveLookupValues(columnB, bRecordIds));
+                                    List<LookupResult> bResults = resolveLookupValues(columnB, bLinkIds);
+                                    bRecordIds = bResults.stream().map(LookupResult::getLinkRecordId).collect(Collectors.toList());
+                                    bValues = toLookupValues(bResults);
                                     log.info("[SET-OP-LOOKUP-B] bRecordIds={}, bValues={}", bRecordIds, bValues);
                                 } else {
                                     // type=21 双向关联列：直接从item取linkRecordId和value
@@ -324,11 +328,13 @@ public class NoteRecordServiceImpl implements INoteRecordService
                                 // A列数据获取
                                 NoteColumn columnA = noteColumnMapper.selectNoteColumnById(Long.parseLong(columnAId));
                                 if (columnA != null && columnA.getType() == 26L) {
-                                    aRecordIds = getLookupLinkRecordIds(columnA, columnId, currentBackFieldId, itemMap, noteRecord.getId());
-                                    if (aRecordIds == null) {
+                                    List<String> aLinkIds = getLookupLinkRecordIds(columnA, columnId, currentBackFieldId, itemMap, noteRecord.getId());
+                                    if (aLinkIds == null) {
                                         continue;
                                     }
-                                    aValues = toLookupValues(resolveLookupValues(columnA, aRecordIds));
+                                    List<LookupResult> aResults = resolveLookupValues(columnA, aLinkIds);
+                                    aRecordIds = aResults.stream().map(LookupResult::getLinkRecordId).collect(Collectors.toList());
+                                    aValues = toLookupValues(aResults);
                                     log.info("[SET-OP-LOOKUP-A] aRecordIds={}, aValues={}", aRecordIds, aValues);
                                 } else {
                                     // type=21 双向关联列：直接从item取linkRecordId和value
@@ -346,11 +352,13 @@ public class NoteRecordServiceImpl implements INoteRecordService
                                 // B列数据获取
                                 NoteColumn columnB = noteColumnMapper.selectNoteColumnById(Long.parseLong(columnBId));
                                 if (columnB != null && columnB.getType() == 26L) {
-                                    bRecordIds = getLookupLinkRecordIds(columnB, columnId, currentBackFieldId, itemMap, noteRecord.getId());
-                                    if (bRecordIds == null) {
+                                    List<String> bLinkIds = getLookupLinkRecordIds(columnB, columnId, currentBackFieldId, itemMap, noteRecord.getId());
+                                    if (bLinkIds == null) {
                                         continue;
                                     }
-                                    bValues = toLookupValues(resolveLookupValues(columnB, bRecordIds));
+                                    List<LookupResult> bResults = resolveLookupValues(columnB, bLinkIds);
+                                    bRecordIds = bResults.stream().map(LookupResult::getLinkRecordId).collect(Collectors.toList());
+                                    bValues = toLookupValues(bResults);
                                     log.info("[SET-OP-LOOKUP-B] bRecordIds={}, bValues={}", bRecordIds, bValues);
                                 } else {
                                     // type=21 双向关联列

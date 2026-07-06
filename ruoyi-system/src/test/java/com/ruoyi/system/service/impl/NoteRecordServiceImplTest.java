@@ -603,4 +603,114 @@ public class NoteRecordServiceImplTest
         assertEquals("梨", results.get(1).getValue());
         assertEquals("30", results.get(1).getLinkRecordId());
     }
+
+    /**
+     * 场景15（R9/U2对齐验证）：dedupe=true时，从resolveLookupValues结果派生的recordIds与values长度一致、索引对齐
+     * 这验证了集合运算4个block中 aRecordIds/aValues 同源对齐的不变量
+     */
+    @Test
+    void testSetOpAlignmentPattern_dedupeTrue()
+    {
+        NoteColumn dedupeColumn = new NoteColumn();
+        dedupeColumn.setId(100L);
+        dedupeColumn.setType(26L);
+        JSONObject property = new JSONObject();
+        property.put("double_link_column_id", "200");
+        property.put("source_column_id", "300");
+        property.put("dedupe", true);
+        dedupeColumn.setProperty(property.toJSONString());
+
+        NoteColumn sourceColumn = new NoteColumn();
+        sourceColumn.setId(300L);
+        sourceColumn.setType(1L);
+
+        NoteDwtableItem value10 = new NoteDwtableItem();
+        value10.setValue("苹果");
+        NoteDwtableItem value20 = new NoteDwtableItem();
+        value20.setValue("苹果");
+        NoteDwtableItem value30 = new NoteDwtableItem();
+        value30.setValue("梨");
+
+        when(noteColumnMapper.selectNoteColumnById(300L)).thenReturn(sourceColumn);
+        when(noteDwtableItemMapper.selectNoteDwtableItemByRecordAndColumn(any(NoteDwtableItem.class)))
+                .thenReturn(value10)
+                .thenReturn(value20)
+                .thenReturn(value30);
+
+        java.util.List<NoteRecordServiceImpl.LookupResult> results =
+                noteRecordService.resolveLookupValues(dedupeColumn, java.util.Arrays.asList("10", "20", "30"));
+
+        // 模拟U2中4个block的派生模式：recordIds和values都从同一results派生
+        java.util.List<String> derivedRecordIds = results.stream()
+                .map(NoteRecordServiceImpl.LookupResult::getLinkRecordId)
+                .collect(java.util.stream.Collectors.toList());
+        java.util.List<String> derivedValues = results.stream()
+                .map(NoteRecordServiceImpl.LookupResult::getValue)
+                .collect(java.util.stream.Collectors.toList());
+
+        // 对齐不变量：长度一致
+        assertEquals(derivedRecordIds.size(), derivedValues.size());
+        // 去重后2条
+        assertEquals(2, derivedRecordIds.size());
+        // 索引对齐：recordId 与 value 一一对应
+        assertEquals("10", derivedRecordIds.get(0));
+        assertEquals("苹果", derivedValues.get(0));
+        assertEquals("30", derivedRecordIds.get(1));
+        assertEquals("梨", derivedValues.get(1));
+    }
+
+    /**
+     * 场景16（R9/U2对齐验证）：dedupe=false时，recordIds与values同样长度一致、索引对齐（无回归）
+     */
+    @Test
+    void testSetOpAlignmentPattern_dedupeFalse()
+    {
+        NoteColumn dedupeColumn = new NoteColumn();
+        dedupeColumn.setId(100L);
+        dedupeColumn.setType(26L);
+        JSONObject property = new JSONObject();
+        property.put("double_link_column_id", "200");
+        property.put("source_column_id", "300");
+        property.put("dedupe", false);
+        dedupeColumn.setProperty(property.toJSONString());
+
+        NoteColumn sourceColumn = new NoteColumn();
+        sourceColumn.setId(300L);
+        sourceColumn.setType(1L);
+
+        NoteDwtableItem value10 = new NoteDwtableItem();
+        value10.setValue("苹果");
+        NoteDwtableItem value20 = new NoteDwtableItem();
+        value20.setValue("苹果");
+        NoteDwtableItem value30 = new NoteDwtableItem();
+        value30.setValue("梨");
+
+        when(noteColumnMapper.selectNoteColumnById(300L)).thenReturn(sourceColumn);
+        when(noteDwtableItemMapper.selectNoteDwtableItemByRecordAndColumn(any(NoteDwtableItem.class)))
+                .thenReturn(value10)
+                .thenReturn(value20)
+                .thenReturn(value30);
+
+        java.util.List<NoteRecordServiceImpl.LookupResult> results =
+                noteRecordService.resolveLookupValues(dedupeColumn, java.util.Arrays.asList("10", "20", "30"));
+
+        java.util.List<String> derivedRecordIds = results.stream()
+                .map(NoteRecordServiceImpl.LookupResult::getLinkRecordId)
+                .collect(java.util.stream.Collectors.toList());
+        java.util.List<String> derivedValues = results.stream()
+                .map(NoteRecordServiceImpl.LookupResult::getValue)
+                .collect(java.util.stream.Collectors.toList());
+
+        // 对齐不变量：长度一致
+        assertEquals(derivedRecordIds.size(), derivedValues.size());
+        // dedupe=false 时保留全部3条
+        assertEquals(3, derivedRecordIds.size());
+        // 索引对齐
+        assertEquals("10", derivedRecordIds.get(0));
+        assertEquals("苹果", derivedValues.get(0));
+        assertEquals("20", derivedRecordIds.get(1));
+        assertEquals("苹果", derivedValues.get(1));
+        assertEquals("30", derivedRecordIds.get(2));
+        assertEquals("梨", derivedValues.get(2));
+    }
 }
