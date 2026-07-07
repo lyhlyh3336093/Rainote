@@ -1220,118 +1220,125 @@ public class NoteRecordServiceImpl implements INoteRecordService
 
         for (NoteColumn setColumn : setColumns)
         {
-            JSONObject setProp = JSONObject.parseObject(setColumn.getProperty());
-            String columnAId = setProp.get("columnAId").toString();
-            String columnBId = setProp.get("columnBId").toString();
-            String calcType = setProp.get("calcType").toString();
-
-            if (!columnAId.equals(lookupColumnIdStr) && !columnBId.equals(lookupColumnIdStr))
+            try
             {
-                continue;
-            }
+                JSONObject setProp = JSONObject.parseObject(setColumn.getProperty());
+                String columnAId = setProp.get("columnAId").toString();
+                String columnBId = setProp.get("columnBId").toString();
+                String calcType = setProp.get("calcType").toString();
 
-            NoteColumn columnA = noteColumnMapper.selectNoteColumnById(Long.parseLong(columnAId));
-            NoteColumn columnB = noteColumnMapper.selectNoteColumnById(Long.parseLong(columnBId));
-            if (columnA == null || columnB == null)
-            {
-                continue;
-            }
-
-            NoteRecordVo queryRecord = new NoteRecordVo();
-            queryRecord.setDwtableId(lookupColumn.getDwtableId());
-            List<NoteRecord> records = noteRecordMapper.selectNoteRecordList(queryRecord);
-            log.info("[RECOMPUTE-SET-OP] start setColumnId={}, lookupColumnId={}, recordCount={}",
-                    setColumn.getId(), lookupColumn.getId(), records.size());
-
-            for (NoteRecord record : records)
-            {
-                try
+                if (!columnAId.equals(lookupColumnIdStr) && !columnBId.equals(lookupColumnIdStr))
                 {
-                    List<String> aRecordIds = new ArrayList<>();
-                    List<String> aValues = new ArrayList<>();
-                    if (!fetchColumnDataFromDB(columnA, record.getId(), aRecordIds, aValues))
-                    {
-                        continue;
-                    }
+                    continue;
+                }
 
-                    List<String> bRecordIds = new ArrayList<>();
-                    List<String> bValues = new ArrayList<>();
-                    if (!fetchColumnDataFromDB(columnB, record.getId(), bRecordIds, bValues))
-                    {
-                        continue;
-                    }
+                NoteColumn columnA = noteColumnMapper.selectNoteColumnById(Long.parseLong(columnAId));
+                NoteColumn columnB = noteColumnMapper.selectNoteColumnById(Long.parseLong(columnBId));
+                if (columnA == null || columnB == null)
+                {
+                    continue;
+                }
 
-                    Map<String, String> aMap = new LinkedHashMap<>();
-                    for (int i = 0; i < aRecordIds.size(); i++)
-                    {
-                        aMap.put(aRecordIds.get(i), i < aValues.size() ? aValues.get(i) : "");
-                    }
-                    Map<String, String> bMap = new LinkedHashMap<>();
-                    for (int i = 0; i < bRecordIds.size(); i++)
-                    {
-                        bMap.put(bRecordIds.get(i), i < bValues.size() ? bValues.get(i) : "");
-                    }
+                NoteRecordVo queryRecord = new NoteRecordVo();
+                queryRecord.setDwtableId(lookupColumn.getDwtableId());
+                List<NoteRecord> records = noteRecordMapper.selectNoteRecordList(queryRecord);
+                log.info("[RECOMPUTE-SET-OP] start setColumnId={}, lookupColumnId={}, recordCount={}",
+                        setColumn.getId(), lookupColumn.getId(), records.size());
 
-                    List<String> rRecordIds = new ArrayList<>();
-                    if ("disjunction".equals(calcType))
+                for (NoteRecord record : records)
+                {
+                    try
                     {
-                        rRecordIds = (List<String>) CollectionUtils.disjunction(aRecordIds, bRecordIds);
-                    }
-                    else if ("subtract".equals(calcType))
-                    {
-                        rRecordIds = (List<String>) CollectionUtils.subtract(aRecordIds, bRecordIds);
-                    }
-                    else if ("intersection".equals(calcType))
-                    {
-                        rRecordIds = (List<String>) CollectionUtils.intersection(aRecordIds, bRecordIds);
-                    }
-                    else if ("union".equals(calcType))
-                    {
-                        rRecordIds = (List<String>) CollectionUtils.union(aRecordIds, bRecordIds);
-                    }
-
-                    List<String> rValues = new ArrayList<>();
-                    for (String id : rRecordIds)
-                    {
-                        String value = aMap.get(id);
-                        if (value == null)
+                        List<String> aRecordIds = new ArrayList<>();
+                        List<String> aValues = new ArrayList<>();
+                        if (!fetchColumnDataFromDB(columnA, record.getId(), aRecordIds, aValues))
                         {
-                            value = bMap.get(id);
+                            continue;
                         }
-                        if (value == null)
-                        {
-                            value = "";
-                        }
-                        rValues.add(value);
-                    }
 
-                    NoteDwtableItem queryItem = new NoteDwtableItem();
-                    queryItem.setRecordId(record.getId());
-                    queryItem.setColumnId(setColumn.getId());
-                    NoteDwtableItem resultItem = noteDwtableItemMapper.selectNoteDwtableItemByRecordAndColumn(queryItem);
-                    if (resultItem == null)
-                    {
-                        resultItem = new NoteDwtableItem();
-                        resultItem.setRecordId(record.getId());
-                        resultItem.setColumnId(setColumn.getId());
-                        resultItem.setDwtId(lookupColumn.getDwtableId());
+                        List<String> bRecordIds = new ArrayList<>();
+                        List<String> bValues = new ArrayList<>();
+                        if (!fetchColumnDataFromDB(columnB, record.getId(), bRecordIds, bValues))
+                        {
+                            continue;
+                        }
+
+                        Map<String, String> aMap = new LinkedHashMap<>();
+                        for (int i = 0; i < aRecordIds.size(); i++)
+                        {
+                            aMap.put(aRecordIds.get(i), i < aValues.size() ? aValues.get(i) : "");
+                        }
+                        Map<String, String> bMap = new LinkedHashMap<>();
+                        for (int i = 0; i < bRecordIds.size(); i++)
+                        {
+                            bMap.put(bRecordIds.get(i), i < bValues.size() ? bValues.get(i) : "");
+                        }
+
+                        List<String> rRecordIds = new ArrayList<>();
+                        if ("disjunction".equals(calcType))
+                        {
+                            rRecordIds = (List<String>) CollectionUtils.disjunction(aRecordIds, bRecordIds);
+                        }
+                        else if ("subtract".equals(calcType))
+                        {
+                            rRecordIds = (List<String>) CollectionUtils.subtract(aRecordIds, bRecordIds);
+                        }
+                        else if ("intersection".equals(calcType))
+                        {
+                            rRecordIds = (List<String>) CollectionUtils.intersection(aRecordIds, bRecordIds);
+                        }
+                        else if ("union".equals(calcType))
+                        {
+                            rRecordIds = (List<String>) CollectionUtils.union(aRecordIds, bRecordIds);
+                        }
+
+                        List<String> rValues = new ArrayList<>();
+                        for (String id : rRecordIds)
+                        {
+                            String value = aMap.get(id);
+                            if (value == null)
+                            {
+                                value = bMap.get(id);
+                            }
+                            if (value == null)
+                            {
+                                value = "";
+                            }
+                            rValues.add(value);
+                        }
+
+                        NoteDwtableItem queryItem = new NoteDwtableItem();
+                        queryItem.setRecordId(record.getId());
+                        queryItem.setColumnId(setColumn.getId());
+                        NoteDwtableItem resultItem = noteDwtableItemMapper.selectNoteDwtableItemByRecordAndColumn(queryItem);
+                        if (resultItem == null)
+                        {
+                            resultItem = new NoteDwtableItem();
+                            resultItem.setRecordId(record.getId());
+                            resultItem.setColumnId(setColumn.getId());
+                            resultItem.setDwtId(lookupColumn.getDwtableId());
+                        }
+                        resultItem.setValue(rValues.toString().replace("[", "").replace("]", "").replaceAll(" ", ""));
+                        resultItem.setLinkRecordId(rRecordIds.toString().replace("[", "").replace("]", "").replaceAll(" ", ""));
+                        if (resultItem.getId() == null)
+                        {
+                            noteDwtableItemMapper.insertNoteDwtableItem(resultItem);
+                        }
+                        else
+                        {
+                            noteDwtableItemMapper.updateNoteDwtableItem(resultItem);
+                        }
                     }
-                    resultItem.setValue(rValues.toString().replace("[", "").replace("]", "").replaceAll(" ", ""));
-                    resultItem.setLinkRecordId(rRecordIds.toString().replace("[", "").replace("]", "").replaceAll(" ", ""));
-                    if (resultItem.getId() == null)
+                    catch (Exception e)
                     {
-                        noteDwtableItemMapper.insertNoteDwtableItem(resultItem);
-                    }
-                    else
-                    {
-                        noteDwtableItemMapper.updateNoteDwtableItem(resultItem);
+                        log.error("[RECOMPUTE-SET-OP] 重算失败 setColumnId={}, recordId={}",
+                                setColumn.getId(), record.getId(), e);
                     }
                 }
-                catch (Exception e)
-                {
-                    log.error("[RECOMPUTE-SET-OP] 重算失败 setColumnId={}, recordId={}",
-                            setColumn.getId(), record.getId(), e);
-                }
+            }
+            catch (Exception e)
+            {
+                log.error("[RECOMPUTE-SET-OP] setColumn处理失败 setColumnId={}", setColumn.getId(), e);
             }
             log.info("[RECOMPUTE-SET-OP] done setColumnId={}", setColumn.getId());
         }

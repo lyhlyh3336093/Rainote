@@ -409,7 +409,16 @@ public class NoteColumnServiceImpl implements INoteColumnService
             return 0;
         }
 
-        JSONObject prop = JSONObject.parseObject(column.getProperty());
+        JSONObject prop;
+        try
+        {
+            prop = JSONObject.parseObject(column.getProperty());
+        }
+        catch (Exception e)
+        {
+            // property非合法JSON，无法解析
+            return 0;
+        }
         if (prop == null)
         {
             return 0;

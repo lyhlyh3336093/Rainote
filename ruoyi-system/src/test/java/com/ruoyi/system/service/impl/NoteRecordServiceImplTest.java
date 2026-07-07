@@ -13,6 +13,7 @@ import com.ruoyi.system.mapper.NoteRecordMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -1464,5 +1465,269 @@ public class NoteRecordServiceImplTest
         assertEquals(0, total);
         verify(noteRecordMapper, never()).selectNoteRecordList(any());
         verify(noteRecordMapper, never()).updateNoteRecord(any());
+    }
+
+    // ============ recomputeSetOperationsForLookup ============
+
+    /**
+     * 场景1（happy）：setColumn 引用 lookup 列，重算后更新结果item
+     * columnA=lookup列(type=26, dedupe=true, linkIds=[10,20], source值均为"苹果"→去重为[10])
+     * columnB=type=21列(linkIds=[20,30], values=[梨,香蕉])
+     * union([10],[20,30])=[10,20,30] → values=[苹果,梨,香蕉]
+     */
+    @Test
+    void testRecomputeSetOperationsForLookup_updatesResultItem()
+    {
+        NoteColumn lookupColumn = new NoteColumn();
+        lookupColumn.setId(100L);
+        lookupColumn.setType(26L);
+        lookupColumn.setDwtableId(1L);
+        JSONObject lookupProp = new JSONObject();
+        lookupProp.put("double_link_column_id", "200");
+        lookupProp.put("source_column_id", "300");
+        lookupProp.put("dedupe", true);
+        lookupColumn.setProperty(lookupProp.toJSONString());
+
+        NoteColumn setColumn = new NoteColumn();
+        setColumn.setId(500L);
+        JSONObject setProp = new JSONObject();
+        setProp.put("columnAId", "100");
+        setProp.put("columnBId", "400");
+        setProp.put("calcType", "union");
+        setColumn.setProperty(setProp.toJSONString());
+
+        NoteColumn columnB = new NoteColumn();
+        columnB.setId(400L);
+        columnB.setType(21L);
+
+        NoteColumn sourceColumn = new NoteColumn();
+        sourceColumn.setId(300L);
+        sourceColumn.setType(1L);
+
+        when(noteColumnMapper.selectSetColumnByDwtId(1L)).thenReturn(Collections.singletonList(setColumn));
+        when(noteColumnMapper.selectNoteColumnById(100L)).thenReturn(lookupColumn);
+        when(noteColumnMapper.selectNoteColumnById(400L)).thenReturn(columnB);
+        when(noteColumnMapper.selectNoteColumnById(300L)).thenReturn(sourceColumn);
+
+        NoteRecord r1 = new NoteRecord();
+        r1.setId(1L);
+        when(noteRecordMapper.selectNoteRecordList(any())).thenReturn(Collections.singletonList(r1));
+
+        when(noteDwtableItemMapper.selectNoteDwtableItemByRecordAndColumn(any(NoteDwtableItem.class)))
+                .thenAnswer(invocation -> {
+                    NoteDwtableItem query = invocation.getArgument(0);
+                    if (query.getLinkColumnId() != null && query.getLinkColumnId() == 200L) {
+                        NoteDwtableItem item = new NoteDwtableItem();
+                        item.setLinkRecordId("10,20");
+                        return item;
+                    }
+                    if (query.getColumnId() != null && query.getColumnId() == 300L) {
+                        NoteDwtableItem item = new NoteDwtableItem();
+                        item.setValue("苹果");
+                        return item;
+                    }
+                    if (query.getColumnId() != null && query.getColumnId() == 400L) {
+                        NoteDwtableItem item = new NoteDwtableItem();
+                        item.setLinkRecordId("20,30");
+                        item.setValue("梨,香蕉");
+                        return item;
+                    }
+                    if (query.getColumnId() != null && query.getColumnId() == 500L) {
+                        NoteDwtableItem item = new NoteDwtableItem();
+                        item.setId(900L);
+                        return item;
+                    }
+                    return null;
+                });
+
+        noteRecordService.recomputeSetOperationsForLookup(lookupColumn);
+
+        ArgumentCaptor<NoteDwtableItem> captor = ArgumentCaptor.forClass(NoteDwtableItem.class);
+        verify(noteDwtableItemMapper).updateNoteDwtableItem(captor.capture());
+        // union 不保证顺序，验证值集合
+        java.util.List<String> values = java.util.Arrays.asList(captor.getValue().getValue().split(","));
+        org.junit.jupiter.api.Assertions.assertTrue(values.containsAll(java.util.Arrays.asList("苹果", "梨", "香蕉")));
+        java.util.List<String> ids = java.util.Arrays.asList(captor.getValue().getLinkRecordId().split(","));
+        org.junit.jupiter.api.Assertions.assertTrue(ids.containsAll(java.util.Arrays.asList("10", "20", "30")));
+    }
+
+    /**
+     * 场景2（no-op）：setColumn 的 columnAId/columnBId 都不等于 lookup 列id → 不查记录不更新
+     */
+    @Test
+    void testRecomputeSetOperationsForLookup_noSetColumnReferencesLookup_noOp()
+    {
+        NoteColumn lookupColumn = new NoteColumn();
+        lookupColumn.setId(100L);
+        lookupColumn.setType(26L);
+        lookupColumn.setDwtableId(1L);
+        lookupColumn.setProperty("{\"double_link_column_id\":\"200\",\"source_column_id\":\"300\"}");
+
+        NoteColumn setColumn = new NoteColumn();
+        setColumn.setId(500L);
+        setColumn.setProperty("{\"columnAId\":\"600\",\"columnBId\":\"700\",\"calcType\":\"union\"}");
+
+        when(noteColumnMapper.selectSetColumnByDwtId(1L)).thenReturn(Collections.singletonList(setColumn));
+
+        noteRecordService.recomputeSetOperationsForLookup(lookupColumn);
+
+        verify(noteRecordMapper, never()).selectNoteRecordList(any());
+        verify(noteDwtableItemMapper, never()).updateNoteDwtableItem(any(NoteDwtableItem.class));
+        verify(noteDwtableItemMapper, never()).insertNoteDwtableItem(any(NoteDwtableItem.class));
+    }
+
+    /**
+     * 场景3（修复验证）：一个 setColumn property 非合法JSON，另一个正常 → 后者仍被处理
+     */
+    @Test
+    void testRecomputeSetOperationsForLookup_malformedSetColumnProperty_continuesOthers()
+    {
+        NoteColumn lookupColumn = new NoteColumn();
+        lookupColumn.setId(100L);
+        lookupColumn.setType(26L);
+        lookupColumn.setDwtableId(1L);
+        JSONObject lookupProp = new JSONObject();
+        lookupProp.put("double_link_column_id", "200");
+        lookupProp.put("source_column_id", "300");
+        lookupProp.put("dedupe", true);
+        lookupColumn.setProperty(lookupProp.toJSONString());
+
+        NoteColumn badSetColumn = new NoteColumn();
+        badSetColumn.setId(501L);
+        badSetColumn.setProperty("not-a-json");
+
+        NoteColumn goodSetColumn = new NoteColumn();
+        goodSetColumn.setId(500L);
+        JSONObject goodProp = new JSONObject();
+        goodProp.put("columnAId", "100");
+        goodProp.put("columnBId", "400");
+        goodProp.put("calcType", "union");
+        goodSetColumn.setProperty(goodProp.toJSONString());
+
+        NoteColumn columnB = new NoteColumn();
+        columnB.setId(400L);
+        columnB.setType(21L);
+
+        NoteColumn sourceColumn = new NoteColumn();
+        sourceColumn.setId(300L);
+        sourceColumn.setType(1L);
+
+        when(noteColumnMapper.selectSetColumnByDwtId(1L)).thenReturn(Arrays.asList(badSetColumn, goodSetColumn));
+        when(noteColumnMapper.selectNoteColumnById(100L)).thenReturn(lookupColumn);
+        when(noteColumnMapper.selectNoteColumnById(400L)).thenReturn(columnB);
+        when(noteColumnMapper.selectNoteColumnById(300L)).thenReturn(sourceColumn);
+
+        NoteRecord r1 = new NoteRecord();
+        r1.setId(1L);
+        when(noteRecordMapper.selectNoteRecordList(any())).thenReturn(Collections.singletonList(r1));
+
+        when(noteDwtableItemMapper.selectNoteDwtableItemByRecordAndColumn(any(NoteDwtableItem.class)))
+                .thenAnswer(invocation -> {
+                    NoteDwtableItem query = invocation.getArgument(0);
+                    if (query.getLinkColumnId() != null && query.getLinkColumnId() == 200L) {
+                        NoteDwtableItem item = new NoteDwtableItem();
+                        item.setLinkRecordId("10,20");
+                        return item;
+                    }
+                    if (query.getColumnId() != null && query.getColumnId() == 300L) {
+                        NoteDwtableItem item = new NoteDwtableItem();
+                        item.setValue("苹果");
+                        return item;
+                    }
+                    if (query.getColumnId() != null && query.getColumnId() == 400L) {
+                        NoteDwtableItem item = new NoteDwtableItem();
+                        item.setLinkRecordId("20,30");
+                        item.setValue("梨,香蕉");
+                        return item;
+                    }
+                    if (query.getColumnId() != null && query.getColumnId() == 500L) {
+                        NoteDwtableItem item = new NoteDwtableItem();
+                        item.setId(900L);
+                        return item;
+                    }
+                    return null;
+                });
+
+        noteRecordService.recomputeSetOperationsForLookup(lookupColumn);
+
+        // badSetColumn 异常被捕获，goodSetColumn 正常处理 → update 被调用1次
+        verify(noteDwtableItemMapper, times(1)).updateNoteDwtableItem(any(NoteDwtableItem.class));
+    }
+
+    /**
+     * 场景4（per-record 容错）：第2条记录查询抛异常，第1条仍被处理
+     */
+    @Test
+    void testRecomputeSetOperationsForLookup_singleRecordFailure_continues()
+    {
+        NoteColumn lookupColumn = new NoteColumn();
+        lookupColumn.setId(100L);
+        lookupColumn.setType(26L);
+        lookupColumn.setDwtableId(1L);
+        JSONObject lookupProp = new JSONObject();
+        lookupProp.put("double_link_column_id", "200");
+        lookupProp.put("source_column_id", "300");
+        lookupProp.put("dedupe", true);
+        lookupColumn.setProperty(lookupProp.toJSONString());
+
+        NoteColumn setColumn = new NoteColumn();
+        setColumn.setId(500L);
+        JSONObject setProp = new JSONObject();
+        setProp.put("columnAId", "100");
+        setProp.put("columnBId", "400");
+        setProp.put("calcType", "union");
+        setColumn.setProperty(setProp.toJSONString());
+
+        NoteColumn columnB = new NoteColumn();
+        columnB.setId(400L);
+        columnB.setType(21L);
+
+        NoteColumn sourceColumn = new NoteColumn();
+        sourceColumn.setId(300L);
+        sourceColumn.setType(1L);
+
+        when(noteColumnMapper.selectSetColumnByDwtId(1L)).thenReturn(Collections.singletonList(setColumn));
+        when(noteColumnMapper.selectNoteColumnById(100L)).thenReturn(lookupColumn);
+        when(noteColumnMapper.selectNoteColumnById(400L)).thenReturn(columnB);
+        when(noteColumnMapper.selectNoteColumnById(300L)).thenReturn(sourceColumn);
+
+        NoteRecord r1 = new NoteRecord(); r1.setId(1L);
+        NoteRecord r2 = new NoteRecord(); r2.setId(2L);
+        when(noteRecordMapper.selectNoteRecordList(any())).thenReturn(Arrays.asList(r1, r2));
+
+        when(noteDwtableItemMapper.selectNoteDwtableItemByRecordAndColumn(any(NoteDwtableItem.class)))
+                .thenAnswer(invocation -> {
+                    NoteDwtableItem query = invocation.getArgument(0);
+                    if (query.getRecordId() != null && query.getRecordId() == 2L) {
+                        throw new RuntimeException("模拟第2条记录异常");
+                    }
+                    if (query.getLinkColumnId() != null && query.getLinkColumnId() == 200L) {
+                        NoteDwtableItem item = new NoteDwtableItem();
+                        item.setLinkRecordId("10,20");
+                        return item;
+                    }
+                    if (query.getColumnId() != null && query.getColumnId() == 300L) {
+                        NoteDwtableItem item = new NoteDwtableItem();
+                        item.setValue("苹果");
+                        return item;
+                    }
+                    if (query.getColumnId() != null && query.getColumnId() == 400L) {
+                        NoteDwtableItem item = new NoteDwtableItem();
+                        item.setLinkRecordId("20,30");
+                        item.setValue("梨,香蕉");
+                        return item;
+                    }
+                    if (query.getColumnId() != null && query.getColumnId() == 500L) {
+                        NoteDwtableItem item = new NoteDwtableItem();
+                        item.setId(900L);
+                        return item;
+                    }
+                    return null;
+                });
+
+        noteRecordService.recomputeSetOperationsForLookup(lookupColumn);
+
+        // 第1条成功 → update 被调用1次；第2条失败被吞
+        verify(noteDwtableItemMapper, times(1)).updateNoteDwtableItem(any(NoteDwtableItem.class));
     }
 }

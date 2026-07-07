@@ -1,5 +1,6 @@
 package com.ruoyi.system.service.impl;
 
+import com.alibaba.fastjson2.JSONObject;
 import com.ruoyi.common.utils.myHashMap;
 import com.ruoyi.system.domain.NoteColumn;
 import com.ruoyi.system.domain.NoteDwtable;
@@ -611,5 +612,152 @@ public class NoteColumnServiceImplTest
         // 表1被重算一次（col1 + col3 去重），表2被重算一次
         verify(noteRecordService, times(1)).recomputeRecordNamesForTable(1L);
         verify(noteRecordService, times(1)).recomputeRecordNamesForTable(2L);
+    }
+
+    // ============ deduplicate 接口 ============
+
+    /**
+     * dedupe 从 false → true：切换开关并触发两个重算
+     */
+    @Test
+    void testDeduplicate_dedupeFalseToTrue_togglesAndRecomputes()
+    {
+        NoteColumn column = new NoteColumn();
+        column.setId(100L);
+        column.setType(26L);
+        column.setDwtableId(1L);
+        column.setProperty("{\"dedupe\":false,\"double_link_column_id\":\"200\",\"source_column_id\":\"300\"}");
+        when(noteColumnMapper.selectNoteColumnById(100L)).thenReturn(column);
+
+        int result = noteColumnService.deduplicate(100L);
+
+        assertEquals(1, result);
+        ArgumentCaptor<NoteColumn> captor = ArgumentCaptor.forClass(NoteColumn.class);
+        verify(noteColumnMapper).updateNoteColumn(captor.capture());
+        JSONObject updatedProp = JSONObject.parseObject(captor.getValue().getProperty());
+        assertTrue(updatedProp.getBoolean("dedupe"));
+        verify(noteRecordService).recomputeLookupColumnValues(any(NoteColumn.class));
+        verify(noteRecordService).recomputeSetOperationsForLookup(any(NoteColumn.class));
+    }
+
+    /**
+     * dedupe 从 true → false
+     */
+    @Test
+    void testDeduplicate_dedupeTrueToFalse_togglesAndRecomputes()
+    {
+        NoteColumn column = new NoteColumn();
+        column.setId(100L);
+        column.setType(26L);
+        column.setDwtableId(1L);
+        column.setProperty("{\"dedupe\":true,\"double_link_column_id\":\"200\",\"source_column_id\":\"300\"}");
+        when(noteColumnMapper.selectNoteColumnById(100L)).thenReturn(column);
+
+        int result = noteColumnService.deduplicate(100L);
+
+        assertEquals(1, result);
+        ArgumentCaptor<NoteColumn> captor = ArgumentCaptor.forClass(NoteColumn.class);
+        verify(noteColumnMapper).updateNoteColumn(captor.capture());
+        JSONObject updatedProp = JSONObject.parseObject(captor.getValue().getProperty());
+        assertFalse(updatedProp.getBoolean("dedupe"));
+        verify(noteRecordService).recomputeLookupColumnValues(any(NoteColumn.class));
+        verify(noteRecordService).recomputeSetOperationsForLookup(any(NoteColumn.class));
+    }
+
+    /**
+     * dedupe 字段缺失，默认 false → true
+     */
+    @Test
+    void testDeduplicate_dedupeMissing_defaultsFalseToTrue()
+    {
+        NoteColumn column = new NoteColumn();
+        column.setId(100L);
+        column.setType(26L);
+        column.setDwtableId(1L);
+        column.setProperty("{\"double_link_column_id\":\"200\",\"source_column_id\":\"300\"}");
+        when(noteColumnMapper.selectNoteColumnById(100L)).thenReturn(column);
+
+        int result = noteColumnService.deduplicate(100L);
+
+        assertEquals(1, result);
+        ArgumentCaptor<NoteColumn> captor = ArgumentCaptor.forClass(NoteColumn.class);
+        verify(noteColumnMapper).updateNoteColumn(captor.capture());
+        JSONObject updatedProp = JSONObject.parseObject(captor.getValue().getProperty());
+        assertTrue(updatedProp.getBoolean("dedupe"));
+        verify(noteRecordService).recomputeLookupColumnValues(any(NoteColumn.class));
+        verify(noteRecordService).recomputeSetOperationsForLookup(any(NoteColumn.class));
+    }
+
+    /**
+     * 列不存在 → 返回0，不触发重算
+     */
+    @Test
+    void testDeduplicate_columnNotFound_returnsZero()
+    {
+        when(noteColumnMapper.selectNoteColumnById(999L)).thenReturn(null);
+
+        int result = noteColumnService.deduplicate(999L);
+
+        assertEquals(0, result);
+        verify(noteColumnMapper, never()).updateNoteColumn(any(NoteColumn.class));
+        verify(noteRecordService, never()).recomputeLookupColumnValues(any(NoteColumn.class));
+        verify(noteRecordService, never()).recomputeSetOperationsForLookup(any(NoteColumn.class));
+    }
+
+    /**
+     * 非 type=26 → 返回0
+     */
+    @Test
+    void testDeduplicate_notType26_returnsZero()
+    {
+        NoteColumn column = new NoteColumn();
+        column.setId(100L);
+        column.setType(21L);
+        column.setProperty("{\"dedupe\":false}");
+        when(noteColumnMapper.selectNoteColumnById(100L)).thenReturn(column);
+
+        int result = noteColumnService.deduplicate(100L);
+
+        assertEquals(0, result);
+        verify(noteColumnMapper, never()).updateNoteColumn(any(NoteColumn.class));
+        verify(noteRecordService, never()).recomputeLookupColumnValues(any(NoteColumn.class));
+    }
+
+    /**
+     * property 为 null → 返回0
+     */
+    @Test
+    void testDeduplicate_nullProperty_returnsZero()
+    {
+        NoteColumn column = new NoteColumn();
+        column.setId(100L);
+        column.setType(26L);
+        column.setProperty(null);
+        when(noteColumnMapper.selectNoteColumnById(100L)).thenReturn(column);
+
+        int result = noteColumnService.deduplicate(100L);
+
+        assertEquals(0, result);
+        verify(noteColumnMapper, never()).updateNoteColumn(any(NoteColumn.class));
+        verify(noteRecordService, never()).recomputeLookupColumnValues(any(NoteColumn.class));
+    }
+
+    /**
+     * property 非合法JSON → 返回0，不抛异常（修复后）
+     */
+    @Test
+    void testDeduplicate_malformedPropertyJson_returnsZero()
+    {
+        NoteColumn column = new NoteColumn();
+        column.setId(100L);
+        column.setType(26L);
+        column.setProperty("not-a-json");
+        when(noteColumnMapper.selectNoteColumnById(100L)).thenReturn(column);
+
+        int result = noteColumnService.deduplicate(100L);
+
+        assertEquals(0, result);
+        verify(noteColumnMapper, never()).updateNoteColumn(any(NoteColumn.class));
+        verify(noteRecordService, never()).recomputeLookupColumnValues(any(NoteColumn.class));
     }
 }
