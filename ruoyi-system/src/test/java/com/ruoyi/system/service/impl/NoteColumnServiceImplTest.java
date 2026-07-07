@@ -436,4 +436,36 @@ public class NoteColumnServiceImplTest
 
         verify(noteRecordService, never()).recomputeLookupColumnValues(any(NoteColumn.class));
     }
+
+    /**
+     * 场景11：property非null但非合法JSON（parseObject返回null），不应NPE，不触发重算
+     */
+    @Test
+    void testUpdateNoteColumn_type26_malformedPropertyJson_noNpe_noRecompute()
+    {
+        NoteColumn originColumn = new NoteColumn();
+        originColumn.setId(100L);
+        originColumn.setType(26L);
+        originColumn.setDwtableId(1L);
+        originColumn.setProperty("not-a-json");
+
+        when(noteColumnMapper.selectNoteColumnById(100L)).thenReturn(originColumn);
+
+        NoteColumnVo vo = new NoteColumnVo();
+        vo.setId(100L);
+        vo.setName("lookup列");
+        vo.setType(26L);
+        vo.setDwtableId(1L);
+        vo.setIsShow(1L);
+        myHashMap<String, Object> property = new myHashMap<>();
+        property.put("dedupe", true);
+        property.put("double_link_column_id", "200");
+        property.put("source_column_id", "300");
+        vo.setProperty(property);
+
+        // 不应抛NPE，updateNoteColumn正常完成
+        noteColumnService.updateNoteColumn(vo);
+
+        verify(noteRecordService, never()).recomputeLookupColumnValues(any(NoteColumn.class));
+    }
 }

@@ -217,13 +217,23 @@ public class NoteColumnServiceImpl implements INoteColumnService
         if (originColumn.getType() == 26L && noteColumnvo.getType() == 26L
                 && originColumn.getProperty() != null && noteColumn.getProperty() != null)
         {
-            JSONObject oldProp = JSONObject.parseObject(originColumn.getProperty());
-            JSONObject newProp = JSONObject.parseObject(noteColumn.getProperty());
-            boolean oldDedupe = Boolean.TRUE.equals(oldProp.getBoolean("dedupe"));
-            boolean newDedupe = Boolean.TRUE.equals(newProp.getBoolean("dedupe"));
-            if (oldDedupe != newDedupe)
+            try
             {
-                noteRecordService.recomputeLookupColumnValues(noteColumn);
+                JSONObject oldProp = JSONObject.parseObject(originColumn.getProperty());
+                JSONObject newProp = JSONObject.parseObject(noteColumn.getProperty());
+                if (oldProp != null && newProp != null)
+                {
+                    boolean oldDedupe = Boolean.TRUE.equals(oldProp.getBoolean("dedupe"));
+                    boolean newDedupe = Boolean.TRUE.equals(newProp.getBoolean("dedupe"));
+                    if (oldDedupe != newDedupe)
+                    {
+                        noteRecordService.recomputeLookupColumnValues(noteColumn);
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                // property非合法JSON，跳过重算
             }
         }
 
