@@ -9,6 +9,7 @@ import com.ruoyi.system.mapper.NoteColumnMapper;
 import com.ruoyi.system.mapper.NoteDwtableItemMapper;
 import com.ruoyi.system.mapper.NoteDwtableMapper;
 import com.ruoyi.system.mapper.NoteRecordMapper;
+import com.ruoyi.system.service.INoteRecordService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -49,6 +50,9 @@ public class NoteColumnServiceImplTest
 
     @Mock
     private NoteRecordMapper noteRecordMapper;
+
+    @Mock
+    private INoteRecordService noteRecordService;
 
     @InjectMocks
     private NoteColumnServiceImpl noteColumnService;
@@ -255,5 +259,181 @@ public class NoteColumnServiceImplTest
         assertEquals(5L, inserted.get(0).getSort(), "主列sort应为当前表maxSort+1");
         // 第二次插入的是belink列
         assertEquals(8L, inserted.get(1).getSort(), "belink列sort应为被关联表maxSort+1");
+    }
+
+    /**
+     * 场景5（R6/AE3触发）：type=26 lookup列，dedupe从false变为true，应触发全量重算
+     */
+    @Test
+    void testUpdateNoteColumn_type26_dedupeFalseToTrue_triggersRecompute()
+    {
+        NoteColumn originColumn = new NoteColumn();
+        originColumn.setId(100L);
+        originColumn.setType(26L);
+        originColumn.setDwtableId(1L);
+        originColumn.setProperty("{\"dedupe\":false,\"double_link_column_id\":\"200\",\"source_column_id\":\"300\"}");
+
+        when(noteColumnMapper.selectNoteColumnById(100L)).thenReturn(originColumn);
+
+        NoteColumnVo vo = new NoteColumnVo();
+        vo.setId(100L);
+        vo.setName("lookup列");
+        vo.setType(26L);
+        vo.setDwtableId(1L);
+        vo.setIsShow(1L);
+        myHashMap<String, Object> property = new myHashMap<>();
+        property.put("dedupe", true);
+        property.put("double_link_column_id", "200");
+        property.put("source_column_id", "300");
+        vo.setProperty(property);
+
+        noteColumnService.updateNoteColumn(vo);
+
+        verify(noteRecordService).recomputeLookupColumnValues(any(NoteColumn.class));
+    }
+
+    /**
+     * 场景6（R6）：type=26 lookup列，dedupe从true变为false，应触发全量重算
+     */
+    @Test
+    void testUpdateNoteColumn_type26_dedupeTrueToFalse_triggersRecompute()
+    {
+        NoteColumn originColumn = new NoteColumn();
+        originColumn.setId(100L);
+        originColumn.setType(26L);
+        originColumn.setDwtableId(1L);
+        originColumn.setProperty("{\"dedupe\":true,\"double_link_column_id\":\"200\",\"source_column_id\":\"300\"}");
+
+        when(noteColumnMapper.selectNoteColumnById(100L)).thenReturn(originColumn);
+
+        NoteColumnVo vo = new NoteColumnVo();
+        vo.setId(100L);
+        vo.setName("lookup列");
+        vo.setType(26L);
+        vo.setDwtableId(1L);
+        vo.setIsShow(1L);
+        myHashMap<String, Object> property = new myHashMap<>();
+        property.put("dedupe", false);
+        property.put("double_link_column_id", "200");
+        property.put("source_column_id", "300");
+        vo.setProperty(property);
+
+        noteColumnService.updateNoteColumn(vo);
+
+        verify(noteRecordService).recomputeLookupColumnValues(any(NoteColumn.class));
+    }
+
+    /**
+     * 场景7（R6）：type=26 lookup列，dedupe未变化（true→true），不应触发重算
+     */
+    @Test
+    void testUpdateNoteColumn_type26_dedupeUnchanged_noRecompute()
+    {
+        NoteColumn originColumn = new NoteColumn();
+        originColumn.setId(100L);
+        originColumn.setType(26L);
+        originColumn.setDwtableId(1L);
+        originColumn.setProperty("{\"dedupe\":true,\"double_link_column_id\":\"200\",\"source_column_id\":\"300\"}");
+
+        when(noteColumnMapper.selectNoteColumnById(100L)).thenReturn(originColumn);
+
+        NoteColumnVo vo = new NoteColumnVo();
+        vo.setId(100L);
+        vo.setName("lookup列");
+        vo.setType(26L);
+        vo.setDwtableId(1L);
+        vo.setIsShow(1L);
+        myHashMap<String, Object> property = new myHashMap<>();
+        property.put("dedupe", true);
+        property.put("double_link_column_id", "200");
+        property.put("source_column_id", "300");
+        vo.setProperty(property);
+
+        noteColumnService.updateNoteColumn(vo);
+
+        verify(noteRecordService, never()).recomputeLookupColumnValues(any(NoteColumn.class));
+    }
+
+    /**
+     * 场景8（R6）：列类型非26（如type=1普通文本列），不应触发重算
+     */
+    @Test
+    void testUpdateNoteColumn_typeNot26_noRecompute()
+    {
+        NoteColumn originColumn = new NoteColumn();
+        originColumn.setId(50L);
+        originColumn.setType(1L);
+        originColumn.setDwtableId(1L);
+        originColumn.setProperty(null);
+
+        when(noteColumnMapper.selectNoteColumnById(50L)).thenReturn(originColumn);
+
+        NoteColumnVo vo = new NoteColumnVo();
+        vo.setId(50L);
+        vo.setName("文本列");
+        vo.setType(1L);
+        vo.setDwtableId(1L);
+        vo.setIsShow(1L);
+
+        noteColumnService.updateNoteColumn(vo);
+
+        verify(noteRecordService, never()).recomputeLookupColumnValues(any(NoteColumn.class));
+    }
+
+    /**
+     * 场景9（R2）：property中无dedupe字段（视为false），新property的dedupe=true，应触发重算
+     */
+    @Test
+    void testUpdateNoteColumn_type26_dedupeMissingToTrue_triggersRecompute()
+    {
+        NoteColumn originColumn = new NoteColumn();
+        originColumn.setId(100L);
+        originColumn.setType(26L);
+        originColumn.setDwtableId(1L);
+        originColumn.setProperty("{\"double_link_column_id\":\"200\",\"source_column_id\":\"300\"}");
+
+        when(noteColumnMapper.selectNoteColumnById(100L)).thenReturn(originColumn);
+
+        NoteColumnVo vo = new NoteColumnVo();
+        vo.setId(100L);
+        vo.setName("lookup列");
+        vo.setType(26L);
+        vo.setDwtableId(1L);
+        vo.setIsShow(1L);
+        myHashMap<String, Object> property = new myHashMap<>();
+        property.put("dedupe", true);
+        property.put("double_link_column_id", "200");
+        property.put("source_column_id", "300");
+        vo.setProperty(property);
+
+        noteColumnService.updateNoteColumn(vo);
+
+        verify(noteRecordService).recomputeLookupColumnValues(any(NoteColumn.class));
+    }
+
+    /**
+     * 场景10（R6）：originColumn的property为null，不应触发重算（避免NPE）
+     */
+    @Test
+    void testUpdateNoteColumn_type26_nullProperty_noRecompute()
+    {
+        NoteColumn originColumn = new NoteColumn();
+        originColumn.setId(100L);
+        originColumn.setType(26L);
+        originColumn.setDwtableId(1L);
+        originColumn.setProperty(null);
+
+        when(noteColumnMapper.selectNoteColumnById(100L)).thenReturn(originColumn);
+
+        NoteColumnVo vo = new NoteColumnVo();
+        vo.setId(100L);
+        vo.setName("lookup列");
+        vo.setType(26L);
+        vo.setDwtableId(1L);
+        vo.setIsShow(1L);
+
+        noteColumnService.updateNoteColumn(vo);
+
+        verify(noteRecordService, never()).recomputeLookupColumnValues(any(NoteColumn.class));
     }
 }

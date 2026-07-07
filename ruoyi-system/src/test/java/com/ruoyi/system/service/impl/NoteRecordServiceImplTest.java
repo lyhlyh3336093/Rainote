@@ -3,8 +3,10 @@ package com.ruoyi.system.service.impl;
 import com.alibaba.fastjson2.JSONObject;
 import com.ruoyi.system.domain.NoteColumn;
 import com.ruoyi.system.domain.NoteDwtableItem;
+import com.ruoyi.system.domain.NoteRecord;
 import com.ruoyi.system.mapper.NoteColumnMapper;
 import com.ruoyi.system.mapper.NoteDwtableItemMapper;
+import com.ruoyi.system.mapper.NoteRecordMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -14,8 +16,14 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
+import java.util.Arrays;
+import java.util.Collections;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -32,6 +40,9 @@ public class NoteRecordServiceImplTest
 
     @Mock
     private NoteDwtableItemMapper noteDwtableItemMapper;
+
+    @Mock
+    private NoteRecordMapper noteRecordMapper;
 
     @InjectMocks
     private NoteRecordServiceImpl noteRecordService;
@@ -712,5 +723,204 @@ public class NoteRecordServiceImplTest
         assertEquals("苹果", derivedValues.get(1));
         assertEquals("30", derivedRecordIds.get(2));
         assertEquals("梨", derivedValues.get(2));
+    }
+
+    /**
+     * 场景17（AE3/R7）：recomputeLookupColumnValues遍历5条记录，全部更新为去重值。
+     * 每条记录的doubleLink关联10、20两条记录，值均为"苹果/苹果"，dedupe=true后应更新为"苹果"。
+     * 每条记录已有lookup item，验证updateNoteDwtableItem被调用5次，insert不被调用。
+     */
+    @Test
+    void testRecomputeLookupColumnValues_updatesAllRecords()
+    {
+        NoteColumn dedupeColumn = new NoteColumn();
+        dedupeColumn.setId(100L);
+        dedupeColumn.setType(26L);
+        dedupeColumn.setDwtableId(1L);
+        JSONObject property = new JSONObject();
+        property.put("double_link_column_id", "200");
+        property.put("source_column_id", "300");
+        property.put("dedupe", true);
+        dedupeColumn.setProperty(property.toJSONString());
+
+        NoteColumn sourceColumn = new NoteColumn();
+        sourceColumn.setId(300L);
+        sourceColumn.setType(1L);
+
+        when(noteColumnMapper.selectNoteColumnById(300L)).thenReturn(sourceColumn);
+
+        // 5条记录
+        NoteRecord r1 = new NoteRecord(); r1.setId(1L);
+        NoteRecord r2 = new NoteRecord(); r2.setId(2L);
+        NoteRecord r3 = new NoteRecord(); r3.setId(3L);
+        NoteRecord r4 = new NoteRecord(); r4.setId(4L);
+        NoteRecord r5 = new NoteRecord(); r5.setId(5L);
+        when(noteRecordMapper.selectNoteRecordList(any())).thenReturn(Arrays.asList(r1, r2, r3, r4, r5));
+
+        // 每条记录的doubleLinkItem关联10、20，值均为"苹果/苹果"
+        NoteDwtableItem doubleLinkItem = new NoteDwtableItem();
+        doubleLinkItem.setLinkRecordId("10,20");
+
+        NoteDwtableItem valueItem = new NoteDwtableItem();
+        valueItem.setValue("苹果");
+
+        NoteDwtableItem existingItem = new NoteDwtableItem();
+        existingItem.setId(1000L);
+
+        // 区分3种查询：linkColumnId != null → doubleLink；columnId=100 → existing item；columnId=300 → value
+        when(noteDwtableItemMapper.selectNoteDwtableItemByRecordAndColumn(any(NoteDwtableItem.class)))
+                .thenAnswer(invocation -> {
+                    NoteDwtableItem query = invocation.getArgument(0);
+                    if (query.getLinkColumnId() != null) {
+                        return doubleLinkItem;
+                    }
+                    if (query.getColumnId() != null && query.getColumnId() == 100L) {
+                        return existingItem;
+                    }
+                    // value query
+                    return valueItem;
+                });
+
+        noteRecordService.recomputeLookupColumnValues(dedupeColumn);
+
+        // 5条记录都有existing item，应全部update，不insert
+        verify(noteDwtableItemMapper, times(5)).updateNoteDwtableItem(any(NoteDwtableItem.class));
+        verify(noteDwtableItemMapper, never()).insertNoteDwtableItem(any(NoteDwtableItem.class));
+    }
+
+    /**
+     * 场景18（R7）：重算时某记录无existing lookup item，应新建item并写入value
+     */
+    @Test
+    void testRecomputeLookupColumnValues_noItem_createsNewItem()
+    {
+        NoteColumn dedupeColumn = new NoteColumn();
+        dedupeColumn.setId(100L);
+        dedupeColumn.setType(26L);
+        dedupeColumn.setDwtableId(1L);
+        JSONObject property = new JSONObject();
+        property.put("double_link_column_id", "200");
+        property.put("source_column_id", "300");
+        property.put("dedupe", true);
+        dedupeColumn.setProperty(property.toJSONString());
+
+        NoteColumn sourceColumn = new NoteColumn();
+        sourceColumn.setId(300L);
+        sourceColumn.setType(1L);
+        when(noteColumnMapper.selectNoteColumnById(300L)).thenReturn(sourceColumn);
+
+        NoteRecord r1 = new NoteRecord(); r1.setId(1L);
+        when(noteRecordMapper.selectNoteRecordList(any())).thenReturn(Collections.singletonList(r1));
+
+        NoteDwtableItem doubleLinkItem = new NoteDwtableItem();
+        doubleLinkItem.setLinkRecordId("10,20");
+
+        NoteDwtableItem valueItem = new NoteDwtableItem();
+        valueItem.setValue("苹果");
+
+        when(noteDwtableItemMapper.selectNoteDwtableItemByRecordAndColumn(any(NoteDwtableItem.class)))
+                .thenAnswer(invocation -> {
+                    NoteDwtableItem query = invocation.getArgument(0);
+                    if (query.getLinkColumnId() != null) {
+                        return doubleLinkItem;
+                    }
+                    if (query.getColumnId() != null && query.getColumnId() == 100L) {
+                        // existing item不存在
+                        return null;
+                    }
+                    return valueItem;
+                });
+
+        noteRecordService.recomputeLookupColumnValues(dedupeColumn);
+
+        // 应insert新item，不update
+        verify(noteDwtableItemMapper).insertNoteDwtableItem(any(NoteDwtableItem.class));
+        verify(noteDwtableItemMapper, never()).updateNoteDwtableItem(any(NoteDwtableItem.class));
+    }
+
+    /**
+     * 场景19（R8）：第3条记录重算时抛异常，第4、5条仍正常处理，不中断整体流程
+     */
+    @Test
+    void testRecomputeLookupColumnValues_singleFailure_continuesProcessing()
+    {
+        NoteColumn dedupeColumn = new NoteColumn();
+        dedupeColumn.setId(100L);
+        dedupeColumn.setType(26L);
+        dedupeColumn.setDwtableId(1L);
+        JSONObject property = new JSONObject();
+        property.put("double_link_column_id", "200");
+        property.put("source_column_id", "300");
+        property.put("dedupe", true);
+        dedupeColumn.setProperty(property.toJSONString());
+
+        NoteColumn sourceColumn = new NoteColumn();
+        sourceColumn.setId(300L);
+        sourceColumn.setType(1L);
+        when(noteColumnMapper.selectNoteColumnById(300L)).thenReturn(sourceColumn);
+
+        NoteRecord r1 = new NoteRecord(); r1.setId(1L);
+        NoteRecord r2 = new NoteRecord(); r2.setId(2L);
+        NoteRecord r3 = new NoteRecord(); r3.setId(3L);
+        NoteRecord r4 = new NoteRecord(); r4.setId(4L);
+        NoteRecord r5 = new NoteRecord(); r5.setId(5L);
+        when(noteRecordMapper.selectNoteRecordList(any())).thenReturn(Arrays.asList(r1, r2, r3, r4, r5));
+
+        NoteDwtableItem doubleLinkItem = new NoteDwtableItem();
+        doubleLinkItem.setLinkRecordId("10,20");
+
+        NoteDwtableItem valueItem = new NoteDwtableItem();
+        valueItem.setValue("苹果");
+
+        NoteDwtableItem existingItem = new NoteDwtableItem();
+        existingItem.setId(1000L);
+
+        // 第3条记录（recordId=3）的所有查询都抛异常
+        when(noteDwtableItemMapper.selectNoteDwtableItemByRecordAndColumn(any(NoteDwtableItem.class)))
+                .thenAnswer(invocation -> {
+                    NoteDwtableItem query = invocation.getArgument(0);
+                    Long recordId = query.getRecordId();
+                    if (recordId != null && recordId == 3L) {
+                        throw new RuntimeException("模拟第3条记录异常");
+                    }
+                    if (query.getLinkColumnId() != null) {
+                        return doubleLinkItem;
+                    }
+                    if (query.getColumnId() != null && query.getColumnId() == 100L) {
+                        return existingItem;
+                    }
+                    return valueItem;
+                });
+
+        // 不应抛异常
+        noteRecordService.recomputeLookupColumnValues(dedupeColumn);
+
+        // 第3条失败，其余4条成功update（4次updateNoteDwtableItem）
+        verify(noteDwtableItemMapper, times(4)).updateNoteDwtableItem(any(NoteDwtableItem.class));
+        verify(noteDwtableItemMapper, never()).insertNoteDwtableItem(any(NoteDwtableItem.class));
+    }
+
+    /**
+     * 场景20（R7）：表中无记录时，recomputeLookupColumnValues不应抛异常，不做任何item操作
+     */
+    @Test
+    void testRecomputeLookupColumnValues_emptyRecords_noOp()
+    {
+        NoteColumn dedupeColumn = new NoteColumn();
+        dedupeColumn.setId(100L);
+        dedupeColumn.setType(26L);
+        dedupeColumn.setDwtableId(1L);
+        JSONObject property = new JSONObject();
+        property.put("double_link_column_id", "200");
+        property.put("source_column_id", "300");
+        property.put("dedupe", true);
+        dedupeColumn.setProperty(property.toJSONString());
+
+        when(noteRecordMapper.selectNoteRecordList(any())).thenReturn(Collections.emptyList());
+
+        noteRecordService.recomputeLookupColumnValues(dedupeColumn);
+
+        verify(noteDwtableItemMapper, never()).updateNoteDwtableItem(any(NoteDwtableItem.class));
+        verify(noteDwtableItemMapper, never()).insertNoteDwtableItem(any(NoteDwtableItem.class));
     }
 }

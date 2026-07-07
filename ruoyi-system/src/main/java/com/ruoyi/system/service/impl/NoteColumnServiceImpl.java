@@ -20,6 +20,7 @@ import org.springframework.stereotype.Service;
 import com.ruoyi.system.mapper.NoteColumnMapper;
 import com.ruoyi.system.domain.NoteColumn;
 import com.ruoyi.system.service.INoteColumnService;
+import com.ruoyi.system.service.INoteRecordService;
 
 /**
  * 列信息Service业务层处理
@@ -41,6 +42,9 @@ public class NoteColumnServiceImpl implements INoteColumnService
 
     @Autowired
     private NoteRecordMapper noteRecordMapper;
+
+    @Autowired
+    private INoteRecordService noteRecordService;
 
     /**
      * 查询列信息
@@ -208,6 +212,20 @@ public class NoteColumnServiceImpl implements INoteColumnService
         noteColumn.setType(noteColumnvo.getType());
         noteColumn.setDwtableId(noteColumnvo.getDwtableId());
         noteColumnMapper.updateNoteColumn(noteColumn);
+
+        //----lookup列dedupe开关变化时触发全量重算----
+        if (originColumn.getType() == 26L && noteColumnvo.getType() == 26L
+                && originColumn.getProperty() != null && noteColumn.getProperty() != null)
+        {
+            JSONObject oldProp = JSONObject.parseObject(originColumn.getProperty());
+            JSONObject newProp = JSONObject.parseObject(noteColumn.getProperty());
+            boolean oldDedupe = Boolean.TRUE.equals(oldProp.getBoolean("dedupe"));
+            boolean newDedupe = Boolean.TRUE.equals(newProp.getBoolean("dedupe"));
+            if (oldDedupe != newDedupe)
+            {
+                noteRecordService.recomputeLookupColumnValues(noteColumn);
+            }
+        }
 
         //----这里往下都是对 双向关联所作的处理-----
 

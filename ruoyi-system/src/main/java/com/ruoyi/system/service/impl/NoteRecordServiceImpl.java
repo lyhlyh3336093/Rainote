@@ -1105,4 +1105,57 @@ public class NoteRecordServiceImpl implements INoteRecordService
         }
         return lookupValue.toString();
     }
+
+    /**
+     * 全量重算指定lookup列(type=26)所有记录的存储值。
+     * 在updateNoteColumn检测到dedupe开关变化时触发，遍历该列所属表的所有记录，
+     * 重新调用resolveLookupValue并更新对应NoteDwtableItem的value。
+     * 单条记录失败不中断整体流程，记录错误日志后继续。
+     *
+     * @param lookupColumn 需要重算的lookup列
+     */
+    @Override
+    public void recomputeLookupColumnValues(NoteColumn lookupColumn)
+    {
+        NoteRecordVo queryRecord = new NoteRecordVo();
+        queryRecord.setDwtableId(lookupColumn.getDwtableId());
+        List<NoteRecord> records = noteRecordMapper.selectNoteRecordList(queryRecord);
+        log.info("[RECOMPUTE-LOOKUP] start columnId={}, dwtableId={}, recordCount={}",
+                lookupColumn.getId(), lookupColumn.getDwtableId(), records.size());
+
+        for (NoteRecord record : records)
+        {
+            try
+            {
+                Object newValueObj = resolveLookupValue(lookupColumn, record.getId());
+                String newValue = newValueObj == null ? "" : newValueObj.toString();
+
+                NoteDwtableItem queryItem = new NoteDwtableItem();
+                queryItem.setRecordId(record.getId());
+                queryItem.setColumnId(lookupColumn.getId());
+                NoteDwtableItem resultItem = noteDwtableItemMapper.selectNoteDwtableItemByRecordAndColumn(queryItem);
+
+                if (resultItem == null)
+                {
+                    resultItem = new NoteDwtableItem();
+                    resultItem.setRecordId(record.getId());
+                    resultItem.setColumnId(lookupColumn.getId());
+                    resultItem.setDwtId(lookupColumn.getDwtableId());
+                    resultItem.setValue(newValue);
+                    noteDwtableItemMapper.insertNoteDwtableItem(resultItem);
+                }
+                else
+                {
+                    resultItem.setValue(newValue);
+                    noteDwtableItemMapper.updateNoteDwtableItem(resultItem);
+                }
+            }
+            catch (Exception e)
+            {
+                log.error("[RECOMPUTE-LOOKUP] 重算失败 columnId={}, recordId={}",
+                        lookupColumn.getId(), record.getId(), e);
+            }
+        }
+        log.info("[RECOMPUTE-LOOKUP] done columnId={}", lookupColumn.getId());
+    }
 }
