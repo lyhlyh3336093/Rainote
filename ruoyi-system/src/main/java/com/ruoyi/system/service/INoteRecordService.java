@@ -109,6 +109,16 @@ public interface INoteRecordService
     void recomputeLookupColumnValues(NoteColumn lookupColumn);
 
     /**
+     * 全量重算引用了指定lookup列(type=26)的所有集合运算列。
+     * 遍历表中所有集合运算列，筛选出A列或B列引用了该lookup列的，
+     * 对每条记录从DB重新读取A/B数据并执行集合运算，更新结果item。
+     * 单条记录失败不中断整体流程，记录错误日志后继续。
+     *
+     * @param lookupColumn dedupe开关已切换的lookup列
+     */
+    void recomputeSetOperationsForLookup(NoteColumn lookupColumn);
+
+    /**
      * 派生记录名称：取该表最左侧 type=1（多行文本）列的值。
      * 取值优先级（KTD-3）：先 incomingItems（本次写入新值），再 existingItems（DB 当前值），仍无则返回 ""。
      * 无 type=1 列时返回 ""（R6）。

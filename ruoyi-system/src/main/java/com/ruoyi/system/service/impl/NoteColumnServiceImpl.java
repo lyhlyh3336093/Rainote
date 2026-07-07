@@ -397,6 +397,34 @@ public class NoteColumnServiceImpl implements INoteColumnService
         return result;
     }
 
+    /**
+     * 切换指定lookup列(type=26)的去重开关，并重算该列存储值及关联的集合运算列。
+     */
+    @Override
+    public int deduplicate(Long columnId)
+    {
+        NoteColumn column = noteColumnMapper.selectNoteColumnById(columnId);
+        if (column == null || column.getType() != 26L || column.getProperty() == null)
+        {
+            return 0;
+        }
+
+        JSONObject prop = JSONObject.parseObject(column.getProperty());
+        if (prop == null)
+        {
+            return 0;
+        }
+
+        boolean currentDedupe = Boolean.TRUE.equals(prop.getBoolean("dedupe"));
+        prop.put("dedupe", !currentDedupe);
+        column.setProperty(prop.toJSONString());
+        noteColumnMapper.updateNoteColumn(column);
+
+        noteRecordService.recomputeLookupColumnValues(column);
+        noteRecordService.recomputeSetOperationsForLookup(column);
+        return 1;
+    }
+
 
     private boolean deleteDataWhenLink(NoteColumn originColumn){
         String property = originColumn.getProperty();

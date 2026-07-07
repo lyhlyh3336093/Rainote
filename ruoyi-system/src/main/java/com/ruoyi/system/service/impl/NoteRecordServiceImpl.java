@@ -1163,6 +1163,181 @@ public class NoteRecordServiceImpl implements INoteRecordService
     }
 
     /**
+     * 从DB读取指定列在指定记录上的linkRecordId和value数据。
+     * lookup列(type=26)通过double_link_column_id查关联item，再调resolveLookupValues解析（含dedupe）。
+     * 双向关联列(type=21)直接从item读linkRecordId和value。
+     *
+     * @param column  列对象
+     * @param recordId 记录ID
+     * @param recordIds 输出参数：linkRecordId列表
+     * @param values    输出参数：value列表（与recordIds索引对齐）
+     * @return true=有数据，false=无数据（应跳过本次运算）
+     */
+    private boolean fetchColumnDataFromDB(NoteColumn column, Long recordId,
+            List<String> recordIds, List<String> values)
+    {
+        if (column.getType() == 26L)
+        {
+            JSONObject prop = JSONObject.parseObject(column.getProperty());
+            String doubleLinkColumnId = prop.get("double_link_column_id").toString();
+            NoteDwtableItem query = new NoteDwtableItem();
+            query.setRecordId(recordId);
+            query.setLinkColumnId(Long.valueOf(doubleLinkColumnId));
+            NoteDwtableItem linkItem = noteDwtableItemMapper.selectNoteDwtableItemByRecordAndColumn(query);
+            if (linkItem == null || linkItem.getLinkRecordId() == null || "".equals(linkItem.getLinkRecordId()))
+            {
+                return false;
+            }
+            List<String> linkIds = new ArrayList<>(Arrays.asList(linkItem.getLinkRecordId().split(",")));
+            List<LookupResult> results = resolveLookupValues(column, linkIds);
+            recordIds.addAll(results.stream().map(LookupResult::getLinkRecordId).collect(Collectors.toList()));
+            values.addAll(toLookupValues(results));
+        }
+        else
+        {
+            NoteDwtableItem query = new NoteDwtableItem();
+            query.setRecordId(recordId);
+            query.setColumnId(column.getId());
+            NoteDwtableItem item = noteDwtableItemMapper.selectNoteDwtableItemByRecordAndColumn(query);
+            if (item == null || item.getLinkRecordId() == null || "".equals(item.getLinkRecordId()))
+            {
+                return false;
+            }
+            recordIds.addAll(Arrays.asList(item.getLinkRecordId().split(",")));
+            values.addAll(Arrays.asList(item.getValue().split(",")));
+        }
+        return true;
+    }
+
+    /**
+     * 全量重算引用了指定lookup列的所有集合运算列。
+     */
+    @Override
+    public void recomputeSetOperationsForLookup(NoteColumn lookupColumn)
+    {
+        List<NoteColumn> setColumns = noteColumnMapper.selectSetColumnByDwtId(lookupColumn.getDwtableId());
+        String lookupColumnIdStr = lookupColumn.getId().toString();
+
+        for (NoteColumn setColumn : setColumns)
+        {
+            JSONObject setProp = JSONObject.parseObject(setColumn.getProperty());
+            String columnAId = setProp.get("columnAId").toString();
+            String columnBId = setProp.get("columnBId").toString();
+            String calcType = setProp.get("calcType").toString();
+
+            if (!columnAId.equals(lookupColumnIdStr) && !columnBId.equals(lookupColumnIdStr))
+            {
+                continue;
+            }
+
+            NoteColumn columnA = noteColumnMapper.selectNoteColumnById(Long.parseLong(columnAId));
+            NoteColumn columnB = noteColumnMapper.selectNoteColumnById(Long.parseLong(columnBId));
+            if (columnA == null || columnB == null)
+            {
+                continue;
+            }
+
+            NoteRecordVo queryRecord = new NoteRecordVo();
+            queryRecord.setDwtableId(lookupColumn.getDwtableId());
+            List<NoteRecord> records = noteRecordMapper.selectNoteRecordList(queryRecord);
+            log.info("[RECOMPUTE-SET-OP] start setColumnId={}, lookupColumnId={}, recordCount={}",
+                    setColumn.getId(), lookupColumn.getId(), records.size());
+
+            for (NoteRecord record : records)
+            {
+                try
+                {
+                    List<String> aRecordIds = new ArrayList<>();
+                    List<String> aValues = new ArrayList<>();
+                    if (!fetchColumnDataFromDB(columnA, record.getId(), aRecordIds, aValues))
+                    {
+                        continue;
+                    }
+
+                    List<String> bRecordIds = new ArrayList<>();
+                    List<String> bValues = new ArrayList<>();
+                    if (!fetchColumnDataFromDB(columnB, record.getId(), bRecordIds, bValues))
+                    {
+                        continue;
+                    }
+
+                    Map<String, String> aMap = new LinkedHashMap<>();
+                    for (int i = 0; i < aRecordIds.size(); i++)
+                    {
+                        aMap.put(aRecordIds.get(i), i < aValues.size() ? aValues.get(i) : "");
+                    }
+                    Map<String, String> bMap = new LinkedHashMap<>();
+                    for (int i = 0; i < bRecordIds.size(); i++)
+                    {
+                        bMap.put(bRecordIds.get(i), i < bValues.size() ? bValues.get(i) : "");
+                    }
+
+                    List<String> rRecordIds = new ArrayList<>();
+                    if ("disjunction".equals(calcType))
+                    {
+                        rRecordIds = (List<String>) CollectionUtils.disjunction(aRecordIds, bRecordIds);
+                    }
+                    else if ("subtract".equals(calcType))
+                    {
+                        rRecordIds = (List<String>) CollectionUtils.subtract(aRecordIds, bRecordIds);
+                    }
+                    else if ("intersection".equals(calcType))
+                    {
+                        rRecordIds = (List<String>) CollectionUtils.intersection(aRecordIds, bRecordIds);
+                    }
+                    else if ("union".equals(calcType))
+                    {
+                        rRecordIds = (List<String>) CollectionUtils.union(aRecordIds, bRecordIds);
+                    }
+
+                    List<String> rValues = new ArrayList<>();
+                    for (String id : rRecordIds)
+                    {
+                        String value = aMap.get(id);
+                        if (value == null)
+                        {
+                            value = bMap.get(id);
+                        }
+                        if (value == null)
+                        {
+                            value = "";
+                        }
+                        rValues.add(value);
+                    }
+
+                    NoteDwtableItem queryItem = new NoteDwtableItem();
+                    queryItem.setRecordId(record.getId());
+                    queryItem.setColumnId(setColumn.getId());
+                    NoteDwtableItem resultItem = noteDwtableItemMapper.selectNoteDwtableItemByRecordAndColumn(queryItem);
+                    if (resultItem == null)
+                    {
+                        resultItem = new NoteDwtableItem();
+                        resultItem.setRecordId(record.getId());
+                        resultItem.setColumnId(setColumn.getId());
+                        resultItem.setDwtId(lookupColumn.getDwtableId());
+                    }
+                    resultItem.setValue(rValues.toString().replace("[", "").replace("]", "").replaceAll(" ", ""));
+                    resultItem.setLinkRecordId(rRecordIds.toString().replace("[", "").replace("]", "").replaceAll(" ", ""));
+                    if (resultItem.getId() == null)
+                    {
+                        noteDwtableItemMapper.insertNoteDwtableItem(resultItem);
+                    }
+                    else
+                    {
+                        noteDwtableItemMapper.updateNoteDwtableItem(resultItem);
+                    }
+                }
+                catch (Exception e)
+                {
+                    log.error("[RECOMPUTE-SET-OP] 重算失败 setColumnId={}, recordId={}",
+                            setColumn.getId(), record.getId(), e);
+                }
+            }
+            log.info("[RECOMPUTE-SET-OP] done setColumnId={}", setColumn.getId());
+        }
+    }
+
+    /**
      * 派生记录名称：取该表最左侧 type=1（多行文本）列的值（R1, R6）。
      * 取值优先级（KTD-3）：先 incomingItems（本次写入新值），再 existingItems（DB 当前值），仍无则返回 ""。
      * 列表查询 selectNoteColumnList 已按 sort 排序，故首个匹配即为最左侧 type=1 列。
