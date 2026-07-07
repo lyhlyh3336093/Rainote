@@ -468,4 +468,148 @@ public class NoteColumnServiceImplTest
 
         verify(noteRecordService, never()).recomputeLookupColumnValues(any(NoteColumn.class));
     }
+
+    // ============ U4: 列结构变更触发按表重算 name ============
+
+    /**
+     * U4 场景1（happy）：deleteNoteColumnById 删除 type=1 列 → 触发该表重算
+     */
+    @Test
+    void testDeleteNoteColumnById_triggersRecomputeRecordNames()
+    {
+        NoteColumn column = new NoteColumn();
+        column.setId(50L);
+        column.setType(1L);
+        column.setDwtableId(1L);
+
+        when(noteColumnMapper.selectNoteColumnById(50L)).thenReturn(column);
+
+        noteColumnService.deleteNoteColumnById(50L);
+
+        verify(noteDwtableItemMapper).deleteNoteDwtableItemByColumnId(50L);
+        verify(noteColumnMapper).deleteNoteColumnById(50L);
+        verify(noteRecordService).recomputeRecordNamesForTable(1L);
+    }
+
+    /**
+     * U4 场景2（integration）：deleteNoteColumnByIds 删除涉及多表的列 → 每个表都重算
+     */
+    @Test
+    void testDeleteNoteColumnByIds_multipleTables_recomputeEach()
+    {
+        NoteColumn col1 = new NoteColumn(); col1.setId(10L); col1.setType(1L); col1.setDwtableId(1L);
+        NoteColumn col2 = new NoteColumn(); col2.setId(20L); col2.setType(1L); col2.setDwtableId(2L);
+        when(noteColumnMapper.selectNoteColumnByIds(any(String[].class))).thenReturn(Arrays.asList(col1, col2));
+
+        noteColumnService.deleteNoteColumnByIds(new String[]{"10", "20"});
+
+        // 每个表各重算一次
+        verify(noteRecordService).recomputeRecordNamesForTable(1L);
+        verify(noteRecordService).recomputeRecordNamesForTable(2L);
+    }
+
+    /**
+     * U4 场景3（edge）：deleteNoteColumnById 列不存在（column==null）→ 不触发重算
+     */
+    @Test
+    void testDeleteNoteColumnById_columnNotFound_noRecompute()
+    {
+        when(noteColumnMapper.selectNoteColumnById(999L)).thenReturn(null);
+
+        noteColumnService.deleteNoteColumnById(999L);
+
+        verify(noteColumnMapper).deleteNoteColumnById(999L);
+        verify(noteRecordService, never()).recomputeRecordNamesForTable(any());
+    }
+
+    /**
+     * U4 场景4（edge，幂等）：deleteNoteColumnByIds 删除非源列（type=2）→ 重算仍运行（幂等）
+     */
+    @Test
+    void testDeleteNoteColumnByIds_nonSourceColumn_recomputeStillRuns()
+    {
+        NoteColumn col = new NoteColumn();
+        col.setId(10L);
+        col.setType(2L); // 非源列
+        col.setDwtableId(1L);
+        when(noteColumnMapper.selectNoteColumnByIds(any(String[].class))).thenReturn(Collections.singletonList(col));
+
+        noteColumnService.deleteNoteColumnByIds(new String[]{"10"});
+
+        // 即使删的是非源列，重算仍运行（KTD-6 无条件幂等）
+        verify(noteRecordService).recomputeRecordNamesForTable(1L);
+    }
+
+    /**
+     * U4 场景5（happy）：updateNoteColumn 修改 type=1 列名称 → 末尾触发重算
+     */
+    @Test
+    void testUpdateNoteColumn_typeOne_triggersRecomputeRecordNames()
+    {
+        NoteColumn originColumn = new NoteColumn();
+        originColumn.setId(50L);
+        originColumn.setType(1L);
+        originColumn.setDwtableId(1L);
+        originColumn.setProperty(null);
+
+        when(noteColumnMapper.selectNoteColumnById(50L)).thenReturn(originColumn);
+
+        NoteColumnVo vo = new NoteColumnVo();
+        vo.setId(50L);
+        vo.setName("新名称");
+        vo.setType(1L);
+        vo.setDwtableId(1L);
+        vo.setIsShow(1L);
+
+        noteColumnService.updateNoteColumn(vo);
+
+        verify(noteRecordService).recomputeRecordNamesForTable(1L);
+    }
+
+    /**
+     * U4 场景6（happy）：updateSort 重排 → 重算受影响表
+     */
+    @Test
+    void testUpdateSort_triggersRecomputeRecordNames()
+    {
+        NoteColumn col = new NoteColumn();
+        col.setId(10L);
+        col.setType(1L);
+        col.setDwtableId(1L);
+        col.setSort(1L);
+        when(noteColumnMapper.selectNoteColumnById(10L)).thenReturn(col);
+
+        java.util.Map<String, Object> sortData = new java.util.HashMap<>();
+        sortData.put("id", "10");
+        sortData.put("sort", "5");
+
+        noteColumnService.updateSort(Collections.singletonList(sortData));
+
+        verify(noteColumnMapper).updateNoteColumn(any(NoteColumn.class));
+        verify(noteRecordService).recomputeRecordNamesForTable(1L);
+    }
+
+    /**
+     * U4 场景7（integration）：updateSort 涉及多表 → 每个表都重算（去重）
+     */
+    @Test
+    void testUpdateSort_multipleTables_recomputeEach()
+    {
+        NoteColumn col1 = new NoteColumn(); col1.setId(10L); col1.setDwtableId(1L); col1.setSort(1L);
+        NoteColumn col2 = new NoteColumn(); col2.setId(20L); col2.setDwtableId(2L); col2.setSort(1L);
+        NoteColumn col3 = new NoteColumn(); col3.setId(30L); col3.setDwtableId(1L); col3.setSort(1L); // 与 col1 同表
+        when(noteColumnMapper.selectNoteColumnById(10L)).thenReturn(col1);
+        when(noteColumnMapper.selectNoteColumnById(20L)).thenReturn(col2);
+        when(noteColumnMapper.selectNoteColumnById(30L)).thenReturn(col3);
+
+        java.util.Map<String, Object> d1 = new java.util.HashMap<>(); d1.put("id", "10"); d1.put("sort", "2");
+        java.util.Map<String, Object> d2 = new java.util.HashMap<>(); d2.put("id", "20"); d2.put("sort", "2");
+        java.util.Map<String, Object> d3 = new java.util.HashMap<>(); d3.put("id", "30"); d3.put("sort", "3");
+
+        noteColumnService.updateSort(Arrays.asList(d1, d2, d3));
+
+        // 表1被重算一次（col1 + col3 去重），表2被重算一次
+        verify(noteRecordService, times(1)).recomputeRecordNamesForTable(1L);
+        verify(noteRecordService, times(1)).recomputeRecordNamesForTable(2L);
+    }
 }

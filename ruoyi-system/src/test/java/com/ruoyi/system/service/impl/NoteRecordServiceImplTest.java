@@ -2,10 +2,13 @@ package com.ruoyi.system.service.impl;
 
 import com.alibaba.fastjson2.JSONObject;
 import com.ruoyi.system.domain.NoteColumn;
+import com.ruoyi.system.domain.NoteDwtable;
 import com.ruoyi.system.domain.NoteDwtableItem;
 import com.ruoyi.system.domain.NoteRecord;
+import com.ruoyi.system.domain.vo.NoteRecordVo;
 import com.ruoyi.system.mapper.NoteColumnMapper;
 import com.ruoyi.system.mapper.NoteDwtableItemMapper;
+import com.ruoyi.system.mapper.NoteDwtableMapper;
 import com.ruoyi.system.mapper.NoteRecordMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -18,6 +21,8 @@ import org.mockito.quality.Strictness;
 
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
@@ -40,6 +45,9 @@ public class NoteRecordServiceImplTest
 
     @Mock
     private NoteDwtableItemMapper noteDwtableItemMapper;
+
+    @Mock
+    private NoteDwtableMapper noteDwtableMapper;
 
     @Mock
     private NoteRecordMapper noteRecordMapper;
@@ -922,5 +930,539 @@ public class NoteRecordServiceImplTest
 
         verify(noteDwtableItemMapper, never()).updateNoteDwtableItem(any(NoteDwtableItem.class));
         verify(noteDwtableItemMapper, never()).insertNoteDwtableItem(any(NoteDwtableItem.class));
+    }
+
+    // ============ U1: deriveRecordName + recomputeRecordNamesForTable ============
+
+    /**
+     * U1 场景1（happy）：左侧 type=1 列在 incomingItems 有新值 → 返回新值
+     */
+    @Test
+    void testDeriveRecordName_incomingHasValue()
+    {
+        NoteColumn col1 = new NoteColumn(); col1.setId(1L); col1.setType(1L); col1.setSort(1L);
+        NoteColumn col2 = new NoteColumn(); col2.setId(2L); col2.setType(2L); col2.setSort(2L);
+        when(noteColumnMapper.selectNoteColumnList(any())).thenReturn(Arrays.asList(col1, col2));
+
+        Map<String, Object> incoming = new HashMap<>();
+        incoming.put("columnId", "1");
+        incoming.put("value", "新名称");
+
+        String name = noteRecordService.deriveRecordName(100L, Arrays.asList(incoming), null);
+        assertEquals("新名称", name);
+    }
+
+    /**
+     * U1 场景2（edge）：左侧 type=1 列不在 incomingItems → 回退 existingItems 值
+     */
+    @Test
+    void testDeriveRecordName_fallbackToExisting()
+    {
+        NoteColumn col1 = new NoteColumn(); col1.setId(1L); col1.setType(1L); col1.setSort(1L);
+        when(noteColumnMapper.selectNoteColumnList(any())).thenReturn(Collections.singletonList(col1));
+
+        NoteDwtableItem existing = new NoteDwtableItem();
+        existing.setColumnId(1L);
+        existing.setValue("DB当前值");
+
+        // incoming 是其他列的更新（不含 sourceColumnId=1）
+        Map<String, Object> incoming = new HashMap<>();
+        incoming.put("columnId", "2");
+        incoming.put("value", "其他列值");
+
+        String name = noteRecordService.deriveRecordName(100L,
+                Arrays.asList(incoming), Collections.singletonList(existing));
+        assertEquals("DB当前值", name);
+    }
+
+    /**
+     * U1 场景3（edge）：表无 type=1 列 → 返回 ""
+     */
+    @Test
+    void testDeriveRecordName_noTypeOneColumn()
+    {
+        NoteColumn col1 = new NoteColumn(); col1.setId(1L); col1.setType(2L); col1.setSort(1L);
+        when(noteColumnMapper.selectNoteColumnList(any())).thenReturn(Collections.singletonList(col1));
+
+        String name = noteRecordService.deriveRecordName(100L, null, null);
+        assertEquals("", name);
+    }
+
+    /**
+     * U1 场景4（edge）：左侧 type=1 列值为 null → 返回 ""
+     */
+    @Test
+    void testDeriveRecordName_nullValue()
+    {
+        NoteColumn col1 = new NoteColumn(); col1.setId(1L); col1.setType(1L); col1.setSort(1L);
+        when(noteColumnMapper.selectNoteColumnList(any())).thenReturn(Collections.singletonList(col1));
+
+        Map<String, Object> incoming = new HashMap<>();
+        incoming.put("columnId", "1");
+        incoming.put("value", null);
+
+        String name = noteRecordService.deriveRecordName(100L, Arrays.asList(incoming), null);
+        assertEquals("", name);
+    }
+
+    /**
+     * U1 场景5（edge）：多个 type=1 列 → 返回 sort 最小那个的值
+     * selectNoteColumnList 已按 sort 升序返回，故 List 首项即 sort 最小
+     */
+    @Test
+    void testDeriveRecordName_multipleTypeOne_returnSmallestSort()
+    {
+        NoteColumn col2 = new NoteColumn(); col2.setId(2L); col2.setType(1L); col2.setSort(1L);
+        NoteColumn col5 = new NoteColumn(); col5.setId(5L); col5.setType(1L); col5.setSort(5L);
+        when(noteColumnMapper.selectNoteColumnList(any())).thenReturn(Arrays.asList(col2, col5));
+
+        // incoming 顺序与 sort 无关，验证取 sort 最小（col2）
+        Map<String, Object> inc5 = new HashMap<>(); inc5.put("columnId", "5"); inc5.put("value", "第二文本列");
+        Map<String, Object> inc2 = new HashMap<>(); inc2.put("columnId", "2"); inc2.put("value", "第一文本列");
+
+        String name = noteRecordService.deriveRecordName(100L, Arrays.asList(inc5, inc2), null);
+        assertEquals("第一文本列", name);
+    }
+
+    /**
+     * U1 场景6（edge）：最左列非 type=1、次左列是 type=1 → 返回次左列值
+     */
+    @Test
+    void testDeriveRecordName_leftmostNotTypeOne()
+    {
+        NoteColumn col1 = new NoteColumn(); col1.setId(1L); col1.setType(2L); col1.setSort(1L);
+        NoteColumn col2 = new NoteColumn(); col2.setId(2L); col2.setType(1L); col2.setSort(2L);
+        when(noteColumnMapper.selectNoteColumnList(any())).thenReturn(Arrays.asList(col1, col2));
+
+        Map<String, Object> incoming = new HashMap<>();
+        incoming.put("columnId", "2");
+        incoming.put("value", "次左列值");
+
+        String name = noteRecordService.deriveRecordName(100L, Arrays.asList(incoming), null);
+        assertEquals("次左列值", name);
+    }
+
+    /**
+     * U1 场景7（edge）：dwtableId 为 null → 返回 ""
+     */
+    @Test
+    void testDeriveRecordName_nullDwtableId()
+    {
+        String name = noteRecordService.deriveRecordName(null, null, null);
+        assertEquals("", name);
+    }
+
+    /**
+     * U1 场景8（integration）：recomputeRecordNamesForTable 表内 3 条记录重算后
+     * name 分别等于各自 type=1 item 值；其中 1 条无 type=1 item → name=""
+     */
+    @Test
+    void testRecomputeRecordNamesForTable_threeRecords()
+    {
+        NoteColumn col1 = new NoteColumn(); col1.setId(1L); col1.setType(1L); col1.setSort(1L);
+        when(noteColumnMapper.selectNoteColumnList(any())).thenReturn(Collections.singletonList(col1));
+
+        NoteRecord r1 = new NoteRecord(); r1.setId(11L);
+        NoteRecord r2 = new NoteRecord(); r2.setId(22L);
+        NoteRecord r3 = new NoteRecord(); r3.setId(33L); // r3 没有 type=1 item
+        when(noteRecordMapper.selectNoteRecordList(any())).thenReturn(Arrays.asList(r1, r2, r3));
+
+        NoteDwtableItem itemR1 = new NoteDwtableItem(); itemR1.setColumnId(1L); itemR1.setValue("张三");
+        NoteDwtableItem itemR2 = new NoteDwtableItem(); itemR2.setColumnId(1L); itemR2.setValue("李四");
+        when(noteDwtableItemMapper.selectNoteDwtableItemList(any()))
+                .thenReturn(Collections.singletonList(itemR1))
+                .thenReturn(Collections.singletonList(itemR2))
+                .thenReturn(Collections.emptyList());
+
+        int updated = noteRecordService.recomputeRecordNamesForTable(100L);
+
+        assertEquals(3, updated);
+        verify(noteRecordMapper, times(3)).updateNoteRecord(any());
+        assertEquals("张三", r1.getName());
+        assertEquals("李四", r2.getName());
+        assertEquals("", r3.getName());
+    }
+
+    /**
+     * U1 场景9（edge）：recomputeRecordNamesForTable dwtableId=null → 返回 0，不查 DB
+     */
+    @Test
+    void testRecomputeRecordNamesForTable_nullDwtableId()
+    {
+        int updated = noteRecordService.recomputeRecordNamesForTable(null);
+        assertEquals(0, updated);
+        verify(noteRecordMapper, never()).selectNoteRecordList(any());
+    }
+
+    /**
+     * U1 场景10（edge，P2-3 补充）：3 条记录，第 2 条 selectNoteDwtableItemList 抛异常
+     * → 第 1、3 条仍正常更新，updated=2，方法不抛异常
+     */
+    @Test
+    void testRecomputeRecordNamesForTable_singleFailure_continuesProcessing()
+    {
+        NoteColumn col1 = new NoteColumn(); col1.setId(1L); col1.setType(1L); col1.setSort(1L);
+        when(noteColumnMapper.selectNoteColumnList(any())).thenReturn(Collections.singletonList(col1));
+
+        NoteRecord r1 = new NoteRecord(); r1.setId(11L);
+        NoteRecord r2 = new NoteRecord(); r2.setId(22L);
+        NoteRecord r3 = new NoteRecord(); r3.setId(33L);
+        when(noteRecordMapper.selectNoteRecordList(any())).thenReturn(Arrays.asList(r1, r2, r3));
+
+        NoteDwtableItem itemR1 = new NoteDwtableItem(); itemR1.setColumnId(1L); itemR1.setValue("张三");
+        NoteDwtableItem itemR3 = new NoteDwtableItem(); itemR3.setColumnId(1L); itemR3.setValue("王五");
+        // 第 2 条记录查 item 时抛异常
+        when(noteDwtableItemMapper.selectNoteDwtableItemList(any()))
+                .thenReturn(Collections.singletonList(itemR1))
+                .thenThrow(new RuntimeException("模拟第2条记录异常"))
+                .thenReturn(Collections.singletonList(itemR3));
+
+        int updated = noteRecordService.recomputeRecordNamesForTable(100L);
+
+        // 第 2 条失败，第 1、3 条成功
+        assertEquals(2, updated);
+        verify(noteRecordMapper, times(2)).updateNoteRecord(any());
+        assertEquals("张三", r1.getName());
+        assertEquals("王五", r3.getName());
+    }
+
+    // ============ U2: updateNoteRecord 始终派生 ============
+
+    /**
+     * U2 场景1（happy，回归 ce-debug bug）：已有非空 name 的记录，更新最左侧 type=1 item
+     * → updateNoteRecord 被调用时 name 等于新值（KTD-3 incoming 优先）
+     * items 中的 Map 不带 id，跳过 item 持久化逻辑，focus 在 name 派生
+     */
+    @Test
+    void testUpdateNoteRecord_derivesNameFromIncomingTypeOneItem()
+    {
+        NoteColumn col1 = new NoteColumn(); col1.setId(1L); col1.setType(1L); col1.setSort(1L);
+        when(noteColumnMapper.selectNoteColumnList(any())).thenReturn(Collections.singletonList(col1));
+
+        // recordItems：DB 当前 type=1 列值=旧名称
+        NoteDwtableItem existingItem = new NoteDwtableItem();
+        existingItem.setDwtId(100L);
+        existingItem.setColumnId(1L);
+        existingItem.setValue("旧名称");
+        when(noteDwtableItemMapper.selectNoteDwtableItemList(any())).thenReturn(Collections.singletonList(existingItem));
+
+        // items：含 type=1 列的新值（无 id，跳过 item 持久化）
+        Map<String, Object> incoming = new HashMap<>();
+        incoming.put("columnId", "1");
+        incoming.put("value", "新名称");
+
+        NoteRecord record = new NoteRecord();
+        record.setId(11L);
+        record.setName("旧名称"); // 已有非空 name
+
+        noteRecordService.updateNoteRecord(record, Arrays.asList(incoming));
+
+        // 验证 name 被更新为新值（来自 incoming items，KTD-3 优先级）
+        assertEquals("新名称", record.getName());
+        verify(noteRecordMapper).updateNoteRecord(record);
+    }
+
+    /**
+     * U2 场景2（happy）：更新非 type=1 item → name 保持等于当前 type=1 item 值（KTD-3 回退 recordItems）
+     */
+    @Test
+    void testUpdateNoteRecord_nonTypeOneItem_keepsNameFromRecordItems()
+    {
+        NoteColumn col1 = new NoteColumn(); col1.setId(1L); col1.setType(1L); col1.setSort(1L);
+        NoteColumn col2 = new NoteColumn(); col2.setId(2L); col2.setType(2L); col2.setSort(2L);
+        when(noteColumnMapper.selectNoteColumnList(any())).thenReturn(Arrays.asList(col1, col2));
+
+        // recordItems：DB 当前 type=1 列值=张三
+        NoteDwtableItem typeOneItem = new NoteDwtableItem();
+        typeOneItem.setDwtId(100L);
+        typeOneItem.setColumnId(1L);
+        typeOneItem.setValue("张三");
+        when(noteDwtableItemMapper.selectNoteDwtableItemList(any())).thenReturn(Collections.singletonList(typeOneItem));
+
+        // items：只更新 type=2 列（不含 type=1）
+        Map<String, Object> incoming = new HashMap<>();
+        incoming.put("columnId", "2");
+        incoming.put("value", "数字值");
+
+        NoteRecord record = new NoteRecord();
+        record.setId(11L);
+        record.setName("张三");
+
+        noteRecordService.updateNoteRecord(record, Arrays.asList(incoming));
+
+        // 验证 name 保持 type=1 列的当前值（来自 recordItems 回退）
+        assertEquals("张三", record.getName());
+        verify(noteRecordMapper).updateNoteRecord(record);
+    }
+
+    /**
+     * U2 场景3（edge）：表无 type=1 列 → name=""
+     */
+    @Test
+    void testUpdateNoteRecord_noTypeOneColumn_nameEmpty()
+    {
+        NoteColumn col1 = new NoteColumn(); col1.setId(1L); col1.setType(2L); col1.setSort(1L);
+        when(noteColumnMapper.selectNoteColumnList(any())).thenReturn(Collections.singletonList(col1));
+
+        NoteDwtableItem existingItem = new NoteDwtableItem();
+        existingItem.setDwtId(100L);
+        existingItem.setColumnId(1L);
+        existingItem.setValue("数字");
+        when(noteDwtableItemMapper.selectNoteDwtableItemList(any())).thenReturn(Collections.singletonList(existingItem));
+
+        NoteRecord record = new NoteRecord();
+        record.setId(11L);
+        record.setName("原name");
+
+        noteRecordService.updateNoteRecord(record, null);
+
+        assertEquals("", record.getName());
+        verify(noteRecordMapper).updateNoteRecord(record);
+    }
+
+    /**
+     * U2 场景4（edge）：传入 items 中 type=1 值为空 → name=""
+     */
+    @Test
+    void testUpdateNoteRecord_incomingTypeOneValueNull_nameEmpty()
+    {
+        NoteColumn col1 = new NoteColumn(); col1.setId(1L); col1.setType(1L); col1.setSort(1L);
+        when(noteColumnMapper.selectNoteColumnList(any())).thenReturn(Collections.singletonList(col1));
+
+        // recordItems：DB 当前 type=1 列值=张三
+        NoteDwtableItem typeOneItem = new NoteDwtableItem();
+        typeOneItem.setDwtId(100L);
+        typeOneItem.setColumnId(1L);
+        typeOneItem.setValue("张三");
+        when(noteDwtableItemMapper.selectNoteDwtableItemList(any())).thenReturn(Collections.singletonList(typeOneItem));
+
+        // items：type=1 列 value=null（清空）
+        Map<String, Object> incoming = new HashMap<>();
+        incoming.put("columnId", "1");
+        incoming.put("value", null);
+
+        NoteRecord record = new NoteRecord();
+        record.setId(11L);
+        record.setName("张三");
+
+        noteRecordService.updateNoteRecord(record, Arrays.asList(incoming));
+
+        // incoming 优先级最高，null → ""
+        assertEquals("", record.getName());
+        verify(noteRecordMapper).updateNoteRecord(record);
+    }
+
+    /**
+     * U2 场景5（happy，R7）：前端传 name="旧" 但派生得 "新" → 落盘 name="新"，前端值被忽略
+     */
+    @Test
+    void testUpdateNoteRecord_frontendNameOverriddenByDerived()
+    {
+        NoteColumn col1 = new NoteColumn(); col1.setId(1L); col1.setType(1L); col1.setSort(1L);
+        when(noteColumnMapper.selectNoteColumnList(any())).thenReturn(Collections.singletonList(col1));
+
+        // recordItems：DB 当前 type=1 列值=新
+        NoteDwtableItem typeOneItem = new NoteDwtableItem();
+        typeOneItem.setDwtId(100L);
+        typeOneItem.setColumnId(1L);
+        typeOneItem.setValue("新");
+        when(noteDwtableItemMapper.selectNoteDwtableItemList(any())).thenReturn(Collections.singletonList(typeOneItem));
+
+        // 前端传 name="旧"
+        NoteRecord record = new NoteRecord();
+        record.setId(11L);
+        record.setName("旧");
+
+        noteRecordService.updateNoteRecord(record, null);
+
+        // 派生覆盖前端值
+        assertEquals("新", record.getName());
+        verify(noteRecordMapper).updateNoteRecord(record);
+    }
+
+    /**
+     * U2 场景6（edge）：recordItems 为空 → name 不被改动（保持原值）
+     */
+    @Test
+    void testUpdateNoteRecord_emptyRecordItems_nameUnchanged()
+    {
+        when(noteDwtableItemMapper.selectNoteDwtableItemList(any())).thenReturn(Collections.emptyList());
+
+        NoteRecord record = new NoteRecord();
+        record.setId(11L);
+        record.setName("原name");
+
+        noteRecordService.updateNoteRecord(record, null);
+
+        // recordItems 为空，跳过派生，name 保持原值
+        assertEquals("原name", record.getName());
+        verify(noteRecordMapper).updateNoteRecord(record);
+        // 不应查列（因为没派生）
+        verify(noteColumnMapper, never()).selectNoteColumnList(any());
+    }
+
+    // ============ U3: insertNoteRecord 对齐派生规则 ============
+
+    /**
+     * U3 场景1（happy）：插入且最左侧 type=1 列在 items 有值 → name 等于该值
+     */
+    @Test
+    void testInsertNoteRecord_derivesNameFromTypeOneItem()
+    {
+        NoteColumn col1 = new NoteColumn(); col1.setId(1L); col1.setType(1L); col1.setSort(1L);
+        when(noteColumnMapper.selectNoteColumnList(any())).thenReturn(Collections.singletonList(col1));
+
+        Map<String, Object> item = new HashMap<>();
+        item.put("dwtId", "100");
+        item.put("columnId", "1");
+        item.put("value", "张三");
+
+        NoteRecord record = new NoteRecord();
+        record.setId(11L);
+        record.setDwtableId(100L); // 已设，跳过 view 解析
+
+        noteRecordService.insertNoteRecord(record, Arrays.asList(item));
+
+        assertEquals("张三", record.getName());
+        verify(noteRecordMapper).insertNoteRecord(record);
+        verify(noteRecordMapper).updateNoteRecord(record); // 派生后回写
+        verify(noteDwtableItemMapper).insertNoteDwtableItem(any(NoteDwtableItem.class));
+    }
+
+    /**
+     * U3 场景2（edge，回归）：items 首项非 type=1 → name 取最左侧 type=1 列值而非 items.get(0)
+     * 旧逻辑会取 items.get(0)=数字；新逻辑取最左 type=1 列=张三
+     */
+    @Test
+    void testInsertNoteRecord_firstItemNotTypeOne_takesLeftmostTypeOne()
+    {
+        NoteColumn col1 = new NoteColumn(); col1.setId(1L); col1.setType(2L); col1.setSort(1L);
+        NoteColumn col2 = new NoteColumn(); col2.setId(2L); col2.setType(1L); col2.setSort(2L);
+        when(noteColumnMapper.selectNoteColumnList(any())).thenReturn(Arrays.asList(col1, col2));
+
+        // items 首项是 type=2 列，次项是 type=1 列
+        Map<String, Object> item1 = new HashMap<>();
+        item1.put("dwtId", "100");
+        item1.put("columnId", "1");
+        item1.put("value", "数字");
+        Map<String, Object> item2 = new HashMap<>();
+        item2.put("dwtId", "100");
+        item2.put("columnId", "2");
+        item2.put("value", "张三");
+
+        NoteRecord record = new NoteRecord();
+        record.setId(11L);
+        record.setDwtableId(100L);
+
+        noteRecordService.insertNoteRecord(record, Arrays.asList(item1, item2));
+
+        // 应取最左 type=1 列（col2）的值，而非 items.get(0)
+        assertEquals("张三", record.getName());
+    }
+
+    /**
+     * U3 场景3（edge）：插入且表无 type=1 列 → name=""
+     */
+    @Test
+    void testInsertNoteRecord_noTypeOneColumn_nameEmpty()
+    {
+        NoteColumn col1 = new NoteColumn(); col1.setId(1L); col1.setType(2L); col1.setSort(1L);
+        when(noteColumnMapper.selectNoteColumnList(any())).thenReturn(Collections.singletonList(col1));
+
+        Map<String, Object> item = new HashMap<>();
+        item.put("dwtId", "100");
+        item.put("columnId", "1");
+        item.put("value", "数字");
+
+        NoteRecord record = new NoteRecord();
+        record.setId(11L);
+        record.setDwtableId(100L);
+
+        noteRecordService.insertNoteRecord(record, Arrays.asList(item));
+
+        assertEquals("", record.getName());
+    }
+
+    // ============ U5: recomputeAllRecordNames 一次性回填 ============
+
+    /**
+     * U5 场景1（happy）：3 张表，每张 1 条记录，全部重算成功 → 累计 totalUpdated=3
+     */
+    @Test
+    void testRecomputeAllRecordNames_multipleTables()
+    {
+        NoteDwtable t1 = new NoteDwtable(); t1.setId(1L);
+        NoteDwtable t2 = new NoteDwtable(); t2.setId(2L);
+        NoteDwtable t3 = new NoteDwtable(); t3.setId(3L);
+        when(noteDwtableMapper.selectNoteDwtableList(any())).thenReturn(Arrays.asList(t1, t2, t3));
+
+        NoteColumn col1 = new NoteColumn(); col1.setId(1L); col1.setType(1L); col1.setSort(1L);
+        when(noteColumnMapper.selectNoteColumnList(any())).thenReturn(Collections.singletonList(col1));
+
+        // 每张表 1 条记录
+        NoteRecord r = new NoteRecord(); r.setId(11L);
+        when(noteRecordMapper.selectNoteRecordList(any())).thenReturn(Collections.singletonList(r));
+
+        NoteDwtableItem item = new NoteDwtableItem();
+        item.setColumnId(1L);
+        item.setValue("派生名");
+        when(noteDwtableItemMapper.selectNoteDwtableItemList(any())).thenReturn(Collections.singletonList(item));
+
+        int total = noteRecordService.recomputeAllRecordNames();
+
+        assertEquals(3, total);
+        verify(noteRecordMapper, times(3)).updateNoteRecord(any());
+    }
+
+    /**
+     * U5 场景2（edge）：3 张表，中间表重算抛异常 → 不中断，其余 2 表成功，totalUpdated=2
+     */
+    @Test
+    void testRecomputeAllRecordNames_singleTableFailure_continues()
+    {
+        NoteDwtable t1 = new NoteDwtable(); t1.setId(1L);
+        NoteDwtable t2 = new NoteDwtable(); t2.setId(2L);
+        NoteDwtable t3 = new NoteDwtable(); t3.setId(3L);
+        when(noteDwtableMapper.selectNoteDwtableList(any())).thenReturn(Arrays.asList(t1, t2, t3));
+
+        NoteColumn col1 = new NoteColumn(); col1.setId(1L); col1.setType(1L); col1.setSort(1L);
+        when(noteColumnMapper.selectNoteColumnList(any())).thenReturn(Collections.singletonList(col1));
+
+        NoteDwtableItem item = new NoteDwtableItem();
+        item.setColumnId(1L);
+        item.setValue("派生名");
+        when(noteDwtableItemMapper.selectNoteDwtableItemList(any())).thenReturn(Collections.singletonList(item));
+
+        // 表 2 的 selectNoteRecordList 抛异常，表 1、3 正常返回 1 条记录
+        when(noteRecordMapper.selectNoteRecordList(any())).thenAnswer(invocation -> {
+            NoteRecordVo query = invocation.getArgument(0);
+            if (query.getDwtableId() != null && query.getDwtableId() == 2L)
+            {
+                throw new RuntimeException("模拟表2重算异常");
+            }
+            NoteRecord r = new NoteRecord(); r.setId(11L);
+            return Collections.singletonList(r);
+        });
+
+        int total = noteRecordService.recomputeAllRecordNames();
+
+        // 表 2 失败，表 1、3 各更新 1 条
+        assertEquals(2, total);
+        verify(noteRecordMapper, times(2)).updateNoteRecord(any());
+    }
+
+    /**
+     * U5 场景3（edge）：无数据表 → totalUpdated=0，不查记录
+     */
+    @Test
+    void testRecomputeAllRecordNames_noTables()
+    {
+        when(noteDwtableMapper.selectNoteDwtableList(any())).thenReturn(Collections.emptyList());
+
+        int total = noteRecordService.recomputeAllRecordNames();
+
+        assertEquals(0, total);
+        verify(noteRecordMapper, never()).selectNoteRecordList(any());
+        verify(noteRecordMapper, never()).updateNoteRecord(any());
     }
 }

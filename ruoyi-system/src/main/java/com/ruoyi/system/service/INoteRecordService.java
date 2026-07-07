@@ -4,6 +4,7 @@ import java.util.List;
 import java.util.Map;
 
 import com.ruoyi.system.domain.NoteColumn;
+import com.ruoyi.system.domain.NoteDwtableItem;
 import com.ruoyi.system.domain.NoteRecord;
 import com.ruoyi.system.domain.vo.NoteRecordVo;
 
@@ -106,4 +107,37 @@ public interface INoteRecordService
      * @param lookupColumn 需要重算的lookup列
      */
     void recomputeLookupColumnValues(NoteColumn lookupColumn);
+
+    /**
+     * 派生记录名称：取该表最左侧 type=1（多行文本）列的值。
+     * 取值优先级（KTD-3）：先 incomingItems（本次写入新值），再 existingItems（DB 当前值），仍无则返回 ""。
+     * 无 type=1 列时返回 ""（R6）。
+     *
+     * @param dwtableId      数据表ID（必传，由调用方负责按 KTD-2 解析）
+     * @param incomingItems  本次写入的 items（Map 列表，可为 null）
+     * @param existingItems  DB 当前 items（可为 null）
+     * @return 派生的行名称；无 type=1 列或值为空则返回 ""
+     */
+    String deriveRecordName(Long dwtableId,
+                            List<Map<String, Object>> incomingItems,
+                            List<NoteDwtableItem> existingItems);
+
+    /**
+     * 按表重算所有记录的 name 字段（KTD-6 无条件重算，幂等）。
+     * 对该表每条记录调用 deriveRecordName 重算 name，updateNoteRecord 落盘。
+     * 单条记录失败不中断整体流程，记录错误日志后继续。
+     *
+     * @param dwtableId 数据表ID
+     * @return 成功重算的记录数
+     */
+    int recomputeRecordNamesForTable(Long dwtableId);
+
+    /**
+     * 一次性回填所有数据表所有记录的 name（R5）。
+     * 遍历全部数据表，逐表调用 recomputeRecordNamesForTable（每表各自 @Transactional，KTD-5）。
+     * 单表失败不中断整体流程，记录错误日志后继续。
+     *
+     * @return 所有表累计成功重算的记录数
+     */
+    int recomputeAllRecordNames();
 }

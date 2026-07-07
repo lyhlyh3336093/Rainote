@@ -15,6 +15,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.expression.ExpressionParser;
 import org.springframework.expression.spel.standard.SpelExpressionParser;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import com.ruoyi.system.service.INoteRecordService;
 
 /**
@@ -76,6 +77,7 @@ public class NoteRecordServiceImpl implements INoteRecordService
      * @return 结果
      */
     @Override
+    @Transactional
     public int insertNoteRecord(NoteRecord noteRecord,List<Map<String, Object>> items)
     {
         if(noteRecord.getDwtableId()==null){
@@ -92,20 +94,24 @@ public class NoteRecordServiceImpl implements INoteRecordService
                 item.setRecordId(noteRecord.getId());
                 item.setDwtId(Long.parseLong(itemMap.get("dwtId").toString()));
                 item.setColumnId(Long.parseLong(itemMap.get("columnId").toString()));
-                item.setValue(itemMap.get("value").toString());
+                Object valueObj = itemMap.get("value");
+                item.setValue(valueObj == null ? "" : valueObj.toString());
                 if(itemMap.get("recordId")!=null){
                     item.setLinkRecordId(itemMap.get("recordId").toString());
-                }
-                //取第一列的value作为记录的name
-                if(items.indexOf(itemMap)==0){
-                    noteRecord.setName(itemMap.get("value").toString());
-                    noteRecordMapper.updateNoteRecord(noteRecord);
                 }
 
                 noteDwtableItemMapper.insertNoteDwtableItem(item);
             }
+            // 派生 name（R1/R3，KTD-2 insert 路径 dwtableId 已由 service 从 view 解析）
+            String derivedName = deriveRecordName(noteRecord.getDwtableId(), items, null);
+            noteRecord.setName(derivedName);
+            noteRecordMapper.updateNoteRecord(noteRecord);
             return noteRecord.getId().intValue();
         }else{
+            // 派生 name（R7：无 items 时仍派生，无 type=1 列则 name=""）
+            String derivedName = deriveRecordName(noteRecord.getDwtableId(), null, null);
+            noteRecord.setName(derivedName);
+            noteRecordMapper.updateNoteRecord(noteRecord);
             return 0;
         }
 
@@ -118,20 +124,17 @@ public class NoteRecordServiceImpl implements INoteRecordService
      * @return 结果
      */
     @Override
+    @Transactional
     public int updateNoteRecord(NoteRecord noteRecord,List<Map<String, Object>> items) {
         NoteDwtableItem queryParam = new NoteDwtableItem();
         queryParam.setRecordId(noteRecord.getId());
         List<NoteDwtableItem> recordItems = noteDwtableItemMapper.selectNoteDwtableItemList(queryParam);
-        if (noteRecord.getName() == null || noteRecord.getName().equals("")) {
-            //获取多行文本的value当作记录的name
-            //todo：如果多行文本修改内容了，那么记录的name也要跟着变动，这个需要后续跟踪处理一下
-            for (int i = 0; i < recordItems.size(); i++) {
-                NoteColumn checkColumn = noteColumnMapper.selectNoteColumnById(recordItems.get(i).getColumnId());
-                if (checkColumn.getType() == 1L) {
-                    noteRecord.setName(recordItems.get(i).getValue());
-                    break;
-                }
-            }
+        // 派生 name（R1/R2/R7，KTD-2 从 recordItems 反查 dwtableId；KTD-3 先 incoming items 再 recordItems）
+        // 始终派生，前端传入的 name 被覆盖；recordItems 为空则跳过派生、保持原 name（edge）
+        if (!recordItems.isEmpty()) {
+            Long dwtableId = recordItems.get(0).getDwtId();
+            String derivedName = deriveRecordName(dwtableId, items, recordItems);
+            noteRecord.setName(derivedName);
         }
         noteRecordMapper.updateNoteRecord(noteRecord);
         if (items != null) {
@@ -1157,5 +1160,151 @@ public class NoteRecordServiceImpl implements INoteRecordService
             }
         }
         log.info("[RECOMPUTE-LOOKUP] done columnId={}", lookupColumn.getId());
+    }
+
+    /**
+     * 派生记录名称：取该表最左侧 type=1（多行文本）列的值（R1, R6）。
+     * 取值优先级（KTD-3）：先 incomingItems（本次写入新值），再 existingItems（DB 当前值），仍无则返回 ""。
+     * 列表查询 selectNoteColumnList 已按 sort 排序，故首个匹配即为最左侧 type=1 列。
+     *
+     * @param dwtableId      数据表ID（必传）
+     * @param incomingItems  本次写入的 items（Map 列表，可为 null）
+     * @param existingItems  DB 当前 items（可为 null）
+     * @return 派生的行名称；无 type=1 列或值为空则返回 ""
+     */
+    @Override
+    public String deriveRecordName(Long dwtableId,
+                                   List<Map<String, Object>> incomingItems,
+                                   List<NoteDwtableItem> existingItems)
+    {
+        if (dwtableId == null)
+        {
+            return "";
+        }
+        // 查表所有列（已按 sort 排序），找首个 type==1 列
+        NoteColumn queryColumn = new NoteColumn();
+        queryColumn.setDwtableId(dwtableId);
+        List<NoteColumn> columns = noteColumnMapper.selectNoteColumnList(queryColumn);
+        Long sourceColumnId = null;
+        for (NoteColumn col : columns)
+        {
+            if (col.getType() != null && col.getType() == 1L)
+            {
+                sourceColumnId = col.getId();
+                break;
+            }
+        }
+        if (sourceColumnId == null)
+        {
+            return "";
+        }
+        // 先从 incomingItems 取新值（KTD-3）
+        if (incomingItems != null)
+        {
+            for (Map<String, Object> item : incomingItems)
+            {
+                Object colIdObj = item.get("columnId");
+                if (colIdObj == null)
+                {
+                    continue;
+                }
+                Long colId;
+                try
+                {
+                    colId = Long.parseLong(colIdObj.toString());
+                }
+                catch (NumberFormatException e)
+                {
+                    continue;
+                }
+                if (colId.equals(sourceColumnId))
+                {
+                    Object val = item.get("value");
+                    return val == null ? "" : val.toString();
+                }
+            }
+        }
+        // 回退 existingItems（DB 当前值）
+        if (existingItems != null)
+        {
+            for (NoteDwtableItem item : existingItems)
+            {
+                if (sourceColumnId.equals(item.getColumnId()))
+                {
+                    return item.getValue() == null ? "" : item.getValue();
+                }
+            }
+        }
+        return "";
+    }
+
+    /**
+     * 按表重算所有记录的 name 字段（KTD-5 @Transactional，KTD-6 无条件重算幂等）。
+     * 对该表每条记录调用 deriveRecordName(dwtableId, null, items) 重算 name 并 updateNoteRecord 落盘。
+     * 单条记录失败不中断整体流程，记录错误日志后继续。
+     *
+     * @param dwtableId 数据表ID
+     * @return 成功重算的记录数
+     */
+    @Override
+    public int recomputeRecordNamesForTable(Long dwtableId)
+    {
+        if (dwtableId == null)
+        {
+            return 0;
+        }
+        NoteRecordVo queryRecord = new NoteRecordVo();
+        queryRecord.setDwtableId(dwtableId);
+        List<NoteRecord> records = noteRecordMapper.selectNoteRecordList(queryRecord);
+        int updated = 0;
+        for (NoteRecord record : records)
+        {
+            try
+            {
+                NoteDwtableItem queryItem = new NoteDwtableItem();
+                queryItem.setRecordId(record.getId());
+                List<NoteDwtableItem> items = noteDwtableItemMapper.selectNoteDwtableItemList(queryItem);
+                String derivedName = deriveRecordName(dwtableId, null, items);
+                record.setName(derivedName);
+                noteRecordMapper.updateNoteRecord(record);
+                updated++;
+            }
+            catch (Exception e)
+            {
+                log.error("[RECOMPUTE-NAME] 重算失败 dwtableId={}, recordId={}",
+                        dwtableId, record.getId(), e);
+            }
+        }
+        log.info("[RECOMPUTE-NAME] done dwtableId={}, recordCount={}, updated={}",
+                dwtableId, records.size(), updated);
+        return updated;
+    }
+
+    /**
+     * 一次性回填所有数据表所有记录的 name（R5）。
+     * 遍历全部数据表，逐表调用 recomputeRecordNamesForTable（每条 update 自动提交，单条失败不中断）。
+     * 单表失败不中断整体流程，记录错误日志后继续。
+     * 本方法不加 @Transactional（每表独立处理，避免一个大事务）。
+     *
+     * @return 所有表累计成功重算的记录数
+     */
+    @Override
+    public int recomputeAllRecordNames()
+    {
+        List<NoteDwtable> tables = noteDwtableMapper.selectNoteDwtableList(new NoteDwtable());
+        int totalUpdated = 0;
+        for (NoteDwtable table : tables)
+        {
+            try
+            {
+                totalUpdated += recomputeRecordNamesForTable(table.getId());
+            }
+            catch (Exception e)
+            {
+                log.error("[BACKFILL-NAME] 表重算失败 dwtableId={}", table.getId(), e);
+            }
+        }
+        log.info("[BACKFILL-NAME] done tableCount={}, totalUpdated={}", tables.size(), totalUpdated);
+        return totalUpdated;
     }
 }

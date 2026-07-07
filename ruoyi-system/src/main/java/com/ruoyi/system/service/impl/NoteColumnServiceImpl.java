@@ -251,6 +251,8 @@ public class NoteColumnServiceImpl implements INoteColumnService
                 noteColumn.setName(noteColumnvo.getName());
                 noteColumn.setIsShow(noteColumnvo.getIsShow());
                 noteColumnMapper.updateNoteColumn(noteColumn);
+                // 列结构变更触发按表重算 name（KTD-6 无条件重算，幂等）
+                noteRecordService.recomputeRecordNamesForTable(noteColumnvo.getDwtableId());
                 return 1;
             }
             Long tableId = Long.parseLong(property.get("table_id").toString());
@@ -298,6 +300,8 @@ public class NoteColumnServiceImpl implements INoteColumnService
         }
         //----这里往上都是对 双向关联所作的处理-----
 
+        // 列结构变更触发按表重算 name（KTD-6 无条件重算，幂等）
+        noteRecordService.recomputeRecordNamesForTable(noteColumnvo.getDwtableId());
         return 1;
     }
 
@@ -312,6 +316,8 @@ public class NoteColumnServiceImpl implements INoteColumnService
     public int updateSort(List<Map<String, Object>> sorts){
 
         int result = 1;
+        // 收集受影响的 dwtableId（去重），用于排序后按表重算 name
+        java.util.Set<Long> affectedDwtableIds = new java.util.HashSet<>();
         //对sorts做处理
         for(Map<String, Object> data:sorts){
             if(data.get("id")!=null && !data.get("id").equals("")){
@@ -319,17 +325,23 @@ public class NoteColumnServiceImpl implements INoteColumnService
                 NoteColumn column = noteColumnMapper.selectNoteColumnById(columnId);
                 column.setSort(Long.parseLong(data.get("sort").toString()));
                 noteColumnMapper.updateNoteColumn(column);
+                if (column.getDwtableId() != null) {
+                    affectedDwtableIds.add(column.getDwtableId());
+                }
                 result = column.getId().intValue();
             }
         }
-
+        // 重排后重算受影响表 name（KTD-6 无条件重算，幂等）
+        for (Long dwtId : affectedDwtableIds) {
+            noteRecordService.recomputeRecordNamesForTable(dwtId);
+        }
         return result;
     }
 
 
     /**
      * 批量删除列信息
-     * 
+     *
      * @param ids 需要删除的列信息主键
      * @return 结果
      */
@@ -338,10 +350,15 @@ public class NoteColumnServiceImpl implements INoteColumnService
     {
         //在删除列信息之前我们要判断是否是双向链接的列或者是双向链接关联的列，如果是，需要去另一方进行删除
         List<NoteColumn> columnList = noteColumnMapper.selectNoteColumnByIds(ids);
+        // 收集受影响的 dwtableId（去重），用于删除后按表重算 name
+        java.util.Set<Long> affectedDwtableIds = new java.util.HashSet<>();
         if(columnList.size()>0){
             for (NoteColumn noteColumn:columnList) {
                 //删除列信息的时候，同时去检查是否有item信息，找到并删除
                 noteDwtableItemMapper.deleteNoteDwtableItemByColumnId(noteColumn.getId());
+                if(noteColumn.getDwtableId() != null){
+                    affectedDwtableIds.add(noteColumn.getDwtableId());
+                }
                 if(noteColumn.getType()==21||noteColumn.getType()==25){
                     //先执行删除关联列和关联列下的item的操作
                     deleteDataWhenLink(noteColumn);
@@ -350,13 +367,17 @@ public class NoteColumnServiceImpl implements INoteColumnService
             }
         }
 
-
-        return noteColumnMapper.deleteNoteColumnByIds(ids);
+        int result = noteColumnMapper.deleteNoteColumnByIds(ids);
+        // 删除后重算受影响表 name（KTD-6 无条件重算，幂等）
+        for (Long dwtId : affectedDwtableIds) {
+            noteRecordService.recomputeRecordNamesForTable(dwtId);
+        }
+        return result;
     }
 
     /**
      * 删除列信息信息
-     * 
+     *
      * @param id 列信息主键
      * @return 结果
      */
@@ -364,8 +385,16 @@ public class NoteColumnServiceImpl implements INoteColumnService
     public int deleteNoteColumnById(Long id)
     {
         //删除列信息的时候，同时去检查是否有item信息，找到并删除
+        // 删除前先取受影响 dwtableId，用于删除后按表重算 name
+        NoteColumn column = noteColumnMapper.selectNoteColumnById(id);
+        Long affectedDwtableId = column != null ? column.getDwtableId() : null;
         noteDwtableItemMapper.deleteNoteDwtableItemByColumnId(id);
-        return noteColumnMapper.deleteNoteColumnById(id);
+        int result = noteColumnMapper.deleteNoteColumnById(id);
+        // 删除后重算受影响表 name（KTD-6 无条件重算，幂等）
+        if (affectedDwtableId != null) {
+            noteRecordService.recomputeRecordNamesForTable(affectedDwtableId);
+        }
+        return result;
     }
 
 
@@ -381,8 +410,14 @@ public class NoteColumnServiceImpl implements INoteColumnService
             return false;
         }
         Long linkColumnId =Long.parseLong(jsonObject.get("back_field_id").toString());
+        // 查询被关联列以获取其 dwtableId（删除前，KTD-6 无条件重算）
+        NoteColumn linkColumn = noteColumnMapper.selectNoteColumnById(linkColumnId);
         noteDwtableItemMapper.deleteNoteDwtableItemByColumnId(linkColumnId);
         noteColumnMapper.deleteNoteColumnById(linkColumnId);
+        // 删除后重算被关联表 name（KTD-6 无条件重算，幂等）
+        if (linkColumn != null && linkColumn.getDwtableId() != null) {
+            noteRecordService.recomputeRecordNamesForTable(linkColumn.getDwtableId());
+        }
         return true;
     }
 
