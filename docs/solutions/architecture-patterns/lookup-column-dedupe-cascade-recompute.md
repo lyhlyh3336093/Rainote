@@ -1,5 +1,5 @@
 ---
-title: "Lookup Column Dedupe Toggle Cascade Recompute Pattern"
+title: "Lookup列去重开关级联重算模式"
 date: 2026-07-08
 category: docs/solutions/architecture-patterns/
 module: lookup-column-recompute
@@ -7,31 +7,31 @@ problem_type: architecture_pattern
 component: service_object
 severity: high
 applies_when:
-  - "A config flag on a lookup column property changes and stored values plus dependent set-operation columns must be recomputed"
-  - "Implementing a dedupe or similar toggle feature on computed or lookup columns in the note-record system"
-  - "Cascade recompute is needed across columns that reference a changed source column"
+  - "Lookup列property中的配置开关发生变化，需要重算该列存储值及依赖它的集合运算列"
+  - "在笔记记录系统中为计算列或Lookup列实现去重(dedupe)或类似的开关功能"
+  - "需要在引用了某个已变更源列的所有列之间进行级联重算"
 related_components:
   - database
 tags: [lookup-column, dedupe, cascade-recompute, set-operations, data-integrity, config-toggle, recompute-trigger, spring-boot]
 ---
 
-# Lookup Column Dedupe Toggle Cascade Recompute Pattern
+# Lookup列去重开关级联重算模式
 
-## Context
+## 背景
 
-The lookup column (type=26) is a computed column in the RuoYi note/dwtable system whose values are derived by following `double_link_column_id` → `linkRecordIds` → `source_column_id` values, then joined with ",". When multiple linked records share the same source value (e.g., three records all categorized "苹果"), the lookup column displayed "苹果,苹果,苹果" with no way to collapse the duplicates.
+Lookup列(type=26)是RuoYi笔记/数据表系统中的计算列，其值通过 `double_link_column_id` → `linkRecordIds` → `source_column_id` 链路派生后以","拼接而成。当多个关联记录共享同一个源值时（例如三条记录都归类为"苹果"），Lookup列会显示"苹果,苹果,苹果"，无法折叠重复项。
 
-There was no deduplication mechanism, and a deeper gap existed: **computed columns form a dependency graph**. A lookup column feeds into set operation columns (union/intersection/subtract/disjunction), so any change to how a lookup column derives its values must cascade through every dependent computed column — not just the lookup column itself.
+此前没有去重机制，而更深层的问题是：**计算列构成一个依赖图**。Lookup列会作为集合运算列（并集/交集/差集/补集）的输入源，因此任何改变Lookup列值派生方式的操作都必须级联到所有依赖它的计算列——而不仅仅是Lookup列本身。
 
-This work (planned in [the plan doc](file:///d:/WorkSpace/RuoYi-Vue/docs/plans/2026-07-06-001-feat-lookup-column-value-dedupe-plan.md) and scoped in [the brainstorm doc](file:///d:/WorkSpace/RuoYi-Vue/docs/brainstorms/2026-07-06-lookup-column-value-dedupe-requirements.md), requirements R1–R9, units U1/U2/U3) added a `dedupe` config flag to the lookup column's `property` JSON and implemented the cascade recompute pattern. A subsequent code review surfaced six concrete bugs in the first implementation, each illustrating a recurring failure mode when touching computed-column recompute logic.
+本次工作（见 [计划文档](file:///d:/WorkSpace/RuoYi-Vue/docs/plans/2026-07-06-001-feat-lookup-column-value-dedupe-plan.md) 与 [需求文档](file:///d:/WorkSpace/RuoYi-Vue/docs/brainstorms/2026-07-06-lookup-column-value-dedupe-requirements.md)，需求R1–R9，实现单元U1/U2/U3）为Lookup列的 `property` JSON新增了 `dedupe` 配置开关，并实现了级联重算模式。随后的代码审查在首次实现中发现了6个具体缺陷，每一个都体现了触碰计算列重算逻辑时容易复发的失败模式。
 
-## Guidance
+## 指导
 
-### Primary pattern: config flag toggle → cascade recompute across dependent computed columns
+### 核心模式：配置开关切换 → 跨依赖计算列级联重算
 
-When a stored boolean on a computed column's `property` JSON changes the column's derivation behavior, the update path must trigger a **full-table recompute** of that column's stored values **and** a full-table recompute of every other computed column that references it as a source. The recompute is triggered in the column-update entry point by diffing old vs. new property JSON.
+当计算列 `property` JSON中存储的布尔开关改变了列的派生行为时，更新路径必须触发该列存储值的**全表重算**，**并**触发所有以该列为源的其他计算列的全表重算。重算在列更新入口通过对比新旧property JSON的差异来触发。
 
-**Trigger site** — [NoteColumnServiceImpl.java](file:///d:/WorkSpace/RuoYi-Vue/ruoyi-system/src/main/java/com/ruoyi/system/service/impl/NoteColumnServiceImpl.java) `updateNoteColumn` (~L220):
+**触发位置** —— [NoteColumnServiceImpl.java](file:///d:/WorkSpace/RuoYi-Vue/ruoyi-system/src/main/java/com/ruoyi/system/service/impl/NoteColumnServiceImpl.java) `updateNoteColumn` (~L220)：
 
 ```java
 //----lookup列dedupe开关变化时触发全量重算----
@@ -61,16 +61,16 @@ if (originColumn.getType() == 26L && noteColumnvo.getType() == 26L
 }
 ```
 
-Two recompute methods live in [NoteRecordServiceImpl.java](file:///d:/WorkSpace/RuoYi-Vue/ruoyi-system/src/main/java/com/ruoyi/system/service/impl/NoteRecordServiceImpl.java), which owns `resolveLookupValue` and all required mappers:
+两个重算方法位于 [NoteRecordServiceImpl.java](file:///d:/WorkSpace/RuoYi-Vue/ruoyi-system/src/main/java/com/ruoyi/system/service/impl/NoteRecordServiceImpl.java)，该类持有 `resolveLookupValue` 和所有所需的mapper：
 
-- `recomputeLookupColumnValues(NoteColumn lookupColumn)` — iterates every record in the lookup column's table, re-resolves the value, and upserts the stored `NoteDwtableItem` (insert if absent, update otherwise). Per-record failures are caught and logged so one bad record does not abort the whole table.
-- `recomputeSetOperationsForLookup(NoteColumn lookupColumn)` — finds every set operation column in the same table, filters to those whose `columnAId`/`columnBId` reference this lookup column, then for each record recomputes the set result using `fetchColumnDataFromDB` to read fresh source A/B values.
+- `recomputeLookupColumnValues(NoteColumn lookupColumn)` —— 遍历Lookup列所在表的每条记录，重新解析值，并upsert存储的 `NoteDwtableItem`（不存在则插入，存在则更新）。单条记录失败会被捕获并记录日志，不会因一条坏记录而中断整表重算。
+- `recomputeSetOperationsForLookup(NoteColumn lookupColumn)` —— 查找同表中的所有集合运算列，筛选出 `columnAId`/`columnBId` 引用了本Lookup列的列，然后对每条记录用 `fetchColumnDataFromDB` 读取最新源A/B值后重算集合结果。
 
-The same two-step cascade is invoked from the toggle endpoint (`GET /system/column/deduplicate`) in [NoteColumnController.java](file:///d:/WorkSpace/RuoYi-Vue/ruoyi-admin/src/main/java/com/ruoyi/web/controller/system/NoteColumnController.java), which flips the `dedupe` boolean and then calls both recompute methods.
+切换端点（`GET /system/column/deduplicate`）在 [NoteColumnController.java](file:///d:/WorkSpace/RuoYi-Vue/ruoyi-admin/src/main/java/com/ruoyi/web/controller/system/NoteColumnController.java) 中也调用了同样的两步级联：先翻转 `dedupe` 布尔值，再调用两个重算方法。
 
-### Dedup at the single derivation point
+### 在单一派生点应用去重
 
-Dedup is applied once, at the core resolver (`resolveLookupValues`), so the display, storage, and set-operation paths all receive deduplicated input rather than each path re-implementing it. Using `LinkedHashMap.putIfAbsent` preserves insertion order while collapsing duplicate values:
+去重只在核心解析器（`resolveLookupValues`）中应用一次，这样展示、存储、集合运算三条路径都能接收到去重后的输入，而无需各路径重复实现。使用 `LinkedHashMap.putIfAbsent` 在折叠重复值的同时保留插入顺序：
 
 ```java
 Boolean dedupe = jsonObject.getBoolean("dedupe");
@@ -85,9 +85,9 @@ if (Boolean.TRUE.equals(dedupe) && !results.isEmpty())
 }
 ```
 
-### Index alignment between derived recordIds and values
+### 派生recordIds与values的索引对齐
 
-When a downstream consumer needs both the recordIds and values from a lookup column, **both lists must be derived from the same `resolveLookupValues` result** — never mix a raw `getLookupLinkRecordIds` return (full length) with `toLookupValues(resolveLookupValues(...))` (deduped length). `fetchColumnDataFromDB` does this correctly:
+当下游消费者同时需要Lookup列的recordIds和values时，**两个列表必须从同一个 `resolveLookupValues` 结果派生**——绝不能将原始 `getLookupLinkRecordIds` 返回（全长）与 `toLookupValues(resolveLookupValues(...))` 返回（去重后长度）混用。`fetchColumnDataFromDB` 正确地做到了这一点：
 
 ```java
 List<LookupResult> results = resolveLookupValues(column, linkIds);
@@ -95,51 +95,51 @@ recordIds.addAll(results.stream().map(LookupResult::getLinkRecordId).collect(Col
 values.addAll(toLookupValues(results));
 ```
 
-## Why This Matters
+## 为什么这很重要
 
-A computed column's stored values are **denormalized caches** of its derivation logic. When the derivation inputs change (here, the `dedupe` flag), any cached value not refreshed becomes stale — and worse, silently wrong. Two structural risks make this pattern load-bearing:
+计算列的存储值是其派生逻辑的**反规范化缓存**。当派生输入改变（本例中是 `dedupe` 开关），任何未刷新的缓存值都会变旧——更糟的是，会悄无声息地变错。两个结构性风险使此模式至关重要：
 
-1. **Inconsistent caches across a dependency chain.** If only the lookup column is recomputed but a set operation column that consumes it is not, the set operation column retains pre-dedup values. The user sees a lookup column showing `["苹果","梨"]` but a union column still showing `["苹果","苹果","梨"]`. The data appears contradictory with no error.
+1. **依赖链上的缓存不一致。** 如果只重算了Lookup列而没有重算消费它的集合运算列，集合运算列会保留去重前的值。用户看到Lookup列显示 `["苹果","梨"]`，而并集列仍然显示 `["苹果","苹果","梨"]`。数据自相矛盾，却没有任何报错。
 
-2. **Silent data corruption from string-munging idioms.** The recompute path builds result strings from lists. Using `List.toString().replace("[","").replace("]","").replaceAll(" ","")` to serialize a list silently strips *all* spaces from every value — turning `"张 三"` into `"张三"` and `"New York"` into `"NewYork"`. This is a data-integrity bug, not a formatting nit.
+2. **字符串拼接惯用法导致的静默数据损坏。** 重算路径需要从列表构建结果字符串。使用 `List.toString().replace("[","").replace("]","").replaceAll(" ","")` 序列化列表会静默地剥离每个值的**所有**空格——把 `"张 三"` 变成 `"张三"`，把 `"New York"` 变成 `"NewYork"`。这是数据完整性缺陷，不是格式问题。
 
-The six code-review fixes below each capture a distinct failure mode that is easy to reintroduce when writing recompute/serialization logic. They are documented here so the next computed-column feature does not repeat them.
+下方6个代码审查修复各自捕获了一种独特的失败模式，这些模式在编写重算/序列化逻辑时极易复发。记录在此是为了让下一个计算列特性不再重蹈覆辙。
 
-## When to Apply
+## 适用场景
 
-- You are adding a **stored config flag** (boolean, enum, or mode) on a computed column whose value depends on it, and the column's results are cached/stored rather than computed purely on read.
-- A computed column is a **source for other computed columns** (set operations, roll-ups, derived columns). Changing the source's derivation requires cascading to all consumers.
-- You are writing a **full-table recompute** method that iterates records and upserts stored items.
-- You are serializing a `List<String>` into a single comma-separated string for storage.
-- You are branching on a `calcType`/`mode` string in a recompute loop and the default branch currently leaves the result empty.
+- 你正在为计算列添加**存储型配置开关**（布尔、枚举或模式），且该列的值依赖于它，列的结果是缓存/存储的而非纯读取时计算。
+- 某个计算列是**其他计算列的源**（集合运算、汇总、派生列）。改变源的派生方式需要级联到所有消费者。
+- 你正在编写**全表重算**方法，遍历记录并upsert存储项。
+- 你正在将 `List<String>` 序列化为单个逗号分隔字符串存储。
+- 你正在重算循环中根据 `calcType`/`mode` 字符串分支，且默认分支当前会让结果为空。
 
-## Examples
+## 示例
 
-### Fix 1 (P0 — data corruption): never strip spaces when serializing a list
+### 修复1（P0 — 数据损坏）：序列化列表时绝不要剥离空格
 
-**File**: [NoteRecordServiceImpl.java](file:///d:/WorkSpace/RuoYi-Vue/ruoyi-system/src/main/java/com/ruoyi/system/service/impl/NoteRecordServiceImpl.java), `recomputeSetOperationsForLookup` (~L1329).
+**文件**：[NoteRecordServiceImpl.java](file:///d:/WorkSpace/RuoYi-Vue/ruoyi-system/src/main/java/com/ruoyi/system/service/impl/NoteRecordServiceImpl.java)，`recomputeSetOperationsForLookup` (~L1329)。
 
-**Before** — `replaceAll(" ", "")` strips *all* spaces from values, corrupting `"张 三"` → `"张三"`:
+**修改前** —— `replaceAll(" ", "")` 会剥离值的**所有**空格，将 `"张 三"` 损坏为 `"张三"`：
 
 ```java
 resultItem.setValue(rValues.toString().replace("[", "").replace("]", "").replaceAll(" ", ""));
 resultItem.setLinkRecordId(rRecordIds.toString().replace("[", "").replace("]", "").replaceAll(" ", ""));
 ```
 
-**After** — join with comma, preserving spaces:
+**修改后** —— 用逗号拼接，保留空格：
 
 ```java
 resultItem.setValue(String.join(",", rValues));
 resultItem.setLinkRecordId(String.join(",", rRecordIds));
 ```
 
-`List.toString()` produces `[a, b, c]`; the old code stripped the brackets and every space. `String.join(",", list)` is the correct idiom. This was the highest-severity fix because it silently mutated user data on every recompute.
+`List.toString()` 产生 `[a, b, c]`；旧代码剥离了方括号和所有空格。`String.join(",", list)` 才是正确的惯用法。这是最高严重级别的修复，因为它在每次重算时都静默篡改用户数据。
 
-### Fix 2 (P1 — missing cascade call): recompute both the column AND its dependents
+### 修复2（P1 — 缺失级联调用）：列与其依赖者都要重算
 
-**File**: [NoteColumnServiceImpl.java](file:///d:/WorkSpace/RuoYi-Vue/ruoyi-system/src/main/java/com/ruoyi/system/service/impl/NoteColumnServiceImpl.java), `updateNoteColumn` (~L234).
+**文件**：[NoteColumnServiceImpl.java](file:///d:/WorkSpace/RuoYi-Vue/ruoyi-system/src/main/java/com/ruoyi/system/service/impl/NoteColumnServiceImpl.java)，`updateNoteColumn` (~L234)。
 
-**Before** — only the lookup column was recomputed, leaving set operation columns stale:
+**修改前** —— 只重算了Lookup列，集合运算列保持陈旧：
 
 ```java
 if (oldDedupe != newDedupe)
@@ -148,7 +148,7 @@ if (oldDedupe != newDedupe)
 }
 ```
 
-**After** — both cascade steps:
+**修改后** —— 两步级联：
 
 ```java
 if (oldDedupe != newDedupe)
@@ -158,13 +158,13 @@ if (oldDedupe != newDedupe)
 }
 ```
 
-This is the canonical statement of the cascade pattern: a config-flag change requires refreshing the changed column **and** every computed column that consumes it. The toggle endpoint already had both calls; the update path initially had only one.
+这是级联模式的权威表述：配置开关变更需要刷新变更的列**以及**所有消费它的计算列。切换端点已有两个调用；更新路径最初只有一个。
 
-### Fix 3 (P1 — silent exception swallowing): log, never silently swallow
+### 修复3（P1 — 静默吞异常）：要记录日志，绝不静默吞没
 
-**File**: [NoteColumnServiceImpl.java](file:///d:/WorkSpace/RuoYi-Vue/ruoyi-system/src/main/java/com/ruoyi/system/service/impl/NoteColumnServiceImpl.java), `updateNoteColumn` catch block (~L239).
+**文件**：[NoteColumnServiceImpl.java](file:///d:/WorkSpace/RuoYi-Vue/ruoyi-system/src/main/java/com/ruoyi/system/service/impl/NoteColumnServiceImpl.java)，`updateNoteColumn` catch块 (~L239)。
 
-**Before** — silent swallow, no signal anything went wrong:
+**修改前** —— 静默吞没，没有任何出错信号：
 
 ```java
 catch (Exception e)
@@ -173,7 +173,7 @@ catch (Exception e)
 }
 ```
 
-**After** — logged with columnId context, plus a `Logger` field and imports added to the class:
+**修改后** —— 带columnId上下文记录日志，并为类添加了 `Logger` 字段和import：
 
 ```java
 catch (Exception e)
@@ -183,32 +183,32 @@ catch (Exception e)
 }
 ```
 
-A swallowed exception in a recompute path is invisible: the user toggles the flag, the stored values never update, and there is no log to find. Always log with an identifying key (`columnId`, `recordId`) so the failure is traceable.
+重算路径中被吞没的异常是不可见的：用户切换开关，存储值从未更新，也没有任何日志可查。务必用标识键（`columnId`、`recordId`）记录日志，使失败可追溯。
 
-### Fix 4 (P2 — NPE risk): guard the value, not just the linkRecordId
+### 修复4（P2 — NPE风险）：要同时守护value，不只是linkRecordId
 
-**File**: [NoteRecordServiceImpl.java](file:///d:/WorkSpace/RuoYi-Vue/ruoyi-system/src/main/java/com/ruoyi/system/service/impl/NoteRecordServiceImpl.java), `fetchColumnDataFromDB` type=21 path (~L1202).
+**文件**：[NoteRecordServiceImpl.java](file:///d:/WorkSpace/RuoYi-Vue/ruoyi-system/src/main/java/com/ruoyi/system/service/impl/NoteRecordServiceImpl.java)，`fetchColumnDataFromDB` type=21路径 (~L1202)。
 
-**Before** — NPE if `value` is null but `linkRecordId` is non-null (then `item.getValue().split(",")` throws):
+**修改前** —— `value` 为null但 `linkRecordId` 非null时会NPE（随后 `item.getValue().split(",")` 抛异常）：
 
 ```java
 if (item == null || item.getLinkRecordId() == null || "".equals(item.getLinkRecordId()))
 ```
 
-**After** — added null check for value:
+**修改后** —— 为value添加null检查：
 
 ```java
 if (item == null || item.getLinkRecordId() == null || "".equals(item.getLinkRecordId())
         || item.getValue() == null)
 ```
 
-When two parallel fields can independently be null, a guard clause must check both — the early-return should fire if *either* is unusable, not only if the first one is.
+当两个并行字段可以独立为null时，守护子句必须同时检查两者——早返回应该在**任一**不可用时触发，而不是只在第一个不可用时。
 
-### Fix 5 (P3 — redundant queries): hoist invariant queries out of loops
+### 修复5（P3 — 冗余查询）：将循环不变查询提升到循环外
 
-**File**: [NoteRecordServiceImpl.java](file:///d:/WorkSpace/RuoYi-Vue/ruoyi-system/src/main/java/com/ruoyi/system/service/impl/NoteRecordServiceImpl.java), `recomputeSetOperationsForLookup` (~L1219).
+**文件**：[NoteRecordServiceImpl.java](file:///d:/WorkSpace/RuoYi-Vue/ruoyi-system/src/main/java/com/ruoyi/system/service/impl/NoteRecordServiceImpl.java)，`recomputeSetOperationsForLookup` (~L1219)。
 
-**Before** — `selectNoteRecordList` called once per `setColumn` inside the loop, M identical queries:
+**修改前** —— `selectNoteRecordList` 在循环内每个 `setColumn` 调用一次，M次相同查询：
 
 ```java
 for (NoteColumn setColumn : setColumns)
@@ -220,7 +220,7 @@ for (NoteColumn setColumn : setColumns)
 }
 ```
 
-**After** — hoisted before the loop, called once:
+**修改后** —— 提升到循环前，只调用一次：
 
 ```java
 NoteRecordVo queryRecord = new NoteRecordVo();
@@ -233,13 +233,13 @@ for (NoteColumn setColumn : setColumns)
 }
 ```
 
-When a query depends only on loop-invariant inputs (here, `lookupColumn.getDwtableId()`), compute it once. On a table with 10 set operation columns this is a 10× reduction in identical DB round-trips.
+当查询只依赖循环不变输入（此处是 `lookupColumn.getDwtableId()`）时，只计算一次。在一张有10个集合运算列的表上，这是10倍相同DB往返的削减。
 
-### Fix 6 (P2 — silent data wipe on unknown calcType): never fall through with an empty result
+### 修复6（P2 — 未知calcType的静默数据清空）：绝不要以空结果贯穿到底
 
-**File**: [NoteRecordServiceImpl.java](file:///d:/WorkSpace/RuoYi-Vue/ruoyi-system/src/main/java/com/ruoyi/system/service/impl/NoteRecordServiceImpl.java), `recomputeSetOperationsForLookup` (~L1295).
+**文件**：[NoteRecordServiceImpl.java](file:///d:/WorkSpace/RuoYi-Vue/ruoyi-system/src/main/java/com/ruoyi/system/service/impl/NoteRecordServiceImpl.java)，`recomputeSetOperationsForLookup` (~L1295)。
 
-**Before** — unknown `calcType` falls through, `rRecordIds` stays empty, and the code proceeds to write the empty result back to storage — **silently wiping the user's data**:
+**修改前** —— 未知 `calcType` 贯穿到底，`rRecordIds` 保持为空，代码继续将空结果写回存储——**静默清空用户数据**：
 
 ```java
 if ("intersection".equals(calcType))
@@ -250,10 +250,10 @@ else if ("union".equals(calcType))
 {
     rRecordIds = (List<String>) CollectionUtils.union(aRecordIds, bRecordIds);
 }
-// no else — unknown calcType leaves rRecordIds empty → stored value wiped
+// 无else —— 未知calcType使rRecordIds为空 → 存储值被清空
 ```
 
-**After** — else branch skips and warns:
+**修改后** —— else分支跳过并告警：
 
 ```java
 else if ("union".equals(calcType))
@@ -269,15 +269,15 @@ else
 }
 ```
 
-The rule: a recompute path that writes its result back to storage must **never** persist a value derived from an unhandled branch. If you cannot compute a result, `continue` and leave the existing stored value intact — do not write an empty list. This is the most dangerous class of bug in a recompute loop because it is both silent and destructive.
+规则是：将结果写回存储的重算路径**绝不**应持久化从未处理分支派生的值。如果无法计算结果，就 `continue` 并保留现有存储值——不要写空列表。这是重算循环中最危险的一类缺陷，因为它既静默又具破坏性。
 
-### Verification
+### 验证
 
-71 tests pass (25 `NoteColumnServiceImplTest` + 46 `NoteRecordServiceImplTest`), 0 failures. The test suite covers dedupe on/off semantics, index alignment for all four set operation types, the toggle trigger, single-record failure isolation (R8), and the unknown-calcType skip behavior.
+71个测试通过（25个 `NoteColumnServiceImplTest` + 46个 `NoteRecordServiceImplTest`），0失败。测试套件覆盖了去重开/关语义、四种集合运算类型的索引对齐、切换触发、单条记录失败隔离（R8）以及未知calcType跳过行为。
 
-## Related
+## 相关文档
 
-- [Lookup Column Code Simplification Patterns](file:///d:/WorkSpace/RuoYi-Vue/docs/solutions/design-patterns/lookup-column-code-simplification-patterns.md) — broader code-simplification patterns for lookup column implementation. Complements this doc; this doc adds the cascade-recompute architecture and the six concrete failure-mode fixes.
-- [Lookup Column Set Operation Logic Errors](file:///d:/WorkSpace/RuoYi-Vue/docs/solutions/logic-errors/lookup-column-set-operation-logic-errors.md) — earlier set-operation logic errors. Some issues overlap with Fixes 2/4/6 here; this doc supersedes those portions with fuller before/after and the cascade-pattern framing. The earlier doc remains useful for its coverage of pre-existing alignment bugs not addressed here.
-- [Plan doc](file:///d:/WorkSpace/RuoYi-Vue/docs/plans/2026-07-06-001-feat-lookup-column-value-dedupe-plan.md) — requirements R1–R9, implementation units U1/U2/U3.
-- [Brainstorm doc](file:///d:/WorkSpace/RuoYi-Vue/docs/brainstorms/2026-07-06-lookup-column-value-dedupe-requirements.md) — requirements and acceptance examples.
+- [Lookup列代码简化模式](file:///d:/WorkSpace/RuoYi-Vue/docs/solutions/design-patterns/lookup-column-code-simplification-patterns.md) —— 更广泛的Lookup列实现代码简化模式。与本文档互补；本文档新增了级联重算架构和六个具体失败模式修复。
+- [Lookup列集合运算逻辑错误](file:///d:/WorkSpace/RuoYi-Vue/docs/solutions/logic-errors/lookup-column-set-operation-logic-errors.md) —— 较早的集合运算逻辑错误文档。部分问题与本文修复2/4/6重叠；本文档以更完整的前后对比和级联模式框架取代了那些部分。较早的文档对未在此处处理的既有对齐缺陷的覆盖仍有参考价值。
+- [计划文档](file:///d:/WorkSpace/RuoYi-Vue/docs/plans/2026-07-06-001-feat-lookup-column-value-dedupe-plan.md) —— 需求R1–R9，实现单元U1/U2/U3。
+- [需求文档](file:///d:/WorkSpace/RuoYi-Vue/docs/brainstorms/2026-07-06-lookup-column-value-dedupe-requirements.md) —— 需求与验收示例。

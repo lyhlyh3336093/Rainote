@@ -1,12 +1,12 @@
 # AGENTS.md
 
-Entry point for AI agents working in this repository.
+本仓库中AI代理工作的入口。
 
-## Knowledge store
+## 知识库
 
-- **`docs/solutions/`** — documented solutions and learnings, organized by category (architecture-patterns, design-patterns, logic-errors, etc.). Search here before solving a problem; add here when you solve something non-trivial.
-- **`CONCEPTS.md`** — shared domain vocabulary. Defines project-specific terms (NoteColumn, Double Link Column, Lookup Column, Set Operation Column, etc.) that `docs/solutions/` and conversations cite without redefinition.
+- **`docs/solutions/`** —— 已沉淀的解决方案与经验，按类别组织（architecture-patterns、design-patterns、logic-errors等）。解决问题前先在此检索；解决非平凡问题后在此沉淀。
+- **`CONCEPTS.md`** —— 共享领域词汇表。定义项目专有术语（NoteColumn、Double Link Column、Lookup Column、Set Operation Column等），供 `docs/solutions/` 与对话引用而无需重新定义。
 
-## Documenting a solution
+## 沉淀解决方案
 
-When you solve a non-trivial problem, capture it via the `ce-compound` skill: it researches, cross-references existing docs, and writes a structured doc to `docs/solutions/<category>/` with YAML frontmatter. Use `ce-compound-refresh` to audit and update stale docs.
+当你解决了一个非平凡问题，通过 `ce-compound` skill 沉淀：它会做调研、交叉引用已有文档，并向 `docs/solutions/<类别>/` 写入带YAML frontmatter的结构化文档。使用 `ce-compound-refresh` 审计并更新陈旧文档。
