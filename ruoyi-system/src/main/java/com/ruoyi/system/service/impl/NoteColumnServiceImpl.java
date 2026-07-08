@@ -15,6 +15,8 @@ import com.ruoyi.system.domain.vo.NoteRecordVo;
 import com.ruoyi.system.mapper.NoteDwtableItemMapper;
 import com.ruoyi.system.mapper.NoteDwtableMapper;
 import com.ruoyi.system.mapper.NoteRecordMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import com.ruoyi.system.mapper.NoteColumnMapper;
@@ -24,13 +26,15 @@ import com.ruoyi.system.service.INoteRecordService;
 
 /**
  * 列信息Service业务层处理
- * 
+ *
  * @author liuyanghe
  * @date 2023-04-03
  */
 @Service
-public class NoteColumnServiceImpl implements INoteColumnService 
+public class NoteColumnServiceImpl implements INoteColumnService
 {
+    private static final Logger log = LoggerFactory.getLogger(NoteColumnServiceImpl.class);
+
     @Autowired
     private NoteColumnMapper noteColumnMapper;
 
@@ -228,12 +232,14 @@ public class NoteColumnServiceImpl implements INoteColumnService
                     if (oldDedupe != newDedupe)
                     {
                         noteRecordService.recomputeLookupColumnValues(noteColumn);
+                        noteRecordService.recomputeSetOperationsForLookup(noteColumn);
                     }
                 }
             }
             catch (Exception e)
             {
-                // property非合法JSON，跳过重算
+                // property非合法JSON或重算失败，跳过重算
+                log.error("[UPDATE-COLUMN] dedupe重算失败 columnId={}", noteColumnvo.getId(), e);
             }
         }
 

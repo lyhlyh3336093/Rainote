@@ -1199,7 +1199,8 @@ public class NoteRecordServiceImpl implements INoteRecordService
             query.setRecordId(recordId);
             query.setColumnId(column.getId());
             NoteDwtableItem item = noteDwtableItemMapper.selectNoteDwtableItemByRecordAndColumn(query);
-            if (item == null || item.getLinkRecordId() == null || "".equals(item.getLinkRecordId()))
+            if (item == null || item.getLinkRecordId() == null || "".equals(item.getLinkRecordId())
+                    || item.getValue() == null)
             {
                 return false;
             }
@@ -1217,6 +1218,9 @@ public class NoteRecordServiceImpl implements INoteRecordService
     {
         List<NoteColumn> setColumns = noteColumnMapper.selectSetColumnByDwtId(lookupColumn.getDwtableId());
         String lookupColumnIdStr = lookupColumn.getId().toString();
+        NoteRecordVo queryRecord = new NoteRecordVo();
+        queryRecord.setDwtableId(lookupColumn.getDwtableId());
+        List<NoteRecord> records = noteRecordMapper.selectNoteRecordList(queryRecord);
 
         for (NoteColumn setColumn : setColumns)
         {
@@ -1239,9 +1243,6 @@ public class NoteRecordServiceImpl implements INoteRecordService
                     continue;
                 }
 
-                NoteRecordVo queryRecord = new NoteRecordVo();
-                queryRecord.setDwtableId(lookupColumn.getDwtableId());
-                List<NoteRecord> records = noteRecordMapper.selectNoteRecordList(queryRecord);
                 log.info("[RECOMPUTE-SET-OP] start setColumnId={}, lookupColumnId={}, recordCount={}",
                         setColumn.getId(), lookupColumn.getId(), records.size());
 
@@ -1291,6 +1292,13 @@ public class NoteRecordServiceImpl implements INoteRecordService
                         {
                             rRecordIds = (List<String>) CollectionUtils.union(aRecordIds, bRecordIds);
                         }
+                        else
+                        {
+                            // 未知calcType，跳过本记录，避免清空已有结果
+                            log.warn("[RECOMPUTE-SET-OP] 未知calcType={} setColumnId={}, recordId={}",
+                                    calcType, setColumn.getId(), record.getId());
+                            continue;
+                        }
 
                         List<String> rValues = new ArrayList<>();
                         for (String id : rRecordIds)
@@ -1318,8 +1326,8 @@ public class NoteRecordServiceImpl implements INoteRecordService
                             resultItem.setColumnId(setColumn.getId());
                             resultItem.setDwtId(lookupColumn.getDwtableId());
                         }
-                        resultItem.setValue(rValues.toString().replace("[", "").replace("]", "").replaceAll(" ", ""));
-                        resultItem.setLinkRecordId(rRecordIds.toString().replace("[", "").replace("]", "").replaceAll(" ", ""));
+                        resultItem.setValue(String.join(",", rValues));
+                        resultItem.setLinkRecordId(String.join(",", rRecordIds));
                         if (resultItem.getId() == null)
                         {
                             noteDwtableItemMapper.insertNoteDwtableItem(resultItem);

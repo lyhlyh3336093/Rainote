@@ -17,6 +17,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import com.ruoyi.common.annotation.Log;
 import com.ruoyi.common.core.controller.BaseController;
@@ -175,8 +176,8 @@ public class NoteColumnController extends BaseController
      * 切换lookup列去重开关，并重算该列存储值及关联的集合运算列
      */
     @Log(title = "列信息", businessType = BusinessType.UPDATE)
-    @GetMapping("/deduplicate/{columnId}")
-    public AjaxResult deduplicate(@PathVariable("columnId") Long columnId)
+    @GetMapping("/deduplicate")
+    public AjaxResult deduplicate(@RequestParam("columnId") Long columnId)
     {
         return toAjax(noteColumnService.deduplicate(columnId));
     }

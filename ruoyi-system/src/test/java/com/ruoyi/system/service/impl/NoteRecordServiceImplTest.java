@@ -1571,7 +1571,8 @@ public class NoteRecordServiceImplTest
 
         noteRecordService.recomputeSetOperationsForLookup(lookupColumn);
 
-        verify(noteRecordMapper, never()).selectNoteRecordList(any());
+        // selectNoteRecordList 已被提升到循环外（性能优化），无论是否有匹配都会调用一次
+        verify(noteRecordMapper, times(1)).selectNoteRecordList(any());
         verify(noteDwtableItemMapper, never()).updateNoteDwtableItem(any(NoteDwtableItem.class));
         verify(noteDwtableItemMapper, never()).insertNoteDwtableItem(any(NoteDwtableItem.class));
     }
