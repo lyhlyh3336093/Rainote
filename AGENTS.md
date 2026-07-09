@@ -4,7 +4,7 @@
 
 ## 知识库
 
-- **`docs/solutions/`** —— 已沉淀的解决方案与经验，按类别组织（architecture-patterns、design-patterns、logic-errors等）。解决问题前先在此检索；解决非平凡问题后在此沉淀。
+- **`docs/solutions/`** —— 已沉淀的解决方案与经验，按类别组织（architecture-patterns、design-patterns、logic-errors、workflow-issues等）。解决问题前先在此检索；解决非平凡问题后在此沉淀。
 - **`CONCEPTS.md`** —— 共享领域词汇表。定义项目专有术语（NoteColumn、Double Link Column、Lookup Column、Set Operation Column等），供 `docs/solutions/` 与对话引用而无需重新定义。
 
 ## 沉淀解决方案
