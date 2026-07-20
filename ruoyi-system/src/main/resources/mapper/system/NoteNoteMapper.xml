@@ -1,0 +1,277 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ruoyi.system.mapper.NoteNoteMapper">
+    
+    <resultMap type="NoteNote" id="NoteNoteResult">
+        <result property="id"    column="id"    />
+        <result property="title"    column="title"    />
+        <result property="remark"    column="remark"    />
+        <result property="revisionId"    column="revisionId"    />
+        <result property="parentId"    column="parentId"    />
+        <result property="noteType"    column="noteType"    />
+        <result property="delFlag"    column="delFlag"    />
+        <result property="collectionFlag"    column="collectionFlag"    />
+        <result property="auth"    column="auth"    />
+        <result property="content"    column="content"    />
+        <result property="perms"    column="perms"    />
+        <result property="templateFlag"    column="templateFlag"    />
+    </resultMap>
+
+    <sql id="selectNoteNoteVo">
+        select id, title, remark, revisionId, parentId, noteType,delFlag,collectionFlag,auth,content,perms,templateFlag from note_note
+    </sql>
+
+    <select id="selectNoteNoteList" parameterType="NoteNote" resultMap="NoteNoteResult">
+        <include refid="selectNoteNoteVo"/>
+        <where>
+            <if test="title != null  and title != ''"> and title like concat('%',#{title},'%') </if>
+            <if test="remark != null  and remark != ''"> and remark = #{remark}</if>
+            <if test="revisionId != null "> and revisionId = #{revisionId}</if>
+            <if test="parentId != null "> and parentId = #{parentId}</if>
+            <if test="noteType != null "> and noteType = #{noteType}</if>
+            <if test="collectionFlag != null "> and collectionFlag = #{collectionFlag}</if>
+            <if test="auth != null "> and auth = #{auth}</if>
+             and delFlag = 0
+        </where>
+    </select>
+
+    <select id="selectNoteNoteChildrenByParentId" parameterType="Long" resultMap="NoteNoteResult">
+        <include refid="selectNoteNoteVo"/>
+        where parentId = #{parentId}
+    </select>
+
+    <select id="selectNoteGarbageList" parameterType="NoteNote" resultMap="NoteNoteResult">
+        <include refid="selectNoteNoteVo"/>
+        <where>
+            <if test="title != null  and title != ''">  and title like concat('%',#{title},'%') </if>
+            <if test="remark != null  and remark != ''"> and remark = #{remark}</if>
+            <if test="revisionId != null "> and revisionId = #{revisionId}</if>
+            <if test="parentId != null "> and parentId = #{parentId}</if>
+            <if test="noteType != null "> and noteType = #{noteType}</if>
+            <if test="collectionFlag != null "> and collectionFlag = #{collectionFlag}</if>
+            <if test="auth != null "> and auth = #{auth}</if>
+            and delFlag = 1
+        </where>
+    </select>
+
+
+    <select id="selectNoteTemplateList" parameterType="NoteNote" resultMap="NoteNoteResult">
+        <include refid="selectNoteNoteVo"/>
+        <where>
+            <if test="title != null  and title != ''">  and title like concat('%',#{title},'%') </if>
+            <if test="remark != null  and remark != ''"> and remark = #{remark}</if>
+            <if test="revisionId != null "> and revisionId = #{revisionId}</if>
+            <if test="parentId != null "> and parentId = #{parentId}</if>
+            <if test="noteType != null "> and noteType = #{noteType}</if>
+            <if test="collectionFlag != null "> and collectionFlag = #{collectionFlag}</if>
+            <if test="auth != null "> and auth = #{auth}</if>
+            and delFlag = 0
+            and templateFlag = 1
+        </where>
+    </select>
+
+    <select id="selectCollectionList" parameterType="NoteNote" resultMap="NoteNoteResult">
+        <include refid="selectNoteNoteVo"/>
+        <where>
+            <if test="title != null  and title != ''"> and title like concat('%',#{title},'%') </if>
+            <if test="remark != null  and remark != ''"> and remark = #{remark}</if>
+            <if test="revisionId != null "> and revisionId = #{revisionId}</if>
+            <if test="parentId != null "> and parentId = #{parentId}</if>
+            <if test="noteType != null "> and noteType = #{noteType}</if>
+            <if test="collectionFlag != null "> and collectionFlag = #{collectionFlag}</if>
+            <if test="auth != null "> and auth = #{auth}</if>
+            and collectionFlag = 1
+        </where>
+    </select>
+    
+    <select id="selectNoteNoteById" parameterType="Long" resultMap="NoteNoteResult">
+        <include refid="selectNoteNoteVo"/>
+        where id = #{id}
+    </select>
+
+    <select id="selectNoteDefaultNote"  resultMap="NoteNoteResult">
+        <include refid="selectNoteNoteVo"/>
+        where parentId = 0
+    </select>
+
+    <select id="selectNoteMenuList"  resultMap="NoteNoteResult">
+        <include refid="selectNoteNoteVo"/>
+        where noteType = 1 and delFlag = 0
+            order by parentId
+    </select>
+
+    <select id="selectAllNoteList"  resultMap="NoteNoteResult">
+        <include refid="selectNoteNoteVo"/>
+        where  delFlag = 0
+        order by parentId
+    </select>
+
+
+    <select id="selectAllMenuList"  resultMap="NoteNoteResult">
+        <include refid="selectNoteNoteVo"/>
+        where  delFlag = 0 and noteType != 5
+        order by parentId
+    </select>
+
+
+    <select id="selectAllMenuAuthList"  resultMap="NoteNoteResult">
+        <include refid="selectNoteNoteVo"/>
+        where  delFlag = 0 and noteType in (1, 5)
+        order by parentId
+    </select>
+
+    <select id="selectNoteMenuListByUserId" parameterType="Long" resultMap="NoteNoteResult">
+        select distinct n.* from note_note n
+        left join note_role_menu nrm on n.id = nrm.menu_id
+        left join note_user_role nur on nrm.role_id = nur.role_id
+        left join sys_user u on nur.user_id = u.user_id
+        where u.user_id = #{userId} and n.delFlag = 0 and n.noteType = 1
+        order by n.parentId
+    </select>
+
+    <select id="selectNoteMenuAuthListByUserId" parameterType="Long" resultMap="NoteNoteResult">
+        select distinct n.* from note_note n
+             left join note_role_menu nrm on n.id = nrm.menu_id
+             left join note_user_role nur on nrm.role_id = nur.role_id
+             left join sys_user u on nur.user_id = u.user_id
+        where u.user_id = #{userId} and n.delFlag = 0 and n.noteType in (1, 5)
+        order by n.parentId
+    </select>
+
+    <select id="selectNoteMenuAuthListByRoleId" parameterType="Long" resultMap="NoteNoteResult">
+        select distinct n.* from note_note n
+             left join note_role_menu nrm on n.id = nrm.menu_id
+        where nrm.role_id = #{roleId} and n.delFlag = 0 and n.noteType in (1, 5)
+        order by n.parentId
+    </select>
+
+    <select id="selectNoteMenuAuthList" resultMap="NoteNoteResult">
+        select distinct n.* from note_note n
+        where n.delFlag = 0 and n.noteType in (1, 5)
+        order by n.parentId
+    </select>
+
+
+    <select id="selectNoteListByUserId" parameterType="Long" resultMap="NoteNoteResult">
+        select distinct n.* from note_note n
+         left join note_role_menu nrm on n.id = nrm.menu_id
+         left join note_user_role nur on nrm.role_id = nur.role_id
+         left join sys_user u on nur.user_id = u.user_id
+        where u.user_id = #{userId} and n.delFlag = 0
+        and n.noteType != 5
+        order by n.parentId
+    </select>
+
+    <select id="selectNoteListByAuthId" parameterType="Long" resultMap="NoteNoteResult">
+        <include refid="selectNoteNoteVo"/>
+        where auth = #{userId} and delFlag = 0
+          and noteType in (1,2,3,4)
+        order by parentId
+    </select>
+
+        
+    <insert id="insertNoteNote" useGeneratedKeys="true" keyColumn="id" keyProperty="id" parameterType="NoteNote">
+        insert into note_note
+        <trim prefix="(" suffix=")" suffixOverrides=",">
+            <if test="id != null">id,</if>
+            <if test="title != null and title != ''">title,</if>
+            <if test="remark != null">remark,</if>
+            <if test="revisionId != null">revisionId,</if>
+            <if test="parentId != null">parentId,</if>
+            <if test="noteType != null">noteType,</if>
+            <if test="delFlag != null">delFlag,</if>
+            <if test="collectionFlag != null "> collectionFlag,</if>
+            <if test="auth != null "> auth,</if>
+            <if test="content != null "> content,</if>
+         </trim>
+        <trim prefix="values (" suffix=")" suffixOverrides=",">
+            <if test="id != null">#{id},</if>
+            <if test="title != null and title != ''">#{title},</if>
+            <if test="remark != null">#{remark},</if>
+            <if test="revisionId != null">#{revisionId},</if>
+            <if test="parentId != null">#{parentId},</if>
+            <if test="noteType != null">#{noteType},</if>
+            <if test="delFlag != null">#{delFlag},</if>
+            <if test="collectionFlag != null ">#{collectionFlag},</if>
+            <if test="auth != null ">#{auth},</if>
+            <if test="content != null ">#{content},</if>
+         </trim>
+    </insert>
+
+    <update id="updateNoteNote" parameterType="NoteNote">
+        update note_note
+        <trim prefix="SET" suffixOverrides=",">
+            <if test="title != null and title != ''">title = #{title},</if>
+            <if test="remark != null">remark = #{remark},</if>
+            <if test="revisionId != null">revisionId = #{revisionId},</if>
+            <if test="parentId != null">parentId = #{parentId},</if>
+            <if test="noteType != null">noteType = #{noteType},</if>
+            <if test="delFlag != null">delFlag = #{delFlag},</if>
+            <if test="collectionFlag != null ">collectionFlag = #{collectionFlag},</if>
+            <if test="auth != null ">auth = #{auth},</if>
+            <if test="content != null ">content = #{content},</if>
+        </trim>
+        where id = #{id}
+    </update>
+
+    <update id="cancelCollectionById" parameterType="String">
+        update note_note set collectionFlag = 0 where id = #{id}
+    </update>
+
+    <update id="collectionNoteById" parameterType="String">
+        update note_note set collectionFlag = 1 where id = #{id}
+    </update>
+
+
+    <update id="setTemplate" parameterType="String">
+        update note_note set templateFlag = 1 where id = #{id}
+    </update>
+
+    <update id="removeTemplate" parameterType="String">
+        update note_note set templateFlag = 0 where id = #{id}
+    </update>
+
+
+    <delete id="deleteNoteNoteById" parameterType="Long">
+        update note_note set delFlag = 1 where id = #{id}
+    </delete>
+
+    <update id="recoverNoteNoteByIds" parameterType="String">
+        update note_note set delFlag = 0 where id in
+        <foreach item="id" collection="array" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </update>
+
+    <update id="deleteNoteNoteByIds" parameterType="String">
+        update note_note set delFlag = 1 where id in
+        <foreach item="id" collection="array" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </update>
+
+
+    <delete id="removeAll" >
+        delete from note_note where parentId != 0
+    </delete>
+
+
+    <delete id="removeAllData" >
+        delete from note_note where parentId != 0 or parentId in (1,2,3,233)
+    </delete>
+
+
+    <update id="resettingIdTo50">
+        alter table note_note AUTO_INCREMENT = 100
+    </update>
+
+
+    <delete id="deleteNoteFromGarbageByIds" parameterType="String">
+        delete from note_note where id in
+        <foreach item="id" collection="array" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </delete>
+</mapper>
