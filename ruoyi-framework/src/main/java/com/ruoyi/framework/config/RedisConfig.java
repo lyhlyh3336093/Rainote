@@ -1,5 +1,7 @@
 package com.ruoyi.framework.config;
 
+import java.time.Duration;
+import org.springframework.boot.autoconfigure.data.redis.LettuceClientConfigurationBuilderCustomizer;
 import org.springframework.cache.annotation.CachingConfigurerSupport;
 import org.springframework.cache.annotation.EnableCaching;
 import org.springframework.context.annotation.Bean;
@@ -8,6 +10,8 @@ import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.serializer.StringRedisSerializer;
+import io.lettuce.core.ClientOptions;
+import io.lettuce.core.SocketOptions;
 
 /**
  * redis配置
@@ -18,6 +22,23 @@ import org.springframework.data.redis.serializer.StringRedisSerializer;
 @EnableCaching
 public class RedisConfig extends CachingConfigurerSupport
 {
+    /**
+     * 配置 Lettuce 客户端选项，启用 TCP keepalive 防止连接被重置
+     */
+    @Bean
+    public LettuceClientConfigurationBuilderCustomizer lettuceClientConfigurationBuilderCustomizer()
+    {
+        return clientConfigurationBuilder -> {
+            ClientOptions clientOptions = ClientOptions.builder()
+                    .socketOptions(SocketOptions.builder()
+                            .keepAlive(true)
+                            .connectTimeout(Duration.ofSeconds(10))
+                            .build())
+                    .autoReconnect(true)
+                    .build();
+            clientConfigurationBuilder.clientOptions(clientOptions);
+        };
+    }
     @Bean
     @SuppressWarnings(value = { "unchecked", "rawtypes" })
     public RedisTemplate<Object, Object> redisTemplate(RedisConnectionFactory connectionFactory)

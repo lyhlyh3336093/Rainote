@@ -35,7 +35,7 @@ module.exports = {
     proxy: {
       // detail: https://cli.vuejs.org/config/#devserver-proxy
       [process.env.VUE_APP_BASE_API]: {
-        target: `http://localhost:8080`,
+        target: `http://localhost:8090`,
         changeOrigin: true,
         pathRewrite: {
           ['^' + process.env.VUE_APP_BASE_API]: ''
@@ -58,7 +58,7 @@ module.exports = {
         '@': resolve('src')
       }
     },
-    plugins: [
+    plugins: process.env.NODE_ENV === 'production' ? [
       // http://doc.ruoyi.vip/ruoyi-vue/other/faq.html#使用gzip解压缩静态文件
       new CompressionPlugin({
         cache: false,                   // 不启用文件缓存
@@ -67,7 +67,7 @@ module.exports = {
         algorithm: 'gzip',              // 使用gzip压缩
         minRatio: 0.8                   // 压缩率小于1才会压缩
       })
-    ],
+    ] : [],
   },
   chainWebpack(config) {
     config.plugins.delete('preload') // TODO: need test

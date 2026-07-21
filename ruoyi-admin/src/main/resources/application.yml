@@ -10,6 +10,7 @@ ruoyi:
   demoEnabled: true
   # 文件路径 示例（ Windows配置D:/ruoyi/uploadPath，Linux配置 /home/ruoyi/uploadPath）
   profile: D:/ruoyi/uploadPath
+#  profile: /home/ruoyi/uploadPath
   # 获取ip地址开关
   addressEnabled: false
   # 验证码类型 math 数组计算 char 字符验证
@@ -17,8 +18,9 @@ ruoyi:
 
 # 开发环境配置
 server:
-  # 服务器的HTTP端口，默认为8080
-  port: 8080
+  # 服务器的HTTP端口，默认为8080,在云服务上部署的时候java守护进程jsvc会占用8080端口，故这里改为8090,
+  # 阿里云服务器是8089,上传到云服务器之前记得修改
+  port: 8090
   servlet:
     # 应用的访问路径
     context-path: /
@@ -38,6 +40,7 @@ logging:
   level:
     com.ruoyi: debug
     org.springframework: warn
+    io.lettuce.core: warn
 
 # 用户配置
 user:
@@ -70,25 +73,30 @@ spring:
   # redis 配置
   redis:
     # 地址
-    host: localhost
+    host: 127.0.0.1
     # 端口，默认为6379
     port: 6379
     # 数据库索引
     database: 0
     # 密码
-    password: 
+    password:
     # 连接超时时间
     timeout: 10s
     lettuce:
       pool:
         # 连接池中的最小空闲连接
-        min-idle: 0
+        min-idle: 2
         # 连接池中的最大空闲连接
         max-idle: 8
         # 连接池的最大数据库连接数
         max-active: 8
-        # #连接池最大阻塞等待时间（使用负值表示没有限制）
+        # 连接池最大阻塞等待时间（使用负值表示没有限制）
         max-wait: -1ms
+        # 空闲连接驱逐超时时间（毫秒），建议小于Redis的timeout配置
+        time-between-eviction-runs: 60000
+      shutdown-timeout: 100ms
+    # 启用 Lettuce 的保活机制
+    client-type: lettuce
 
 # token配置
 token:
@@ -97,8 +105,21 @@ token:
     # 令牌密钥
     secret: abcdefghijklmnopqrstuvwxyz
     # 令牌有效期（默认30分钟）
-    expireTime: 30
-  
+    expireTime: 3000
+
+# GLM AI聊天配置
+glm:
+    # API密钥（生产环境通过环境变量GLM_API_KEY覆盖）
+    api-key: ${GLM_API_KEY:sk-cp-mS2zP2YJDJnZF-1m_HS69NNeqTf2773n5FvN2Je3UqE}
+    # 模型名称
+    model: glm-4
+    # API地址
+    api-url: https://open.bigmodel.cn/api/paas/v4/chat/completions
+    # 上下文轮数（N轮 = N*2条消息）
+    context-rounds: 20
+    # 最大token数
+    max-tokens: 4096
+
 # MyBatis配置
 mybatis:
     # 搜索指定包别名
@@ -126,6 +147,6 @@ xss:
   # 过滤开关
   enabled: true
   # 排除链接（多个用逗号分隔）
-  excludes: /system/notice
+  excludes: /system/notice,/system/block/*,/system/note/*,/system/record/*,/system/item/*
   # 匹配链接
   urlPatterns: /system/*,/monitor/*,/tool/*
