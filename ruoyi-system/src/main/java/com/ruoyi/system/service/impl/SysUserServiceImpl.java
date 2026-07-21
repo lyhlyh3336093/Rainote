@@ -4,6 +4,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 import javax.validation.Validator;
+
+import com.ruoyi.system.domain.*;
+import com.ruoyi.system.mapper.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -19,14 +22,6 @@ import com.ruoyi.common.utils.SecurityUtils;
 import com.ruoyi.common.utils.StringUtils;
 import com.ruoyi.common.utils.bean.BeanValidators;
 import com.ruoyi.common.utils.spring.SpringUtils;
-import com.ruoyi.system.domain.SysPost;
-import com.ruoyi.system.domain.SysUserPost;
-import com.ruoyi.system.domain.SysUserRole;
-import com.ruoyi.system.mapper.SysPostMapper;
-import com.ruoyi.system.mapper.SysRoleMapper;
-import com.ruoyi.system.mapper.SysUserMapper;
-import com.ruoyi.system.mapper.SysUserPostMapper;
-import com.ruoyi.system.mapper.SysUserRoleMapper;
 import com.ruoyi.system.service.ISysConfigService;
 import com.ruoyi.system.service.ISysUserService;
 
@@ -61,6 +56,9 @@ public class SysUserServiceImpl implements ISysUserService
     @Autowired
     protected Validator validator;
 
+    @Autowired
+    private NoteUserRoleMapper noteUserRoleMapper;
+
     /**
      * 根据条件分页查询用户列表
      * 
@@ -85,6 +83,19 @@ public class SysUserServiceImpl implements ISysUserService
     public List<SysUser> selectAllocatedList(SysUser user)
     {
         return userMapper.selectAllocatedList(user);
+    }
+
+
+    /**
+     * 根据条件分页查询已分配用户角色列表
+     *
+     * @param role 用户信息
+     * @return 用户信息集合信息
+     */
+    @Override
+    @DataScope(deptAlias = "d", userAlias = "u")
+    public List<SysUser> selectAllocatedNoteList(NoteRole role) {
+        return userMapper.selectAllocatedNoteList(role);
     }
 
     /**
@@ -262,6 +273,7 @@ public class SysUserServiceImpl implements ISysUserService
         insertUserPost(user);
         // 新增用户与角色管理
         insertUserRole(user);
+        //20250530增加:用户注册和新增用户时的默认角色中加入用户在笔记系统中的角色
         return rows;
     }
 
@@ -274,7 +286,17 @@ public class SysUserServiceImpl implements ISysUserService
     @Override
     public boolean registerUser(SysUser user)
     {
-        return userMapper.insertUser(user) > 0;
+        boolean result = userMapper.insertUser(user) > 0;
+        //注册用户也要赋予默认的角色以确保首次登录就有基础菜单权限
+        //2是笔记系统默认角色的id,
+        Long[] roleIds = {2l};
+        //note_user_role 要在这个表里加数据
+        NoteUserRole noteUserRole = new NoteUserRole();
+        noteUserRole.setRoleId(2L);
+        noteUserRole.setUserId(user.getUserId());
+        noteUserRoleMapper.insertNoteUserRole(noteUserRole);
+        insertUserRole(user.getUserId(),roleIds);
+        return result;
     }
 
     /**

@@ -3,6 +3,8 @@ package com.ruoyi.framework.web.service;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+
+import com.ruoyi.system.service.INoteRoleMenuService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import com.ruoyi.common.core.domain.entity.SysRole;
@@ -23,6 +25,9 @@ public class SysPermissionService
 
     @Autowired
     private ISysMenuService menuService;
+
+    @Autowired
+    private INoteRoleMenuService noteRoleMenuService;
 
     /**
      * 获取角色数据权限
@@ -68,6 +73,7 @@ public class SysPermissionService
                 for (SysRole role : roles)
                 {
                     Set<String> rolePerms = menuService.selectMenuPermsByRoleId(role.getRoleId());
+
                     role.setPermissions(rolePerms);
                     perms.addAll(rolePerms);
                 }
@@ -75,6 +81,14 @@ public class SysPermissionService
             else
             {
                 perms.addAll(menuService.selectMenuPermsByUserId(user.getUserId()));
+                //刘：权限分两部分啦，一部分是若依后台的，一部分是笔记系统的
+                //所以下面再加上笔记系统的就齐活儿
+                //“我已经参透了符(quan)文(xian)”
+
+                //这么做虽然冗余但是有效果，只不过，我还是觉得把两部分的权限分开比较好
+                //不是说不这么干了，是我要另起一个新的接口专门用来弄笔记系统的权限
+                Set<String> noteperms = noteRoleMenuService.selectNotePermsByUserId(user.getUserId());
+                perms.addAll(noteperms);
             }
         }
         return perms;

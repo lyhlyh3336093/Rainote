@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ruoyi.system.mapper.NoteRoleMenuMapper">
+    
+    <resultMap type="NoteRoleMenu" id="NoteRoleMenuResult">
+        <result property="roleId"    column="role_id"    />
+        <result property="menuId"    column="menu_id"    />
+    </resultMap>
+
+    <sql id="selectNoteRoleMenuVo">
+        select role_id, menu_id from note_role_menu
+    </sql>
+
+    <select id="selectNoteRoleMenuList" parameterType="NoteRoleMenu" resultMap="NoteRoleMenuResult">
+        <include refid="selectNoteRoleMenuVo"/>
+        <where>
+            <if test="roleId != null "> and role_id = #{roleId}</if>
+            <if test="menuId != null "> and menu_id = #{menuId}</if>
+        </where>
+    </select>
+    
+    <select id="selectNoteRoleMenuByRoleId" parameterType="Long" resultMap="NoteRoleMenuResult">
+        <include refid="selectNoteRoleMenuVo"/>
+        where role_id = #{roleId}
+    </select>
+        
+    <insert id="insertNoteRoleMenu" parameterType="NoteRoleMenu">
+        insert into note_role_menu
+        <trim prefix="(" suffix=")" suffixOverrides=",">
+            <if test="roleId != null">role_id,</if>
+            <if test="menuId != null">menu_id,</if>
+         </trim>
+        <trim prefix="values (" suffix=")" suffixOverrides=",">
+            <if test="roleId != null">#{roleId},</if>
+            <if test="menuId != null">#{menuId},</if>
+         </trim>
+    </insert>
+
+    <update id="updateNoteRoleMenu" parameterType="NoteRoleMenu">
+        update note_role_menu
+        <trim prefix="SET" suffixOverrides=",">
+            <if test="menuId != null">menu_id = #{menuId},</if>
+        </trim>
+        where role_id = #{roleId}
+    </update>
+
+    <select id="selectNotePermsByRoleId" parameterType="Long" resultType="String">
+        select distinct n.perms
+        from note_note n
+                 left join note_role_menu nm on n.id = nm.menu_id
+        where n.delFlag = 0 and nm.role_id = #{roleId}
+    </select>
+
+    <select id="selectNoteMenuListByRoleId" resultType="Long">
+        select n.id
+        from note_note n
+        left join note_role_menu nrm on n.id = nrm.menu_id
+        where nrm.role_id = #{roleId}
+        <if test="menuCheckStrictly = 0">
+            and n.id not in (select n.parentId from note_note n inner join note_role_menu nrm on n.id = nrm.menu_id and nrm.role_id = #{roleId})
+        </if>
+        and n.delFlag = 0
+        order by n.parentId, n.id
+    </select>
+
+
+    <delete id="deleteNoteRoleMenuByRoleId" parameterType="Long">
+        delete from note_role_menu where role_id = #{roleId}
+    </delete>
+
+    <delete id="deleteNoteRoleMenuByRoleIds" parameterType="String">
+        delete from note_role_menu where role_id in 
+        <foreach item="roleId" collection="array" open="(" separator="," close=")">
+            #{roleId}
+        </foreach>
+    </delete>
+
+
+    <insert id="batchNoteRoleMenu">
+        insert into note_role_menu(role_id, menu_id) values
+        <foreach item="item" index="index" collection="list" separator=",">
+            (#{item.roleId},#{item.menuId})
+        </foreach>
+    </insert>
+</mapper>

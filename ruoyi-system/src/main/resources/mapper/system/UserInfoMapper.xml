@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ruoyi.system.mapper.UserInfoMapper">
+    
+    <resultMap type="UserInfo" id="UserInfoResult">
+        <result property="id"    column="id"    />
+        <result property="userName"    column="user_name"    />
+        <result property="age"    column="age"    />
+        <result property="threedDataPath"    column="threed_data_path"    />
+        <result property="skill"    column="skill"    />
+        <result property="tag"    column="tag"    />
+        <result property="knowledgeMap"    column="knowledge_map"    />
+        <result property="todolist"    column="todolist"    />
+        <result property="item"    column="item"    />
+        <result property="directory"    column="directory"    />
+        <result property="remark"    column="remark"    />
+    </resultMap>
+
+    <sql id="selectUserInfoVo">
+        select id, user_name, age, threed_data_path, skill, tag, knowledge_map, todolist, item, directory, remark from user_info
+    </sql>
+
+    <select id="selectUserInfoList" parameterType="UserInfo" resultMap="UserInfoResult">
+        <include refid="selectUserInfoVo"/>
+        <where>  
+            <if test="userName != null  and userName != ''"> and user_name like concat('%', #{userName}, '%')</if>
+            <if test="age != null "> and age = #{age}</if>
+            <if test="threedDataPath != null  and threedDataPath != ''"> and threed_data_path = #{threedDataPath}</if>
+            <if test="skill != null  and skill != ''"> and skill = #{skill}</if>
+            <if test="tag != null  and tag != ''"> and tag = #{tag}</if>
+            <if test="knowledgeMap != null  and knowledgeMap != ''"> and knowledge_map = #{knowledgeMap}</if>
+            <if test="todolist != null  and todolist != ''"> and todolist = #{todolist}</if>
+            <if test="item != null  and item != ''"> and item = #{item}</if>
+            <if test="directory != null  and directory != ''"> and directory = #{directory}</if>
+        </where>
+    </select>
+    
+    <select id="selectUserInfoById" parameterType="Long" resultMap="UserInfoResult">
+        <include refid="selectUserInfoVo"/>
+        where id = #{id}
+    </select>
+        
+    <insert id="insertUserInfo" parameterType="UserInfo">
+        insert into user_info
+        <trim prefix="(" suffix=")" suffixOverrides=",">
+            <if test="id != null">id,</if>
+            <if test="userName != null">user_name,</if>
+            <if test="age != null">age,</if>
+            <if test="threedDataPath != null">threed_data_path,</if>
+            <if test="skill != null">skill,</if>
+            <if test="tag != null">tag,</if>
+            <if test="knowledgeMap != null">knowledge_map,</if>
+            <if test="todolist != null">todolist,</if>
+            <if test="item != null">item,</if>
+            <if test="directory != null">directory,</if>
+            <if test="remark != null">remark,</if>
+         </trim>
+        <trim prefix="values (" suffix=")" suffixOverrides=",">
+            <if test="id != null">#{id},</if>
+            <if test="userName != null">#{userName},</if>
+            <if test="age != null">#{age},</if>
+            <if test="threedDataPath != null">#{threedDataPath},</if>
+            <if test="skill != null">#{skill},</if>
+            <if test="tag != null">#{tag},</if>
+            <if test="knowledgeMap != null">#{knowledgeMap},</if>
+            <if test="todolist != null">#{todolist},</if>
+            <if test="item != null">#{item},</if>
+            <if test="directory != null">#{directory},</if>
+            <if test="remark != null">#{remark},</if>
+         </trim>
+    </insert>
+
+    <update id="updateUserInfo" parameterType="UserInfo">
+        update user_info
+        <trim prefix="SET" suffixOverrides=",">
+            <if test="userName != null">user_name = #{userName},</if>
+            <if test="age != null">age = #{age},</if>
+            <if test="threedDataPath != null">threed_data_path = #{threedDataPath},</if>
+            <if test="skill != null">skill = #{skill},</if>
+            <if test="tag != null">tag = #{tag},</if>
+            <if test="knowledgeMap != null">knowledge_map = #{knowledgeMap},</if>
+            <if test="todolist != null">todolist = #{todolist},</if>
+            <if test="item != null">item = #{item},</if>
+            <if test="directory != null">directory = #{directory},</if>
+            <if test="remark != null">remark = #{remark},</if>
+        </trim>
+        where id = #{id}
+    </update>
+
+    <delete id="deleteUserInfoById" parameterType="Long">
+        delete from user_info where id = #{id}
+    </delete>
+
+    <delete id="deleteUserInfoByIds" parameterType="String">
+        delete from user_info where id in 
+        <foreach item="id" collection="array" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </delete>
+</mapper>

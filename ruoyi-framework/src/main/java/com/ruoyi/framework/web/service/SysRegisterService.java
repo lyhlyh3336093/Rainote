@@ -43,6 +43,7 @@ public class SysRegisterService
         String msg = "", username = registerBody.getUsername(), password = registerBody.getPassword();
         SysUser sysUser = new SysUser();
         sysUser.setUserName(username);
+        sysUser.setFirstLogin("0");
 
         // 验证码开关
         boolean captchaEnabled = configService.selectCaptchaEnabled();
@@ -55,6 +56,11 @@ public class SysRegisterService
         {
             msg = "用户名不能为空";
         }
+        //todo:此处本打算设置一个敏感词过滤器,将敏感词,违规词和系统关键词等过滤掉
+//        else if ()
+//        {
+//            msg = "用户名不能为空";
+//        }
         else if (StringUtils.isEmpty(password))
         {
             msg = "用户密码不能为空";
@@ -77,6 +83,8 @@ public class SysRegisterService
         {
             sysUser.setNickName(username);
             sysUser.setPassword(SecurityUtils.encryptPassword(password));
+            //20250530增加是否初次登录标识
+            sysUser.setFirstLogin("0");
             boolean regFlag = userService.registerUser(sysUser);
             if (!regFlag)
             {
@@ -86,6 +94,8 @@ public class SysRegisterService
             {
                 AsyncManager.me().execute(AsyncFactory.recordLogininfor(username, Constants.REGISTER, MessageUtils.message("user.register.success")));
             }
+            //20250630更新,用户注册成功后会在笔记系统里赋予默认的基础权限
+
         }
         return msg;
     }

@@ -27,6 +27,8 @@ import com.ruoyi.framework.security.context.AuthenticationContextHolder;
 import com.ruoyi.system.service.ISysConfigService;
 import com.ruoyi.system.service.ISysUserService;
 
+import java.io.IOException;
+
 /**
  * 登录校验方法
  * 

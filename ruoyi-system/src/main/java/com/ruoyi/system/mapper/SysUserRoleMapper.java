@@ -36,6 +36,14 @@ public interface SysUserRoleMapper
     public int countUserRoleByRoleId(Long roleId);
 
     /**
+     * 通过角色ID查询笔记系统内角色使用数量
+     *
+     * @param roleId 角色ID
+     * @return 结果
+     */
+    public int countNoteUserRoleByRoleId(Long roleId);
+
+    /**
      * 批量新增用户角色信息
      * 
      * @param userRoleList 用户角色列表

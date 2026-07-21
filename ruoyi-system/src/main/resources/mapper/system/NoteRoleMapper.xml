@@ -1,0 +1,154 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ruoyi.system.mapper.NoteRoleMapper">
+    
+    <resultMap type="NoteRole" id="NoteRoleResult">
+        <result property="id"    column="id"    />
+        <result property="roleName"    column="role_name"    />
+        <result property="roleKey"    column="role_key"    />
+        <result property="roleSort"    column="role_sort"    />
+        <result property="dataScope"    column="data_scope"    />
+        <result property="menuCheckStrictly"    column="menu_check_strictly"    />
+        <result property="deptCheckStrictly"    column="dept_check_strictly"    />
+        <result property="status"    column="status"    />
+        <result property="delFlag"    column="del_flag"    />
+        <result property="createBy"    column="create_by"    />
+        <result property="createTime"    column="create_time"    />
+        <result property="updateBy"    column="update_by"    />
+        <result property="updateTime"    column="update_time"    />
+        <result property="remark"    column="remark"    />
+    </resultMap>
+
+    <sql id="selectNoteRoleVo">
+        select id, role_name, role_key, role_sort, data_scope, menu_check_strictly, dept_check_strictly, status, del_flag,
+               create_by, create_time, update_by, update_time, remark
+        from note_role
+    </sql>
+
+    <select id="selectNoteRoleList" parameterType="NoteRole" resultMap="NoteRoleResult">
+        <include refid="selectNoteRoleVo"/>
+        <where>
+            <if test="roleName != null  and roleName != ''"> and role_name like concat('%', #{roleName}, '%')</if>
+            <if test="roleKey != null  and roleKey != ''"> and role_key = #{roleKey}</if>
+            <if test="roleSort != null "> and role_sort = #{roleSort}</if>
+            <if test="dataScope != null  and dataScope != ''"> and data_scope = #{dataScope}</if>
+            <if test="menuCheckStrictly != null "> and menu_check_strictly = #{menuCheckStrictly}</if>
+            <if test="deptCheckStrictly != null "> and dept_check_strictly = #{deptCheckStrictly}</if>
+            <if test="status != null  and status != ''"> and status = #{status}</if>
+        </where>
+    </select>
+
+
+    <select id="selectNoteRoleListByUserId" parameterType="NoteRole" resultMap="NoteRoleResult">
+        <include refid="selectNoteRoleVo"/>
+        <where>
+            <if test="roleName != null  and roleName != ''"> and role_name like concat('%', #{roleName}, '%')</if>
+            <if test="roleKey != null  and roleKey != ''"> and role_key = #{roleKey}</if>
+            <if test="roleSort != null "> and role_sort = #{roleSort}</if>
+            <if test="dataScope != null  and dataScope != ''"> and data_scope = #{dataScope}</if>
+            <if test="menuCheckStrictly != null "> and menu_check_strictly = #{menuCheckStrictly}</if>
+            <if test="deptCheckStrictly != null "> and dept_check_strictly = #{deptCheckStrictly}</if>
+            <if test="status != null  and status != ''"> and status = #{status}</if>
+        </where>
+        and del_flag = '0'
+    </select>
+
+    <select id="selectNoteRolePermissionByUserId" parameterType="Long" resultMap="NoteRoleResult">
+        select n.id, n.role_name, n.role_key, n.role_sort, n.data_scope, n.menu_check_strictly, n.dept_check_strictly, n.status, n.del_flag,
+               n.create_by, n.create_time, n.update_by, n.update_time, n.remark
+        from note_role n
+                 left join note_user_role ur on ur.role_id = n.id
+                 left join sys_user u on u.user_id = ur.user_id
+                 left join sys_dept d on u.dept_id = d.dept_id
+
+        WHERE n.del_flag = '0' and ur.user_id = #{userId}
+    </select>
+
+
+    <select id="checkNoteRoleNameUnique" parameterType="String" resultMap="NoteRoleResult">
+        <include refid="selectNoteRoleVo"/>
+        where role_name = #{roleName} and del_flag = '0' limit 1
+    </select>
+
+    <select id="checkNoteRoleKeyUnique" parameterType="String" resultMap="NoteRoleResult">
+        <include refid="selectNoteRoleVo"/>
+        where  role_key = #{roleKey} and del_flag = '0' limit 1
+    </select>
+
+    <select id="selectNoteRoleAll" resultMap="NoteRoleResult">
+        <include refid="selectNoteRoleVo"/>
+        where del_flag = '0'
+    </select>
+
+    <select id="selectNoteRoleById" parameterType="Long" resultMap="NoteRoleResult">
+        <include refid="selectNoteRoleVo"/>
+        where id = #{id}
+    </select>
+        
+    <insert id="insertNoteRole" parameterType="NoteRole" useGeneratedKeys="true" keyProperty="id">
+        insert into note_role
+        <trim prefix="(" suffix=")" suffixOverrides=",">
+            <if test="roleName != null and roleName != ''">role_name,</if>
+            <if test="roleKey != null and roleKey != ''">role_key,</if>
+            <if test="roleSort != null">role_sort,</if>
+            <if test="dataScope != null">data_scope,</if>
+            <if test="menuCheckStrictly != null">menu_check_strictly,</if>
+            <if test="deptCheckStrictly != null">dept_check_strictly,</if>
+            <if test="status != null and status != ''">status,</if>
+            <if test="delFlag != null">del_flag,</if>
+            <if test="createBy != null">create_by,</if>
+            <if test="createTime != null">create_time,</if>
+            <if test="updateBy != null">update_by,</if>
+            <if test="updateTime != null">update_time,</if>
+            <if test="remark != null">remark,</if>
+         </trim>
+        <trim prefix="values (" suffix=")" suffixOverrides=",">
+            <if test="roleName != null and roleName != ''">#{roleName},</if>
+            <if test="roleKey != null and roleKey != ''">#{roleKey},</if>
+            <if test="roleSort != null">#{roleSort},</if>
+            <if test="dataScope != null">#{dataScope},</if>
+            <if test="menuCheckStrictly != null">#{menuCheckStrictly},</if>
+            <if test="deptCheckStrictly != null">#{deptCheckStrictly},</if>
+            <if test="status != null and status != ''">#{status},</if>
+            <if test="delFlag != null">#{delFlag},</if>
+            <if test="createBy != null">#{createBy},</if>
+            <if test="createTime != null">#{createTime},</if>
+            <if test="updateBy != null">#{updateBy},</if>
+            <if test="updateTime != null">#{updateTime},</if>
+            <if test="remark != null">#{remark},</if>
+         </trim>
+    </insert>
+
+    <update id="updateNoteRole" parameterType="NoteRole">
+        update note_role
+        <trim prefix="SET" suffixOverrides=",">
+            <if test="roleName != null and roleName != ''">role_name = #{roleName},</if>
+            <if test="roleKey != null and roleKey != ''">role_key = #{roleKey},</if>
+            <if test="roleSort != null">role_sort = #{roleSort},</if>
+            <if test="dataScope != null">data_scope = #{dataScope},</if>
+            <if test="menuCheckStrictly != null">menu_check_strictly = #{menuCheckStrictly},</if>
+            <if test="deptCheckStrictly != null">dept_check_strictly = #{deptCheckStrictly},</if>
+            <if test="status != null and status != ''">status = #{status},</if>
+            <if test="delFlag != null">del_flag = #{delFlag},</if>
+            <if test="createBy != null">create_by = #{createBy},</if>
+            <if test="createTime != null">create_time = #{createTime},</if>
+            <if test="updateBy != null">update_by = #{updateBy},</if>
+            <if test="updateTime != null">update_time = #{updateTime},</if>
+            <if test="remark != null">remark = #{remark},</if>
+        </trim>
+        where id = #{id}
+    </update>
+
+    <delete id="deleteNoteRoleById" parameterType="Long">
+        delete from note_role where id = #{id}
+    </delete>
+
+    <delete id="deleteNoteRoleByIds" parameterType="String">
+        delete from note_role where id in 
+        <foreach item="id" collection="array" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </delete>
+</mapper>

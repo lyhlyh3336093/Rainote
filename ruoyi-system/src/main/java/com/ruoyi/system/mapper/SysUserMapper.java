@@ -1,6 +1,8 @@
 package com.ruoyi.system.mapper;
 
 import java.util.List;
+
+import com.ruoyi.system.domain.NoteRole;
 import org.apache.ibatis.annotations.Param;
 import com.ruoyi.common.core.domain.entity.SysUser;
 
@@ -28,12 +30,28 @@ public interface SysUserMapper
     public List<SysUser> selectAllocatedList(SysUser user);
 
     /**
+     * 根据条件分页查询笔记系统中已配用户角色列表
+     *
+     * @param role 用户信息
+     * @return 用户信息集合信息
+     */
+    public List<SysUser> selectAllocatedNoteList(NoteRole role);
+
+    /**
      * 根据条件分页查询未分配用户角色列表
      * 
      * @param user 用户信息
      * @return 用户信息集合信息
      */
     public List<SysUser> selectUnallocatedList(SysUser user);
+
+    /**
+     * 查询笔记系统中未分配用户角色列表
+     *
+     * @param user 用户信息
+     * @return 用户信息集合信息
+     */
+    public List<SysUser> selectNoteUnallocatedList(SysUser user);
 
     /**
      * 通过用户名查询用户
@@ -66,6 +84,14 @@ public interface SysUserMapper
      * @return 结果
      */
     public int updateUser(SysUser user);
+
+    /**
+     * 更新是否首次登录
+     *
+     * @param userId 用户ID
+     * @return 结果
+     */
+    public int updateFirstLogin(Long userId);
 
     /**
      * 修改用户头像

@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ruoyi.system.mapper.NoteUserRoleMapper">
+    
+    <resultMap type="NoteUserRole" id="NoteUserRoleResult">
+        <result property="userId"    column="user_id"    />
+        <result property="roleId"    column="role_id"    />
+    </resultMap>
+
+    <sql id="selectNoteUserRoleVo">
+        select user_id, role_id from note_user_role
+    </sql>
+
+    <select id="selectNoteUserRoleList" parameterType="NoteUserRole" resultMap="NoteUserRoleResult">
+        <include refid="selectNoteUserRoleVo"/>
+        <where>
+            <if test="roleId != null "> and role_id = #{roleId}</if>
+            <if test="userId != null "> and user_id = #{userId}</if>
+        </where>
+    </select>
+    
+    <select id="selectNoteUserRoleByUserId" parameterType="Long" resultMap="NoteUserRoleResult">
+        <include refid="selectNoteUserRoleVo"/>
+        where user_id = #{userId}
+    </select>
+
+    <insert id="batchNoteUserRole">
+        insert into note_user_role(user_id, role_id) values
+        <foreach item="item" index="index" collection="list" separator=",">
+            (#{item.userId},#{item.roleId})
+        </foreach>
+    </insert>
+
+    <select id="getNoteRoleIdByUserId" parameterType="Long" resultType="String">
+        select distinct role_id from note_user_role
+        where user_id = #{userId}
+    </select>
+
+<!--    <select id="selectMenuPermsByRoleId" parameterType="Long" resultType="String">
+        select distinct m.perms
+        from sys_menu m
+                 left join sys_role_menu rm on m.menu_id = rm.menu_id
+        where m.status = '0' and rm.role_id = #{roleId}
+    </select>-->
+        
+    <insert id="insertNoteUserRole" parameterType="NoteUserRole">
+        insert into note_user_role
+        <trim prefix="(" suffix=")" suffixOverrides=",">
+            <if test="userId != null">user_id,</if>
+            <if test="roleId != null">role_id,</if>
+         </trim>
+        <trim prefix="values (" suffix=")" suffixOverrides=",">
+            <if test="userId != null">#{userId},</if>
+            <if test="roleId != null">#{roleId},</if>
+         </trim>
+    </insert>
+
+    <update id="updateNoteUserRole" parameterType="NoteUserRole">
+        update note_user_role
+        <trim prefix="SET" suffixOverrides=",">
+            <if test="roleId != null">role_id = #{roleId},</if>
+        </trim>
+        where user_id = #{userId}
+    </update>
+
+    <delete id="deleteNoteUserRoleByUserId" parameterType="Long">
+        delete from note_user_role where user_id = #{userId}
+    </delete>
+
+    <delete id="deleteNoteUserRoleByUserIds" parameterType="String">
+        delete from note_user_role where user_id in 
+        <foreach item="userId" collection="array" open="(" separator="," close=")">
+            #{userId}
+        </foreach>
+    </delete>
+</mapper>
