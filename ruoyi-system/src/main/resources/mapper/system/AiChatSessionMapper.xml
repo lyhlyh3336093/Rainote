@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ruoyi.system.mapper.AiChatSessionMapper">
+
+    <resultMap type="AiChatSession" id="AiChatSessionResult">
+        <result property="id"             column="id"             />
+        <result property="userId"         column="userId"         />
+        <result property="title"          column="title"          />
+        <result property="lastSelectedAt" column="lastSelectedAt" />
+        <result property="delFlag"        column="delFlag"        />
+        <result property="createTime"     column="createTime"     />
+        <result property="createBy"       column="createBy"       />
+        <result property="updateTime"     column="updateTime"     />
+        <result property="updateBy"       column="updateBy"       />
+    </resultMap>
+
+    <sql id="selectAiChatSessionVo">
+        select id, userId, title, lastSelectedAt, delFlag, createTime, createBy, updateTime, updateBy from ai_chat_session
+    </sql>
+
+    <select id="selectAiChatSessionList" parameterType="AiChatSession" resultMap="AiChatSessionResult">
+        <include refid="selectAiChatSessionVo"/>
+        <where>
+            <if test="userId != null "> and userId = #{userId}</if>
+            <if test="title != null  and title != ''"> and title like concat('%', #{title}, '%')</if>
+            <if test="delFlag != null "> and delFlag = #{delFlag}</if>
+        </where>
+        order by lastSelectedAt desc
+    </select>
+
+    <select id="selectAiChatSessionById" parameterType="Long" resultMap="AiChatSessionResult">
+        <include refid="selectAiChatSessionVo"/>
+        where id = #{id}
+    </select>
+
+    <select id="selectAiChatSessionByIdAndUserId" resultMap="AiChatSessionResult">
+        <include refid="selectAiChatSessionVo"/>
+        where id = #{id} and userId = #{userId} and delFlag = 0
+    </select>
+
+    <insert id="insertAiChatSession" parameterType="AiChatSession" useGeneratedKeys="true" keyProperty="id">
+        insert into ai_chat_session
+        <trim prefix="(" suffix=")" suffixOverrides=",">
+            <if test="userId != null">userId,</if>
+            <if test="title != null">title,</if>
+            <if test="lastSelectedAt != null">lastSelectedAt,</if>
+            <if test="delFlag != null">delFlag,</if>
+            <if test="createTime != null">createTime,</if>
+            <if test="createBy != null">createBy,</if>
+            <if test="updateTime != null">updateTime,</if>
+            <if test="updateBy != null">updateBy,</if>
+        </trim>
+        <trim prefix="values (" suffix=")" suffixOverrides=",">
+            <if test="userId != null">#{userId},</if>
+            <if test="title != null">#{title},</if>
+            <if test="lastSelectedAt != null">#{lastSelectedAt},</if>
+            <if test="delFlag != null">#{delFlag},</if>
+            <if test="createTime != null">#{createTime},</if>
+            <if test="createBy != null">#{createBy},</if>
+            <if test="updateTime != null">#{updateTime},</if>
+            <if test="updateBy != null">#{updateBy},</if>
+        </trim>
+    </insert>
+
+    <update id="updateAiChatSession" parameterType="AiChatSession">
+        update ai_chat_session
+        <trim prefix="SET" suffixOverrides=",">
+            <if test="title != null">title = #{title},</if>
+            <if test="lastSelectedAt != null">lastSelectedAt = #{lastSelectedAt},</if>
+            <if test="delFlag != null">delFlag = #{delFlag},</if>
+            <if test="updateTime != null">updateTime = #{updateTime},</if>
+            <if test="updateBy != null">updateBy = #{updateBy},</if>
+        </trim>
+        where id = #{id}
+    </update>
+
+    <update id="updateAiChatSessionTitle">
+        update ai_chat_session set title = #{title} where id = #{id}
+    </update>
+
+    <update id="updateLastSelectedAt">
+        update ai_chat_session set lastSelectedAt = now() where id = #{id} and userId = #{userId}
+    </update>
+
+    <update id="deleteAiChatSessionById" parameterType="Long">
+        update ai_chat_session set delFlag = 1 where id = #{id}
+    </update>
+
+    <update id="deleteAiChatSessionByIdAndUserId">
+        update ai_chat_session set delFlag = 1 where id = #{id} and userId = #{userId}
+    </update>
+
+</mapper>

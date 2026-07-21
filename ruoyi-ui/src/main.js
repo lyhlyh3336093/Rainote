@@ -14,6 +14,9 @@ import directive from './directive' // directive
 import plugins from './plugins' // plugins
 import { download } from '@/utils/request'
 
+//
+import VueQuillEditor from 'vue-quill-editor'
+
 import './assets/icons' // icon
 import './permission' // permission control
 import { getDicts } from "@/api/system/dict/data";
@@ -60,7 +63,7 @@ Vue.component('ImagePreview', ImagePreview)
 
 Vue.use(directive)
 Vue.use(plugins)
-Vue.use(VueMeta)
+Vue.use(VueMeta).use(VueQuillEditor)
 DictData.install()
 
 /**

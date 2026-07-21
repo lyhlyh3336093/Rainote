@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ruoyi.system.mapper.AiChatMessageMapper">
+
+    <resultMap type="AiChatMessage" id="AiChatMessageResult">
+        <result property="id"         column="id"         />
+        <result property="sessionId"  column="sessionId"  />
+        <result property="role"        column="role"        />
+        <result property="content"    column="content"    />
+        <result property="createTime" column="createTime" />
+    </resultMap>
+
+    <sql id="selectAiChatMessageVo">
+        select id, sessionId, role, content, createTime from ai_chat_message
+    </sql>
+
+    <select id="selectAiChatMessageList" parameterType="AiChatMessage" resultMap="AiChatMessageResult">
+        <include refid="selectAiChatMessageVo"/>
+        <where>
+            <if test="sessionId != null "> and sessionId = #{sessionId}</if>
+            <if test="role != null  and role != ''"> and role = #{role}</if>
+        </where>
+        order by id asc
+    </select>
+
+    <select id="selectAiChatMessageById" parameterType="Long" resultMap="AiChatMessageResult">
+        <include refid="selectAiChatMessageVo"/>
+        where id = #{id}
+    </select>
+
+    <select id="selectLastNMessagesBySessionId" resultMap="AiChatMessageResult">
+        <include refid="selectAiChatMessageVo"/>
+        where sessionId = #{sessionId}
+        order by id desc
+        limit #{limit}
+    </select>
+
+    <select id="selectMessagesBySessionIdAndUserId" resultMap="AiChatMessageResult">
+        select m.id, m.sessionId, m.role, m.content, m.createTime
+        from ai_chat_message m
+        inner join ai_chat_session s on m.sessionId = s.id
+        where m.sessionId = #{sessionId} and s.userId = #{userId} and s.delFlag = 0
+        order by m.id asc
+    </select>
+
+    <insert id="insertAiChatMessage" parameterType="AiChatMessage" useGeneratedKeys="true" keyProperty="id">
+        insert into ai_chat_message
+        <trim prefix="(" suffix=")" suffixOverrides=",">
+            <if test="sessionId != null">sessionId,</if>
+            <if test="role != null">role,</if>
+            <if test="content != null">content,</if>
+            <if test="createTime != null">createTime,</if>
+        </trim>
+        <trim prefix="values (" suffix=")" suffixOverrides=",">
+            <if test="sessionId != null">#{sessionId},</if>
+            <if test="role != null">#{role},</if>
+            <if test="content != null">#{content},</if>
+            <if test="createTime != null">#{createTime},</if>
+        </trim>
+    </insert>
+
+    <delete id="deleteAiChatMessageById" parameterType="Long">
+        delete from ai_chat_message where id = #{id}
+    </delete>
+
+    <delete id="deleteAiChatMessageBySessionId" parameterType="Long">
+        delete from ai_chat_message where sessionId = #{sessionId}
+    </delete>
+
+</mapper>
