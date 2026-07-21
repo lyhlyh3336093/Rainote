@@ -22,6 +22,7 @@ import org.springframework.stereotype.Service;
 import com.ruoyi.system.mapper.NoteColumnMapper;
 import com.ruoyi.system.domain.NoteColumn;
 import com.ruoyi.system.service.INoteColumnService;
+import com.ruoyi.system.service.INoteNotelinkService;
 import com.ruoyi.system.service.INoteRecordService;
 
 /**
@@ -49,6 +50,9 @@ public class NoteColumnServiceImpl implements INoteColumnService
 
     @Autowired
     private INoteRecordService noteRecordService;
+
+    @Autowired
+    private INoteNotelinkService noteNotelinkService;
 
     /**
      * 查询列信息
@@ -455,6 +459,8 @@ public class NoteColumnServiceImpl implements INoteColumnService
         Long linkColumnId =Long.parseLong(jsonObject.get("back_field_id").toString());
         // 查询被关联列以获取其 dwtableId（删除前，KTD-6 无条件重算）
         NoteColumn linkColumn = noteColumnMapper.selectNoteColumnById(linkColumnId);
+        // U2: 级联清理 NoteNotelink（反向启用后避免产生孤儿记录；service 内部已 try-catch）
+        noteNotelinkService.deleteNoteNotelinkByColumnId(linkColumnId);
         noteDwtableItemMapper.deleteNoteDwtableItemByColumnId(linkColumnId);
         noteColumnMapper.deleteNoteColumnById(linkColumnId);
         // 删除后重算被关联表 name（KTD-6 无条件重算，幂等）

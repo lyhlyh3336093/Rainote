@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ruoyi.system.mapper.NoteNotelinkMapper">
+    
+    <resultMap type="NoteNotelink" id="NoteNotelinkResult">
+        <result property="id"    column="id"    />
+        <result property="contextText"    column="contextText"    />
+        <result property="noteId"    column="noteId"    />
+        <result property="blockId"    column="blockId"    />
+        <result property="linkNoteId"    column="linkNoteId"    />
+        <result property="linkDwTableId"    column="linkDwTableId"    />
+        <result property="linkRecordId"    column="linkRecordId"    />
+        <result property="linkColumnId"    column="linkColumnId"    />
+        <result property="linkItemId"    column="linkItemId"    />
+        <result property="itemValue"    column="itemValue"    />
+    </resultMap>
+
+    <sql id="selectNoteNotelinkVo">
+        select id, contextText, noteId, blockId, linkNoteId, linkDwTableId, linkRecordId, linkColumnId, linkItemId, itemValue from note_notelink
+    </sql>
+
+    <select id="selectNoteNotelinkList" parameterType="NoteNotelink" resultMap="NoteNotelinkResult">
+        <include refid="selectNoteNotelinkVo"/>
+        <where>  
+            <if test="contextText != null  and contextText != ''"> and contextText = #{contextText}</if>
+            <if test="noteId != null "> and noteId = #{noteId}</if>
+            <if test="blockId != null "> and blockId = #{blockId}</if>
+            <if test="linkNoteId != null "> and linkNoteId = #{linkNoteId}</if>
+            <if test="linkDwTableId != null "> and linkDwTableId = #{linkDwTableId}</if>
+            <if test="linkRecordId != null "> and linkRecordId = #{linkRecordId}</if>
+            <if test="linkColumnId != null "> and linkColumnId = #{linkColumnId}</if>
+            <if test="linkItemId != null "> and linkItemId = #{linkItemId}</if>
+            <if test="itemValue != null  and itemValue != ''"> and itemValue = #{itemValue}</if>
+        </where>
+    </select>
+    
+    <select id="selectNoteNotelinkById" parameterType="Long" resultMap="NoteNotelinkResult">
+        <include refid="selectNoteNotelinkVo"/>
+        where id = #{id}
+    </select>
+
+    <!--
+        U2: 按 cell 聚合查询,用于 R6 单元格展示
+        按 (linkColumnId + linkItemId) 查所有 NoteNotelink,按 id 升序返回
+    -->
+    <select id="selectNoteNotelinkByCell" resultMap="NoteNotelinkResult">
+        <include refid="selectNoteNotelinkVo"/>
+        where linkColumnId = #{linkColumnId}
+          and linkItemId = #{linkItemId}
+        order by id asc
+    </select>
+
+    <!--
+        U5: 按 noteId 查询引用列表,用于追溯面板(R9)
+        查所有引用该笔记的 NoteNotelink,按 id 升序返回
+    -->
+    <select id="selectNoteNotelinkByNoteId" parameterType="Long" resultMap="NoteNotelinkResult">
+        <include refid="selectNoteNotelinkVo"/>
+        where noteId = #{noteId}
+        order by id asc
+    </select>
+        
+    <insert id="insertNoteNotelink" parameterType="NoteNotelink" useGeneratedKeys="true" keyProperty="id">
+        insert into note_notelink
+        <trim prefix="(" suffix=")" suffixOverrides=",">
+            <if test="contextText != null">contextText,</if>
+            <if test="noteId != null">noteId,</if>
+            <if test="blockId != null">blockId,</if>
+            <if test="linkNoteId != null">linkNoteId,</if>
+            <if test="linkDwTableId != null">linkDwTableId,</if>
+            <if test="linkRecordId != null">linkRecordId,</if>
+            <if test="linkColumnId != null">linkColumnId,</if>
+            <if test="linkItemId != null">linkItemId,</if>
+            <if test="itemValue != null">itemValue,</if>
+         </trim>
+        <trim prefix="values (" suffix=")" suffixOverrides=",">
+            <if test="contextText != null">#{contextText},</if>
+            <if test="noteId != null">#{noteId},</if>
+            <if test="blockId != null">#{blockId},</if>
+            <if test="linkNoteId != null">#{linkNoteId},</if>
+            <if test="linkDwTableId != null">#{linkDwTableId},</if>
+            <if test="linkRecordId != null">#{linkRecordId},</if>
+            <if test="linkColumnId != null">#{linkColumnId},</if>
+            <if test="linkItemId != null">#{linkItemId},</if>
+            <if test="itemValue != null">#{itemValue},</if>
+         </trim>
+    </insert>
+
+    <update id="updateNoteNotelink" parameterType="NoteNotelink">
+        update note_notelink
+        <trim prefix="SET" suffixOverrides=",">
+            <if test="contextText != null">contextText = #{contextText},</if>
+            <if test="noteId != null">noteId = #{noteId},</if>
+            <if test="blockId != null">blockId = #{blockId},</if>
+            <if test="linkNoteId != null">linkNoteId = #{linkNoteId},</if>
+            <if test="linkDwTableId != null">linkDwTableId = #{linkDwTableId},</if>
+            <if test="linkRecordId != null">linkRecordId = #{linkRecordId},</if>
+            <if test="linkColumnId != null">linkColumnId = #{linkColumnId},</if>
+            <if test="linkItemId != null">linkItemId = #{linkItemId},</if>
+            <if test="itemValue != null">itemValue = #{itemValue},</if>
+        </trim>
+        where id = #{id}
+    </update>
+
+    <delete id="deleteNoteNotelinkByIds" parameterType="String">
+        delete from note_notelink where id in
+        <foreach item="id" collection="array" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </delete>
+
+    <!--
+        U2: 按 linkColumnId 级联删除,用于 deleteDataWhenLink
+        删除语义关联列时清理孤儿 NoteNotelink 记录
+    -->
+    <delete id="deleteNoteNotelinkByColumnId" parameterType="Long">
+        delete from note_notelink where linkColumnId = #{linkColumnId}
+    </delete>
+</mapper>

@@ -18,6 +18,9 @@ property JSON中可携带 `dedupe` 布尔开关。为true时，派生结果中�
 ### Set Operation Column
 A column whose value is computed by performing set operations (union, intersection, subtraction, complement) on the linkRecordId lists of two other columns (A and B). Uses `CollectionUtils` operations on linkRecordId, then reverse-looks up values from a mapping.
 
+### Semantic Link Column (type=25)
+A column linking a note to a multi-dimensional table cell/record. Distinct from type=21 (record↔record) and type=26 (derived lookup): it expresses the note↔table relationship. Its anchor representation inside note text is the `<a data-type="semantic">` element produced by the SemanticLink Editor.js inline tool (separate from the `<c id=...>` page-navigation anchor system). The link record is stored as a NoteNotelink row (id, noteId, blockId, linkColumnId, linkItemId, contextText, itemValue). Forward direction (note→table) is implemented; reverse direction (table→note) extends it to word-level granularity, where each anchor carries a unique `data-link-id` equal to the NoteNotelink id so a cell can address a specific selected word among many.
+
 ### back_field_id
 A property in type=21 columns that references the paired column in the other table. If column 3262 has `back_field_id=3263`, then column 3263 has `back_field_id=3262`. This pairing is essential for indirect trigger matching in set operations.
 
