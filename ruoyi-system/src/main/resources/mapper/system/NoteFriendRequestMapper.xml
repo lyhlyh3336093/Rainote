@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ruoyi.system.mapper.NoteFriendRequestMapper">
+    
+    <resultMap type="NoteFriendRequest" id="NoteFriendRequestResult">
+        <result property="id"    column="id"    />
+        <result property="userId"    column="user_id"    />
+        <result property="requestId"    column="request_id"    />
+        <result property="requestName"    column="request_name"    />
+        <result property="requestTime"    column="request_time"    />
+        <result property="description"    column="description"    />
+    </resultMap>
+
+    <sql id="selectNoteFriendRequestVo">
+        select id, user_id, request_id, request_name, request_time, description from note_friend_request
+    </sql>
+
+    <select id="selectNoteFriendRequestList" parameterType="NoteFriendRequest" resultMap="NoteFriendRequestResult">
+        <include refid="selectNoteFriendRequestVo"/>
+        <where>
+            <if test="userId != null "> and user_id = #{userId}</if>
+            <if test="requestId != null "> and request_id = #{requestId}</if>
+            <if test="requestName != null  and requestName != ''"> and request_name like concat('%', #{requestName}, '%')</if>
+            <if test="requestTime != null "> and request_time = #{requestTime}</if>
+            <if test="description != null  and description != ''"> and description = #{description}</if>
+        </where>
+    </select>
+    
+    <select id="selectNoteFriendRequestById" parameterType="Long" resultMap="NoteFriendRequestResult">
+        <include refid="selectNoteFriendRequestVo"/>
+        where id = #{id}
+    </select>
+        
+    <insert id="insertNoteFriendRequest" parameterType="NoteFriendRequest" useGeneratedKeys="true" keyProperty="id">
+        insert into note_friend_request
+        <trim prefix="(" suffix=")" suffixOverrides=",">
+            <if test="userId != null">user_id,</if>
+            <if test="requestId != null">request_id,</if>
+            <if test="requestName != null">request_name,</if>
+            <if test="requestTime != null">request_time,</if>
+            <if test="description != null">description,</if>
+         </trim>
+        <trim prefix="values (" suffix=")" suffixOverrides=",">
+            <if test="userId != null">#{userId},</if>
+            <if test="requestId != null">#{requestId},</if>
+            <if test="requestName != null">#{requestName},</if>
+            <if test="requestTime != null">#{requestTime},</if>
+            <if test="description != null">#{description},</if>
+         </trim>
+    </insert>
+
+    <update id="updateNoteFriendRequest" parameterType="NoteFriendRequest">
+        update note_friend_request
+        <trim prefix="SET" suffixOverrides=",">
+            <if test="userId != null">user_id = #{userId},</if>
+            <if test="requestId != null">request_id = #{requestId},</if>
+            <if test="requestName != null">request_name = #{requestName},</if>
+            <if test="requestTime != null">request_time = #{requestTime},</if>
+            <if test="description != null">description = #{description},</if>
+        </trim>
+        where id = #{id}
+    </update>
+
+    <delete id="deleteNoteFriendRequestById" parameterType="Long">
+        delete from note_friend_request where id = #{id}
+    </delete>
+
+
+    <delete id="deleteNoteFriendRequestByUserIdAndRequestId" parameterType="Long">
+        delete from note_friend_request where userId = #{userId} and requestId = #{requestId}
+    </delete>
+
+    <delete id="refuseRequest" parameterType="Long">
+        delete from note_friend_request
+        <where>
+            <if test="userId != null "> and user_id = #{userId}</if>
+            <if test="requestId != null "> and request_id = #{requestId}</if>
+        </where>
+    </delete>
+
+    <delete id="deleteNoteFriendRequestByIds" parameterType="String">
+        delete from note_friend_request where id in 
+        <foreach item="id" collection="array" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </delete>
+</mapper>

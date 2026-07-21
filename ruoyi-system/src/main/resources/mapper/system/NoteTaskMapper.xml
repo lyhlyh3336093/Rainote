@@ -1,0 +1,180 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ruoyi.system.mapper.NoteTaskMapper">
+    
+    <resultMap type="NoteTask" id="NoteTaskResult">
+        <result property="id"    column="id"    />
+        <result property="name"    column="name"    />
+        <result property="description"    column="description"    />
+        <result property="startTime"    column="startTime"    />
+        <result property="endTime"    column="endTime"    />
+        <result property="status"    column="status"    />
+        <result property="leader"    column="leader"    />
+        <result property="teams"    column="teams"    />
+        <result property="remindType"    column="remindType"    />
+        <result property="importentLevel"    column="importentLevel"    />
+        <result property="urgentLevel"    column="urgentLevel"    />
+        <result property="repeatType"    column="repeatType"    />
+        <result property="rewards"    column="rewards"    />
+        <result property="punishment"    column="punishment"    />
+        <result property="relevantAttribute"    column="relevantAttribute"    />
+        <result property="childrenTasks"    column="childrenTasks"    />
+        <result property="parentTask"    column="parentTask"    />
+        <result property="groupId"    column="groupId"    />
+        <result property="receiverId"    column="receiverId"    />
+        <result property="taskType"    column="taskType"    />
+        <result property="delFlag"    column="delFlag"    />
+    </resultMap>
+
+    <sql id="selectNoteTaskVo">
+        select id, name, description, startTime, endTime, status, leader, teams, remindType, importentLevel, urgentLevel, repeatType, rewards, punishment, relevantAttribute, childrenTasks, parentTask,groupId,receiverId,taskType,delFlag from note_task
+    </sql>
+
+    <select id="selectNoteTaskList" parameterType="NoteTask" resultMap="NoteTaskResult">
+        <include refid="selectNoteTaskVo"/>
+        <where>  
+            <if test="name != null  and name != ''"> and name like concat('%', #{name}, '%')</if>
+            <if test="description != null  and description != ''"> and description = #{description}</if>
+            <if test="startTime != null "> and startTime = #{startTime}</if>
+            <if test="endTime != null "> and endTime = #{endTime}</if>
+            <if test="status != null  and status != ''"> and status = #{status}</if>
+            <if test="leader != null  and leader != ''"> and leader = #{leader}</if>
+            <if test="teams != null  and teams != ''"> and teams = #{teams}</if>
+            <if test="remindType != null  and remindType != ''"> and remindType = #{remindType}</if>
+            <if test="importentLevel != null  and importentLevel != ''"> and importentLevel = #{importentLevel}</if>
+            <if test="urgentLevel != null  and urgentLevel != ''"> and urgentLevel = #{urgentLevel}</if>
+            <if test="repeatType != null  and repeatType != ''"> and repeatType = #{repeatType}</if>
+            <if test="rewards != null  and rewards != ''"> and rewards = #{rewards}</if>
+            <if test="punishment != null  and punishment != ''"> and punishment = #{punishment}</if>
+            <if test="relevantAttribute != null  and relevantAttribute != ''"> and relevantAttribute = #{relevantAttribute}</if>
+            <if test="childrenTasks != null  and childrenTasks != ''"> and childrenTasks = #{childrenTasks}</if>
+            <if test="parentTask != null  and parentTask != ''"> and parentTask = #{parentTask}</if>
+            <if test="groupId != null  and groupId != ''"> and groupId = #{groupId}</if>
+            <if test="receiverId != null  and receiverId != ''"> and receiverId = #{receiverId}</if>
+            and taskType = '0' and delFlag = 0
+        </where>
+    </select>
+    
+    <select id="selectNoteTaskById" parameterType="Long" resultMap="NoteTaskResult">
+        <include refid="selectNoteTaskVo"/>
+        where id = #{id}
+    </select>
+
+    <select id="selectTaskbar" parameterType="Long" resultMap="NoteTaskResult">
+        <include refid="selectNoteTaskVo"/>
+        where status="0" and receiverId is null and delFlag = 0
+    </select>
+
+
+    <select id="selectReceiveTaskList" parameterType="Long" resultMap="NoteTaskResult">
+        <include refid="selectNoteTaskVo"/>
+        where status in ("0","1","2") and receiverId = #{id}
+    </select>
+
+    <select id="getAllTasks" resultMap="NoteTaskResult">
+        <include refid="selectNoteTaskVo"/>
+        where delFlag = 0
+    </select>
+
+    <select id="getAllEndTasks" resultMap="NoteTaskResult">
+        <include refid="selectNoteTaskVo"/>
+        where delFlag != 1
+    </select>
+        
+    <insert id="insertNoteTask" parameterType="NoteTask" useGeneratedKeys="true" keyProperty="id">
+        insert into note_task
+        <trim prefix="(" suffix=")" suffixOverrides=",">
+            <if test="name != null">name,</if>
+            <if test="description != null">description,</if>
+            <if test="startTime != null">startTime,</if>
+            <if test="endTime != null">endTime,</if>
+            <if test="status != null">status,</if>
+            <if test="leader != null">leader,</if>
+            <if test="teams != null">teams,</if>
+            <if test="remindType != null">remindType,</if>
+            <if test="importentLevel != null">importentLevel,</if>
+            <if test="urgentLevel != null">urgentLevel,</if>
+            <if test="repeatType != null">repeatType,</if>
+            <if test="rewards != null">rewards,</if>
+            <if test="punishment != null">punishment,</if>
+            <if test="relevantAttribute != null">relevantAttribute,</if>
+            <if test="childrenTasks != null">childrenTasks,</if>
+            <if test="parentTask != null">parentTask,</if>
+            <if test="groupId != null">groupId,</if>
+            <if test="receiverId != null">receiverId,</if>
+            <if test="taskType != null">taskType,</if>
+            <if test="delFlag != null">delFlag,</if>
+         </trim>
+        <trim prefix="values (" suffix=")" suffixOverrides=",">
+            <if test="name != null">#{name},</if>
+            <if test="description != null">#{description},</if>
+            <if test="startTime != null">#{startTime},</if>
+            <if test="endTime != null">#{endTime},</if>
+            <if test="status != null">#{status},</if>
+            <if test="leader != null">#{leader},</if>
+            <if test="teams != null">#{teams},</if>
+            <if test="remindType != null">#{remindType},</if>
+            <if test="importentLevel != null">#{importentLevel},</if>
+            <if test="urgentLevel != null">#{urgentLevel},</if>
+            <if test="repeatType != null">#{repeatType},</if>
+            <if test="rewards != null">#{rewards},</if>
+            <if test="punishment != null">#{punishment},</if>
+            <if test="relevantAttribute != null">#{relevantAttribute},</if>
+            <if test="childrenTasks != null">#{childrenTasks},</if>
+            <if test="parentTask != null">#{parentTask},</if>
+            <if test="groupId != null">#{groupId},</if>
+            <if test="receiverId != null">#{receiverId},</if>
+            <if test="taskType != null">#{taskType},</if>
+            <if test="delFlag != null">#{delFlag},</if>
+         </trim>
+    </insert>
+
+    <update id="updateNoteTask" parameterType="NoteTask">
+        update note_task
+        <trim prefix="SET" suffixOverrides=",">
+            <if test="name != null">name = #{name},</if>
+            <if test="description != null">description = #{description},</if>
+            <if test="startTime != null">startTime = #{startTime},</if>
+            <if test="endTime != null">endTime = #{endTime},</if>
+            <if test="status != null">status = #{status},</if>
+            <if test="leader != null">leader = #{leader},</if>
+            <if test="teams != null">teams = #{teams},</if>
+            <if test="remindType != null">remindType = #{remindType},</if>
+            <if test="importentLevel != null">importentLevel = #{importentLevel},</if>
+            <if test="urgentLevel != null">urgentLevel = #{urgentLevel},</if>
+            <if test="repeatType != null">repeatType = #{repeatType},</if>
+            <if test="rewards != null">rewards = #{rewards},</if>
+            <if test="punishment != null">punishment = #{punishment},</if>
+            <if test="relevantAttribute != null">relevantAttribute = #{relevantAttribute},</if>
+            <if test="childrenTasks != null">childrenTasks = #{childrenTasks},</if>
+            <if test="parentTask != null">parentTask = #{parentTask},</if>
+            <if test="groupId != null">groupId = #{groupId},</if>
+            <if test="receiverId != null">receiverId = #{receiverId},</if>
+            <if test="taskType != null">parentTask = #{taskType},</if>
+        </trim>
+        where id = #{id}
+    </update>
+
+
+    <update id="receiveNoteTask" parameterType="NoteTask">
+        update note_task
+        <trim prefix="SET" suffixOverrides=",">
+            <if test="receiverId != null">receiverId = #{receiverId},</if>
+        </trim>
+            and status = "2"
+        where id = #{id}
+    </update>
+
+    <delete id="deleteNoteTaskById" parameterType="Long">
+        update note_task  set delFlag = 1 where id = #{id}
+    </delete>
+
+    <delete id="deleteNoteTaskByIds" parameterType="String">
+        update note_task  set delFlag = 1 where id in
+        <foreach item="id" collection="array" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </delete>
+</mapper>

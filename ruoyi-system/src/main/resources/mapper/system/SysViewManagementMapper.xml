@@ -1,0 +1,165 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ruoyi.system.mapper.SysViewManagementMapper">
+    
+    <resultMap type="SysViewManagement" id="SysViewManagementResult">
+        <result property="id"    column="id"    />
+        <result property="connectionId"    column="connection_id"    />
+        <result property="viewName"    column="view_name"    />
+        <result property="viewDefinition"    column="view_definition"    />
+        <result property="description"    column="description"    />
+        <result property="categoryId"    column="category_id"    />
+        <result property="isValid"    column="is_valid"    />
+        <result property="lastValidated"    column="last_validated"    />
+        <result property="validationError"    column="validation_error"    />
+        <result property="dependencies"    column="dependencies"    />
+        <result property="version"    column="version"    />
+        <result property="isSystem"    column="is_system"    />
+        <result property="tags"    column="tags"    />
+        <result property="accessLevel"    column="access_level"    />
+        <result property="userId"    column="user_id"    />
+        <result property="deptId"    column="dept_id"    />
+        <result property="createBy"    column="create_by"    />
+        <result property="createTime"    column="create_time"    />
+        <result property="updateBy"    column="update_by"    />
+        <result property="updateTime"    column="update_time"    />
+        <result property="remark"    column="remark"    />
+        <result property="delFlag"    column="del_flag"    />
+        <result property="extendedProperties"    column="extended_properties"    />
+        <result property="usageCount"    column="usage_count"    />
+        <result property="lastUsed"    column="last_used"    />
+    </resultMap>
+
+    <sql id="selectSysViewManagementVo">
+        select id, connection_id, view_name, view_definition, description, category_id, is_valid, last_validated, validation_error, dependencies, version, is_system, tags, access_level, user_id, dept_id, create_by, create_time, update_by, update_time, remark, del_flag, extended_properties, usage_count, last_used from sys_view_management
+    </sql>
+
+    <select id="selectSysViewManagementList" parameterType="SysViewManagement" resultMap="SysViewManagementResult">
+        <include refid="selectSysViewManagementVo"/>
+        <where>  
+            <if test="connectionId != null "> and connection_id = #{connectionId}</if>
+            <if test="viewName != null  and viewName != ''"> and view_name like concat('%', #{viewName}, '%')</if>
+            <if test="viewDefinition != null  and viewDefinition != ''"> and view_definition = #{viewDefinition}</if>
+            <if test="description != null  and description != ''"> and description = #{description}</if>
+            <if test="categoryId != null "> and category_id = #{categoryId}</if>
+            <if test="isValid != null "> and is_valid = #{isValid}</if>
+            <if test="lastValidated != null "> and last_validated = #{lastValidated}</if>
+            <if test="validationError != null  and validationError != ''"> and validation_error = #{validationError}</if>
+            <if test="dependencies != null  and dependencies != ''"> and dependencies = #{dependencies}</if>
+            <if test="version != null "> and version = #{version}</if>
+            <if test="isSystem != null "> and is_system = #{isSystem}</if>
+            <if test="tags != null  and tags != ''"> and tags = #{tags}</if>
+            <if test="accessLevel != null "> and access_level = #{accessLevel}</if>
+            <if test="userId != null "> and user_id = #{userId}</if>
+            <if test="deptId != null "> and dept_id = #{deptId}</if>
+            <if test="extendedProperties != null  and extendedProperties != ''"> and extended_properties = #{extendedProperties}</if>
+            <if test="usageCount != null "> and usage_count = #{usageCount}</if>
+            <if test="lastUsed != null "> and last_used = #{lastUsed}</if>
+        </where>
+    </select>
+    
+    <select id="selectSysViewManagementById" parameterType="Long" resultMap="SysViewManagementResult">
+        <include refid="selectSysViewManagementVo"/>
+        where id = #{id}
+    </select>
+        
+    <insert id="insertSysViewManagement" parameterType="SysViewManagement" useGeneratedKeys="true" keyProperty="id">
+        insert into sys_view_management
+        <trim prefix="(" suffix=")" suffixOverrides=",">
+            <if test="connectionId != null">connection_id,</if>
+            <if test="viewName != null and viewName != ''">view_name,</if>
+            <if test="viewDefinition != null and viewDefinition != ''">view_definition,</if>
+            <if test="description != null">description,</if>
+            <if test="categoryId != null">category_id,</if>
+            <if test="isValid != null">is_valid,</if>
+            <if test="lastValidated != null">last_validated,</if>
+            <if test="validationError != null">validation_error,</if>
+            <if test="dependencies != null">dependencies,</if>
+            <if test="version != null">version,</if>
+            <if test="isSystem != null">is_system,</if>
+            <if test="tags != null">tags,</if>
+            <if test="accessLevel != null">access_level,</if>
+            <if test="userId != null">user_id,</if>
+            <if test="deptId != null">dept_id,</if>
+            <if test="createBy != null">create_by,</if>
+            <if test="createTime != null">create_time,</if>
+            <if test="updateBy != null">update_by,</if>
+            <if test="updateTime != null">update_time,</if>
+            <if test="remark != null">remark,</if>
+            <if test="delFlag != null">del_flag,</if>
+            <if test="extendedProperties != null">extended_properties,</if>
+            <if test="usageCount != null">usage_count,</if>
+            <if test="lastUsed != null">last_used,</if>
+         </trim>
+        <trim prefix="values (" suffix=")" suffixOverrides=",">
+            <if test="connectionId != null">#{connectionId},</if>
+            <if test="viewName != null and viewName != ''">#{viewName},</if>
+            <if test="viewDefinition != null and viewDefinition != ''">#{viewDefinition},</if>
+            <if test="description != null">#{description},</if>
+            <if test="categoryId != null">#{categoryId},</if>
+            <if test="isValid != null">#{isValid},</if>
+            <if test="lastValidated != null">#{lastValidated},</if>
+            <if test="validationError != null">#{validationError},</if>
+            <if test="dependencies != null">#{dependencies},</if>
+            <if test="version != null">#{version},</if>
+            <if test="isSystem != null">#{isSystem},</if>
+            <if test="tags != null">#{tags},</if>
+            <if test="accessLevel != null">#{accessLevel},</if>
+            <if test="userId != null">#{userId},</if>
+            <if test="deptId != null">#{deptId},</if>
+            <if test="createBy != null">#{createBy},</if>
+            <if test="createTime != null">#{createTime},</if>
+            <if test="updateBy != null">#{updateBy},</if>
+            <if test="updateTime != null">#{updateTime},</if>
+            <if test="remark != null">#{remark},</if>
+            <if test="delFlag != null">#{delFlag},</if>
+            <if test="extendedProperties != null">#{extendedProperties},</if>
+            <if test="usageCount != null">#{usageCount},</if>
+            <if test="lastUsed != null">#{lastUsed},</if>
+         </trim>
+    </insert>
+
+    <update id="updateSysViewManagement" parameterType="SysViewManagement">
+        update sys_view_management
+        <trim prefix="SET" suffixOverrides=",">
+            <if test="connectionId != null">connection_id = #{connectionId},</if>
+            <if test="viewName != null and viewName != ''">view_name = #{viewName},</if>
+            <if test="viewDefinition != null and viewDefinition != ''">view_definition = #{viewDefinition},</if>
+            <if test="description != null">description = #{description},</if>
+            <if test="categoryId != null">category_id = #{categoryId},</if>
+            <if test="isValid != null">is_valid = #{isValid},</if>
+            <if test="lastValidated != null">last_validated = #{lastValidated},</if>
+            <if test="validationError != null">validation_error = #{validationError},</if>
+            <if test="dependencies != null">dependencies = #{dependencies},</if>
+            <if test="version != null">version = #{version},</if>
+            <if test="isSystem != null">is_system = #{isSystem},</if>
+            <if test="tags != null">tags = #{tags},</if>
+            <if test="accessLevel != null">access_level = #{accessLevel},</if>
+            <if test="userId != null">user_id = #{userId},</if>
+            <if test="deptId != null">dept_id = #{deptId},</if>
+            <if test="createBy != null">create_by = #{createBy},</if>
+            <if test="createTime != null">create_time = #{createTime},</if>
+            <if test="updateBy != null">update_by = #{updateBy},</if>
+            <if test="updateTime != null">update_time = #{updateTime},</if>
+            <if test="remark != null">remark = #{remark},</if>
+            <if test="delFlag != null">del_flag = #{delFlag},</if>
+            <if test="extendedProperties != null">extended_properties = #{extendedProperties},</if>
+            <if test="usageCount != null">usage_count = #{usageCount},</if>
+            <if test="lastUsed != null">last_used = #{lastUsed},</if>
+        </trim>
+        where id = #{id}
+    </update>
+
+    <delete id="deleteSysViewManagementById" parameterType="Long">
+        delete from sys_view_management where id = #{id}
+    </delete>
+
+    <delete id="deleteSysViewManagementByIds" parameterType="String">
+        delete from sys_view_management where id in 
+        <foreach item="id" collection="array" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </delete>
+</mapper>

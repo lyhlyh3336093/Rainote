@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ruoyi.system.mapper.NoteRecordMapper">
+    
+    <resultMap type="NoteRecord" id="NoteRecordResult">
+        <result property="id"    column="id"    />
+        <result property="viewId"    column="viewId"    />
+        <result property="property"    column="property"    />
+        <result property="linkRecordId"    column="linkRecordId"    />
+        <result property="name"    column="name"    />
+        <result property="linkName"    column="linkName"    />
+        <result property="dwtableId"    column="dwtableId"    />
+        <result property="sort"    column="sort"    />
+    </resultMap>
+
+    <sql id="selectNoteRecordVo">
+        select id, viewId, property, linkRecordId, name, linkName, dwtableId,sort from note_record
+    </sql>
+
+    <select id="selectNoteRecordList" parameterType="NoteRecord" resultMap="NoteRecordResult">
+        <include refid="selectNoteRecordVo"/>
+        <where>  
+            <if test="viewId != null "> and viewId = #{viewId}</if>
+            <if test="property != null  and property != ''"> and property = #{property}</if>
+            <if test="linkRecordId != null "> and linkRecordId = #{linkRecordId}</if>
+            <if test="dwtableId != null "> and dwtableId = #{dwtableId}</if>
+            <if test="name != null  and name != ''"> and name like concat('%', #{name}, '%')</if>
+            <if test="linkName != null  and linkName != ''"> and linkName like concat('%', #{linkName}, '%')</if>
+            <if test="sort != null "> and sort = #{sort}</if>
+        </where>
+        order by sort
+    </select>
+    
+    <select id="selectNoteRecordById" parameterType="Long" resultMap="NoteRecordResult">
+        <include refid="selectNoteRecordVo"/>
+        where id = #{id}
+    </select>
+
+
+    <select id="selectNoteRecordByIds" parameterType="Long" resultMap="NoteRecordResult">
+        <include refid="selectNoteRecordVo"/>
+        where id in
+        <foreach item="id" collection="array" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </select>
+        
+    <insert id="insertNoteRecord" useGeneratedKeys="true" keyColumn="id" keyProperty="id" parameterType="NoteRecord">
+        insert into note_record
+        <trim prefix="(" suffix=")" suffixOverrides=",">
+            <if test="id != null">id,</if>
+            <if test="viewId != null">viewId,</if>
+            <if test="property != null">property,</if>
+            <if test="linkRecordId != null">linkRecordId,</if>
+            <if test="dwtableId != null">dwtableId,</if>
+            <if test="name != null">name,</if>
+            <if test="linkName != null">linkName,</if>
+            <if test="sort != null">sort,</if>
+         </trim>
+        <trim prefix="values (" suffix=")" suffixOverrides=",">
+            <if test="id != null">#{id},</if>
+            <if test="viewId != null">#{viewId},</if>
+            <if test="property != null">#{property},</if>
+            <if test="linkRecordId != null">#{linkRecordId},</if>
+            <if test="dwtableId != null">#{dwtableId},</if>
+            <if test="name != null">#{name},</if>
+            <if test="linkName != null">#{linkName},</if>
+            <if test="sort != null">#{sort},</if>
+         </trim>
+    </insert>
+
+    <update id="updateNoteRecord" parameterType="NoteRecord">
+        update note_record
+        <trim prefix="SET" suffixOverrides=",">
+            <if test="viewId != null">viewId = #{viewId},</if>
+            <if test="property != null">property = #{property},</if>
+            <if test="linkRecordId != null">linkRecordId = #{linkRecordId},</if>
+            <if test="dwtableId != null">dwtableId = #{dwtableId},</if>
+            <if test="name != null">name = #{name},</if>
+            <if test="linkName != null">linkName = #{linkName},</if>
+            <if test="sort != null">sort = #{sort},</if>
+        </trim>
+        where id = #{id}
+    </update>
+
+    <delete id="deleteNoteRecordById" parameterType="Long">
+        delete from note_record where id = #{id}
+    </delete>
+
+
+    <delete id="removeAll" >
+        delete from note_record where 1=1
+    </delete>
+
+    <delete id="deleteNoteRecordByViewId" parameterType="Long">
+        delete from note_record where viewId = #{viewId}
+    </delete>
+
+    <delete id="deleteNoteRecordByDwtableId" parameterType="Long">
+        delete from note_record where dwtableId = #{dwtableId}
+    </delete>
+
+    <delete id="deleteNoteRecordByIds" parameterType="String">
+        delete from note_record where id in 
+        <foreach item="id" collection="array" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </delete>
+</mapper>

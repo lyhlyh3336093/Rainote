@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ruoyi.system.mapper.NoteTupleMapper">
+    
+    <resultMap type="NoteTuple" id="NoteTupleResult">
+        <result property="id"    column="id"    />
+        <result property="tuple"    column="tuple"    />
+    </resultMap>
+
+    <sql id="selectNoteTupleVo">
+        select id, tuple from note_tuple
+    </sql>
+
+    <select id="selectNoteTupleList" parameterType="NoteTuple" resultMap="NoteTupleResult">
+        <include refid="selectNoteTupleVo"/>
+        <where>  
+            <if test="tuple != null  and tuple != ''"> and tuple = #{tuple}</if>
+        </where>
+    </select>
+    
+    <select id="selectNoteTupleById" parameterType="Long" resultMap="NoteTupleResult">
+        <include refid="selectNoteTupleVo"/>
+        where id = #{id}
+    </select>
+        
+    <insert id="insertNoteTuple" parameterType="NoteTuple" useGeneratedKeys="true" keyProperty="id">
+        insert into note_tuple
+        <trim prefix="(" suffix=")" suffixOverrides=",">
+            <if test="tuple != null">tuple,</if>
+         </trim>
+        <trim prefix="values (" suffix=")" suffixOverrides=",">
+            <if test="tuple != null">#{tuple},</if>
+         </trim>
+    </insert>
+
+    <update id="updateNoteTuple" parameterType="NoteTuple">
+        update note_tuple
+        <trim prefix="SET" suffixOverrides=",">
+            <if test="tuple != null">tuple = #{tuple},</if>
+        </trim>
+        where id = #{id}
+    </update>
+
+    <delete id="deleteNoteTupleById" parameterType="Long">
+        delete from note_tuple where id = #{id}
+    </delete>
+
+    <delete id="deleteNoteTupleByIds" parameterType="String">
+        delete from note_tuple where id in 
+        <foreach item="id" collection="array" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </delete>
+</mapper>

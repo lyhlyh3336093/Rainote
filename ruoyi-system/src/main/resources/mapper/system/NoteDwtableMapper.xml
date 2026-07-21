@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ruoyi.system.mapper.NoteDwtableMapper">
+    
+    <resultMap type="NoteDwtable" id="NoteDwtableResult">
+        <result property="id"    column="id"    />
+        <result property="name"    column="name"    />
+        <result property="url"    column="url"    />
+        <result property="noteId"    column="noteId"    />
+        <result property="delFlag"    column="delFlag"    />
+    </resultMap>
+
+    <sql id="selectNoteDwtableVo">
+        select id, name, url,noteId,delFlag from note_dwtable
+    </sql>
+
+    <select id="selectNoteDwtableList" parameterType="NoteDwtable" resultMap="NoteDwtableResult">
+        <include refid="selectNoteDwtableVo"/>
+        <where>  
+            <if test="name != null  and name != ''"> and name like concat('%', #{name}, '%')</if>
+            <if test="url != null  and url != ''"> and url = #{url}</if>
+            <if test="noteId != null  and noteId != ''"> and noteId = #{noteId}</if>
+             and delFlag = 0
+        </where>
+
+    </select>
+    
+    <select id="selectNoteDwtableById" parameterType="Long" resultMap="NoteDwtableResult">
+        <include refid="selectNoteDwtableVo"/>
+        where id = #{id}
+    </select>
+
+
+    <select id="selectDWTableList" parameterType="Long" resultMap="NoteDwtableResult">
+        <include refid="selectNoteDwtableVo"/>
+        where noteId = #{id} and delFlag = 0
+    </select>
+
+    <insert id="insertNoteDwtable" parameterType="NoteDwtable" useGeneratedKeys="true" keyProperty="id">
+        insert into note_dwtable
+        <trim prefix="(" suffix=")" suffixOverrides=",">
+            <if test="name != null">name,</if>
+            <if test="url != null">url,</if>
+            <if test="noteId != null">noteId,</if>
+            <if test="delFlag != null">delFlag,</if>
+         </trim>
+        <trim prefix="values (" suffix=")" suffixOverrides=",">
+            <if test="name != null">#{name},</if>
+            <if test="url != null">#{url},</if>
+            <if test="noteId != null">#{noteId},</if>
+            <if test="delFlag != null">#{delFlag},</if>
+         </trim>
+    </insert>
+
+    <update id="updateNoteDwtable" parameterType="NoteDwtable">
+        update note_dwtable
+        <trim prefix="SET" suffixOverrides=",">
+            <if test="name != null">name = #{name},</if>
+            <if test="url != null">url = #{url},</if>
+            <if test="noteId != null">noteId = #{noteId},</if>
+        </trim>
+        where id = #{id}
+    </update>
+
+    <delete id="deleteNoteDwtableById" parameterType="Long">
+        delete from note_dwtable where id = #{id}
+    </delete>
+
+    <update id="deleteNoteDwtableByNoteId" parameterType="Long">
+        update note_dwtable set delFlag = 1 where noteId = #{id}
+    </update>
+
+    <update id="recoverNoteDwtableByNoteId" parameterType="Long">
+        update note_dwtable set delFlag = 0 where noteId = #{id}
+    </update>
+
+    <delete id="removeAll" >
+        delete from note_dwtable where 1=1
+    </delete>
+
+    <delete id="deleteNoteDwtableByIds" parameterType="String">
+        delete from note_dwtable where id in 
+        <foreach item="id" collection="array" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </delete>
+</mapper>

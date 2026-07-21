@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ruoyi.system.mapper.NoteDwtableItemMapper">
+    
+    <resultMap type="NoteDwtableItem" id="NoteDwtableItemResult">
+        <result property="id"    column="id"    />
+        <result property="dwtId"    column="dwtId"    />
+        <result property="columnId"    column="columnId"    />
+        <result property="value"    column="value"    />
+        <result property="recordId"    column="recordId"    />
+        <result property="linkRecordId"    column="linkRecordId"    />
+        <result property="linkColumnId"    column="linkColumnId"    />
+        <result property="linkItemId"    column="linkItemId"    />
+        <result property="linkBlockId"    column="linkBlockId"    />
+        <result property="linkNoteId"    column="linkNoteId"    />
+    </resultMap>
+
+    <sql id="selectNoteDwtableItemVo">
+        select id, dwtId, columnId, value, recordId,linkRecordId,linkColumnId,linkItemId,linkBlockId,linkNoteId from note_dwtable_item
+    </sql>
+
+    <select id="selectNoteDwtableItemList" parameterType="NoteDwtableItem" resultMap="NoteDwtableItemResult">
+        <include refid="selectNoteDwtableItemVo"/>
+        <where>  
+            <if test="dwtId != null "> and dwtId = #{dwtId}</if>
+            <if test="columnId != null "> and columnId = #{columnId}</if>
+            <if test="value != null  and value != ''"> and value = #{value}</if>
+            <if test="recordId != null  and recordId != ''"> and recordId = #{recordId}</if>
+            <if test="linkRecordId != null  and linkRecordId != ''"> and #{linkRecordId} in linkRecordId</if>
+            <if test="linkItemId != null  and linkItemId != ''"> and #{linkItemId} in linkItemId</if>
+            <if test="linkColumnId != null  and linkColumnId != ''"> and linkColumnId = #{linkColumnId}</if>
+            <if test="linkBlockId != null  and linkBlockId != ''"> and linkBlockId = #{linkBlockId}</if>
+            <if test="linkNoteId != null  and linkNoteId != ''"> and linkNoteId = #{linkNoteId}</if>
+        </where>
+    </select>
+    
+    <select id="selectNoteDwtableItemById" parameterType="Long" resultMap="NoteDwtableItemResult">
+        <include refid="selectNoteDwtableItemVo"/>
+        <where>
+            <if test="dwtId != null "> and dwtId = #{dwtId}</if>
+            <if test="columnId != null "> and columnId = #{columnId}</if>
+            <if test="value != null  and value != ''"> and value = #{value}</if>
+            <if test="recordId != null  and recordId != ''"> and recordId = #{recordId}</if>
+            <if test="linkRecordId != null  and linkRecordId != ''"> and #{linkRecordId} in linkRecordId</if>
+            <if test="linkColumnId != null  and linkColumnId != ''"> and linkColumnId = #{linkColumnId}</if>
+            <if test="linkBlockId != null  and linkBlockId != ''"> and linkBlockId = #{linkBlockId}</if>
+            <if test="linkNoteId != null  and linkNoteId != ''"> and linkNoteId = #{linkNoteId}</if>
+        </where>
+    </select>
+
+
+    <select id="selectNoteDwtableItemByRecordAndColumn" parameterType="NoteDwtableItem" resultMap="NoteDwtableItemResult">
+        <include refid="selectNoteDwtableItemVo"/>
+        <where>
+            <if test="dwtId != null "> and dwtId = #{dwtId}</if>
+            <if test="columnId != null "> and columnId = #{columnId}</if>
+            <if test="recordId != null  and recordId != ''"> and recordId = #{recordId}</if>
+            <if test="linkRecordId != null  and linkRecordId != ''"> and #{linkRecordId} in linkRecordId</if>
+            <if test="linkColumnId != null  and linkColumnId != ''"> and linkColumnId = #{linkColumnId}</if>
+            <if test="linkBlockId != null  and linkBlockId != ''"> and linkBlockId = #{linkBlockId}</if>
+            <if test="linkNoteId != null  and linkNoteId != ''"> and linkNoteId = #{linkNoteId}</if>
+        </where>
+    </select>
+
+
+    <select id="selectNoteDwtableItemByRecordAndLinkColumn" parameterType="NoteDwtableItem" resultMap="NoteDwtableItemResult">
+        <include refid="selectNoteDwtableItemVo"/>
+        <where>
+            <if test="dwtId != null "> and dwtId = #{dwtId}</if>
+            <if test="columnId != null "> and columnId = #{columnId}</if>
+            <if test="value != null  and value != ''"> and value = #{value}</if>
+            <if test="recordId != null  and recordId != ''"> and recordId = #{recordId}</if>
+            <if test="linkRecordId != null  and linkRecordId != ''"> and #{linkRecordId} in linkRecordId</if>
+            <if test="linkColumnId != null  and linkColumnId != ''"> and linkColumnId = #{linkColumnId}</if>
+            <if test="linkBlockId != null  and linkBlockId != ''"> and linkBlockId = #{linkBlockId}</if>
+            <if test="linkNoteId != null  and linkNoteId != ''"> and linkNoteId = #{linkNoteId}</if>
+        </where>
+    </select>
+        
+    <insert id="insertNoteDwtableItem" parameterType="NoteDwtableItem" useGeneratedKeys="true" keyProperty="id">
+        insert into note_dwtable_item
+        <trim prefix="(" suffix=")" suffixOverrides=",">
+            <if test="dwtId != null">dwtId,</if>
+            <if test="columnId != null">columnId,</if>
+            <if test="value != null">value,</if>
+            <if test="recordId != null">recordId,</if>
+            <if test="linkRecordId != null">linkRecordId,</if>
+            <if test="linkItemId != null">linkItemId,</if>
+            <if test="linkColumnId != null">linkColumnId,</if>
+            <if test="linkBlockId != null">linkBlockId,</if>
+            <if test="linkNoteId != null">linkNoteId,</if>
+         </trim>
+        <trim prefix="values (" suffix=")" suffixOverrides=",">
+            <if test="dwtId != null">#{dwtId},</if>
+            <if test="columnId != null">#{columnId},</if>
+            <if test="value != null">#{value},</if>
+            <if test="recordId != null">#{recordId},</if>
+            <if test="linkRecordId != null">#{linkRecordId},</if>
+            <if test="linkItemId != null">#{linkItemId},</if>
+            <if test="linkColumnId != null">#{linkColumnId},</if>
+            <if test="linkBlockId != null">#{linkBlockId},</if>
+            <if test="linkNoteId != null">#{linkNoteId},</if>
+         </trim>
+    </insert>
+
+    <update id="updateNoteDwtableItem" parameterType="NoteDwtableItem">
+        update note_dwtable_item
+        <trim prefix="SET" suffixOverrides=",">
+            <if test="dwtId != null">dwtId = #{dwtId},</if>
+            <if test="columnId != null">columnId = #{columnId},</if>
+            <if test="value != null">value = #{value},</if>
+            <if test="recordId != null">recordId = #{recordId},</if>
+            <if test="linkRecordId != null">linkRecordId = #{linkRecordId},</if>
+            <if test="linkItemId != null">linkItemId = #{linkItemId},</if>
+            <if test="linkColumnId != null">linkColumnId = #{linkColumnId} </if>
+            <if test="linkBlockId != null">linkBlockId = #{linkBlockId} </if>
+            <if test="linkNoteId != null">linkNoteId = #{linkNoteId} </if>
+        </trim>
+        where id = #{id}
+    </update>
+
+    <delete id="deleteNoteDwtableItemById" parameterType="Long">
+        delete from note_dwtable_item where id = #{id}
+    </delete>
+
+
+    <delete id="deleteNoteDwtableItemByDwtId" parameterType="Long">
+        delete from note_dwtable_item where dwtId = #{dwtId}
+    </delete>
+
+    <delete id="deleteNoteDwtableItemByColumnId" parameterType="Long">
+        delete from note_dwtable_item where columnId = #{columnId}
+    </delete>
+
+    <delete id="deleteNoteDwtableItemByRecordId" parameterType="Long">
+        delete from note_dwtable_item where recordId = #{recordId}
+    </delete>
+
+    <delete id="removeAll" >
+        delete from note_dwtable_item where 1=1
+    </delete>
+
+    <delete id="deleteNoteDwtableItemByIds" parameterType="String">
+        delete from note_dwtable_item where id in 
+        <foreach item="id" collection="array" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </delete>
+</mapper>

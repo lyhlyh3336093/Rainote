@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ruoyi.system.mapper.NoteMetaMapper">
+    
+    <resultMap type="NoteMeta" id="NoteMetaResult">
+        <result property="id"    column="id"    />
+        <result property="noteId"    column="noteId"    />
+        <result property="createTime"    column="createTime"    />
+        <result property="createDate"    column="createDate"    />
+        <result property="creator"    column="creator"    />
+        <result property="createName"    column="createName"    />
+        <result property="deleteFlag"    column="deleteFlag"    />
+        <result property="editTime"    column="editTime"    />
+        <result property="editName"    column="editName"    />
+        <result property="isExternal"    column="isExternal"    />
+        <result property="isPined"    column="isPined"    />
+        <result property="isStared"    column="isStared"    />
+        <result property="objType"    column="objType"    />
+        <result property="owner"    column="owner"    />
+        <result property="ownerName"    column="ownerName"    />
+        <result property="serverTime"    column="serverTime"    />
+        <result property="title"    column="title"    />
+        <result property="type"    column="type"    />
+        <result property="url"    column="url"    />
+    </resultMap>
+
+    <sql id="selectNoteMetaVo">
+        select id, noteId, createTime, createDate, creator, createName, deleteFlag, editTime, editName, isExternal, isPined, isStared, objType, owner, ownerName, serverTime, title, type, url from note_meta
+    </sql>
+
+    <select id="selectNoteMetaList" parameterType="NoteMeta" resultMap="NoteMetaResult">
+        <include refid="selectNoteMetaVo"/>
+        <where>  
+            <if test="noteId != null "> and noteId = #{noteId}</if>
+            <if test="createTime != null "> and createTime = #{createTime}</if>
+            <if test="createDate != null  and createDate != ''"> and createDate = #{createDate}</if>
+            <if test="creator != null  and creator != ''"> and creator = #{creator}</if>
+            <if test="createName != null  and createName != ''"> and createName like concat('%', #{createName}, '%')</if>
+            <if test="deleteFlag != null "> and deleteFlag = #{deleteFlag}</if>
+            <if test="editTime != null "> and editTime = #{editTime}</if>
+            <if test="editName != null  and editName != ''"> and editName like concat('%', #{editName}, '%')</if>
+            <if test="isExternal != null "> and isExternal = #{isExternal}</if>
+            <if test="isPined != null "> and isPined = #{isPined}</if>
+            <if test="isStared != null "> and isStared = #{isStared}</if>
+            <if test="objType != null  and objType != ''"> and objType = #{objType}</if>
+            <if test="owner != null  and owner != ''"> and owner = #{owner}</if>
+            <if test="ownerName != null  and ownerName != ''"> and ownerName like concat('%', #{ownerName}, '%')</if>
+            <if test="serverTime != null "> and serverTime = #{serverTime}</if>
+            <if test="title != null  and title != ''"> and title = #{title}</if>
+            <if test="type != null "> and type = #{type}</if>
+            <if test="url != null  and url != ''"> and url = #{url}</if>
+        </where>
+    </select>
+    
+    <select id="selectNoteMetaById" parameterType="Long" resultMap="NoteMetaResult">
+        <include refid="selectNoteMetaVo"/>
+        where id = #{id}
+    </select>
+
+    <select id="selectNoteMetaByNoteId" parameterType="Long" resultMap="NoteMetaResult">
+        <include refid="selectNoteMetaVo"/>
+        where noteId = #{noteId}
+    </select>
+        
+    <insert id="insertNoteMeta" parameterType="NoteMeta" useGeneratedKeys="true" keyProperty="id">
+        insert into note_meta
+        <trim prefix="(" suffix=")" suffixOverrides=",">
+            <if test="noteId != null">noteId,</if>
+            <if test="createTime != null">createTime,</if>
+            <if test="createDate != null">createDate,</if>
+            <if test="creator != null">creator,</if>
+            <if test="createName != null">createName,</if>
+            <if test="deleteFlag != null">deleteFlag,</if>
+            <if test="editTime != null">editTime,</if>
+            <if test="editName != null">editName,</if>
+            <if test="isExternal != null">isExternal,</if>
+            <if test="isPined != null">isPined,</if>
+            <if test="isStared != null">isStared,</if>
+            <if test="objType != null">objType,</if>
+            <if test="owner != null">owner,</if>
+            <if test="ownerName != null">ownerName,</if>
+            <if test="serverTime != null">serverTime,</if>
+            <if test="title != null">title,</if>
+            <if test="type != null">type,</if>
+            <if test="url != null">url,</if>
+         </trim>
+        <trim prefix="values (" suffix=")" suffixOverrides=",">
+            <if test="noteId != null">#{noteId},</if>
+            <if test="createTime != null">#{createTime},</if>
+            <if test="createDate != null">#{createDate},</if>
+            <if test="creator != null">#{creator},</if>
+            <if test="createName != null">#{createName},</if>
+            <if test="deleteFlag != null">#{deleteFlag},</if>
+            <if test="editTime != null">#{editTime},</if>
+            <if test="editName != null">#{editName},</if>
+            <if test="isExternal != null">#{isExternal},</if>
+            <if test="isPined != null">#{isPined},</if>
+            <if test="isStared != null">#{isStared},</if>
+            <if test="objType != null">#{objType},</if>
+            <if test="owner != null">#{owner},</if>
+            <if test="ownerName != null">#{ownerName},</if>
+            <if test="serverTime != null">#{serverTime},</if>
+            <if test="title != null">#{title},</if>
+            <if test="type != null">#{type},</if>
+            <if test="url != null">#{url},</if>
+         </trim>
+    </insert>
+
+    <update id="updateNoteMeta" parameterType="NoteMeta">
+        update note_meta
+        <trim prefix="SET" suffixOverrides=",">
+            <if test="noteId != null">noteId = #{noteId},</if>
+            <if test="createTime != null">createTime = #{createTime},</if>
+            <if test="createDate != null">createDate = #{createDate},</if>
+            <if test="creator != null">creator = #{creator},</if>
+            <if test="createName != null">createName = #{createName},</if>
+            <if test="deleteFlag != null">deleteFlag = #{deleteFlag},</if>
+            <if test="editTime != null">editTime = #{editTime},</if>
+            <if test="editName != null">editName = #{editName},</if>
+            <if test="isExternal != null">isExternal = #{isExternal},</if>
+            <if test="isPined != null">isPined = #{isPined},</if>
+            <if test="isStared != null">isStared = #{isStared},</if>
+            <if test="objType != null">objType = #{objType},</if>
+            <if test="owner != null">owner = #{owner},</if>
+            <if test="ownerName != null">ownerName = #{ownerName},</if>
+            <if test="serverTime != null">serverTime = #{serverTime},</if>
+            <if test="title != null">title = #{title},</if>
+            <if test="type != null">type = #{type},</if>
+            <if test="url != null">url = #{url},</if>
+        </trim>
+        where id = #{id}
+    </update>
+
+    <delete id="deleteNoteMetaById" parameterType="Long">
+        delete from note_meta where id = #{id}
+    </delete>
+
+
+    <delete id="removeAll" >
+        delete from note_meta where 1=1
+    </delete>
+
+    <delete id="deleteNoteMetaByIds" parameterType="String">
+        delete from note_meta where id in 
+        <foreach item="id" collection="array" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </delete>
+</mapper>

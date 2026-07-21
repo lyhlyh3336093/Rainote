@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ruoyi.system.mapper.NoteFriendMapper">
+    
+    <resultMap type="NoteFriend" id="NoteFriendResult">
+        <result property="id"    column="id"    />
+        <result property="userId"    column="user_id"    />
+        <result property="friendId"    column="friend_id"    />
+        <result property="status"    column="status"    />
+        <result property="creatTime"    column="creat_time"    />
+        <result property="userName"     column="user_name" />
+    </resultMap>
+
+    <resultMap type="NoteFriendVo" id="NoteFriendVoResult">
+        <result property="id"    column="id"    />
+        <result property="userId"    column="user_id"    />
+        <result property="friendId"    column="friend_id"    />
+        <result property="status"    column="status"    />
+        <result property="creatTime"    column="creat_time"    />
+        <result property="userName"     column="user_name" />
+    </resultMap>
+
+
+    <sql id="selectNoteFriendVo">
+        select id, user_id, friend_id, status, creat_time from note_friend
+    </sql>
+
+    <select id="selectNoteFriendList" parameterType="NoteFriend" resultMap="NoteFriendVoResult">
+        select distinct  su.user_name,f.friend_id,f.user_id,f.status  from note_friend f
+        left join sys_user su
+        on su.user_id = f.user_id
+        <where>
+            <if test="userId != null and friendId != null"> and (f.user_id = #{userId} and f.friend_id = #{friendId})or( f.friend_id = #{friendId} and f.user_id = #{userId}) </if>
+            and f.status = 0
+        </where>
+
+    </select>
+
+    <select id="selectNoteFriendListByUserId" parameterType="String" resultMap="NoteFriendVoResult">
+        select distinct  su.user_name,f.friend_id,f.user_id,f.status  from note_friend f
+        left join sys_user su
+        on su.user_id = f.friend_id
+        <where>
+            <if test="userId != null "> and f.user_id = #{userId} </if>
+            and f.status = 0
+        </where>
+
+    </select>
+
+    <select id="selectNoteFriendListByFriendId" parameterType="String" resultMap="NoteFriendVoResult">
+        select distinct  su.user_name,f.friend_id,f.user_id,f.status  from note_friend f
+        left join sys_user su
+        on su.user_id = f.user_id
+        <where>
+            <if test="userId != null "> and f.friend_id = #{friendId} </if>
+            and f.status = 0
+        </where>
+
+    </select>
+
+    <select id="selectFriendBlockList" parameterType="NoteFriend" resultMap="NoteFriendVoResult">
+        select distinct  su.user_name,f.friend_id,f.user_id,f.status from note_friend f
+        left join sys_user su
+        on su.user_id = f.friend_id
+        <where>
+            <if test="userId != null and friendId != null"> and (f.user_id = #{userId} and f.friend_id = #{friendId})or( f.friend_id = #{friendId} and f.user_id = #{userId}) </if>
+            and f.status = 2
+        </where>
+    </select>
+
+    
+    <select id="selectNoteFriendById" parameterType="String" resultMap="NoteFriendResult">
+        <include refid="selectNoteFriendVo"/>
+        where id = #{id}
+    </select>
+        
+    <insert id="insertNoteFriend" parameterType="NoteFriend" useGeneratedKeys="true" keyProperty="id">
+        insert into note_friend
+        <trim prefix="(" suffix=")" suffixOverrides=",">
+            <if test="userId != null">user_id,</if>
+            <if test="friendId != null">friend_id,</if>
+            <if test="status != null">status,</if>
+            <if test="creatTime != null">creat_time,</if>
+         </trim>
+        <trim prefix="values (" suffix=")" suffixOverrides=",">
+            <if test="userId != null">#{userId},</if>
+            <if test="friendId != null">#{friendId},</if>
+            <if test="status != null">#{status},</if>
+            <if test="creatTime != null">#{creatTime},</if>
+         </trim>
+    </insert>
+
+    <update id="updateNoteFriend" parameterType="NoteFriend">
+        update note_friend
+        <trim prefix="SET" suffixOverrides=",">
+            <if test="userId != null">user_id = #{userId},</if>
+            <if test="friendId != null">friend_id = #{friendId},</if>
+            <if test="status != null">status = #{status},</if>
+            <if test="creatTime != null">creat_time = #{creatTime},</if>
+        </trim>
+        where id = #{id}
+    </update>
+
+    <update id="blockNoteFriend" parameterType="NoteFriend">
+        update note_friend set status = 2
+        <where>
+            <if test="userId != null and friendId != null"> and (user_id = #{userId} and friend_id = #{friendId}) or (user_id = #{friendId} and friend_id = #{userId})  </if>
+        </where>
+    </update>
+
+    <delete id="deleteNoteFriendById" parameterType="String">
+        delete from note_friend where id = #{id}
+    </delete>
+
+    <delete id="deleteNoteFriend" parameterType="NoteFriend">
+        update note_friend set status = 1
+        <where>
+            <if test="userId != null and friendId != null"> and (user_id = #{userId} and friend_id = #{friendId}) or (user_id = #{friendId} and friend_id = #{userId})  </if>
+        </where>
+
+    </delete>
+</mapper>
