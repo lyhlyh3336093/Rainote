@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Title</title>
+</head>
+<body>
+<div id="content" >where do you want to go?</div>
+</body>
+<script type="text/javascript">
+    // var ws = new WebSocket("ws://localhost:8080/WebSocketServer/1")
+    ws = new WebSocket("ws://172.26.192.1:8080/WebSocketServer")
+    ws.onopen=function (){
+        console.log("链接打开")
+        $("#content").append("<p>与服务端建立连接建立成功！您的客户端ID="+"</p>");
+        ws.send("hello ws-server")
+    }
+    ws.onmessage=function (message){
+        console.log(message.data)
+        ws.send("I got your message,the data is :" + message.data)
+    }
+</script>
+</html>

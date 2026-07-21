@@ -54,3 +54,7 @@ project-analysis-report.md
 ruoyi-ui/src/views/aaa.vue
 test-data.sql
 ruoyi-admin/src/main/resources/META-INF/MANIFEST.MF
+
+######################################################################
+# Standalone sub-project (has its own .gitignore / node_modules)
+notepad/

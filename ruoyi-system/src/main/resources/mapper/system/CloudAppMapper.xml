@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ruoyi.system.mapper.CloudAppMapper">
+    
+    <resultMap type="CloudApp" id="CloudAppResult">
+        <result property="id"    column="id"    />
+        <result property="name"    column="name"    />
+        <result property="link"    column="link"    />
+        <result property="description"    column="description"    />
+        <result property="sort"    column="sort"    />
+        <result property="weight"    column="weight"    />
+        <result property="createTime"    column="createTime"    />
+        <result property="creater"    column="creater"    />
+        <result property="company"    column="company"    />
+        <result property="logo"    column="logo"    />
+        <result property="delFlag"    column="delFlag"    />
+    </resultMap>
+
+    <sql id="selectCloudAppVo">
+        select id, name, link, description, sort, weight, createTime, creater, company, logo ,delFlag from cloud_app
+    </sql>
+
+    <select id="selectCloudAppList" parameterType="CloudApp" resultMap="CloudAppResult">
+        <include refid="selectCloudAppVo"/>
+        <where>  
+            <if test="name != null  and name != ''"> and name like concat('%', #{name}, '%')</if>
+            <if test="link != null  and link != ''"> and link = #{link}</if>
+            <if test="description != null  and description != ''"> and description = #{description}</if>
+            <if test="sort != null "> and sort = #{sort}</if>
+            <if test="weight != null "> and weight = #{weight}</if>
+            <if test="createTime != null "> and createTime = #{createTime}</if>
+            <if test="creater != null  and creater != ''"> and creater = #{creater}</if>
+            <if test="company != null  and company != ''"> and company = #{company}</if>
+            <if test="logo != null  and logo != ''"> and logo = #{logo}</if>
+            and delFlag = 0
+        </where>
+        order by sort
+    </select>
+    
+    <select id="selectCloudAppById" parameterType="Long" resultMap="CloudAppResult">
+        <include refid="selectCloudAppVo"/>
+        where id = #{id} and delFlag = 0
+    </select>
+        
+    <insert id="insertCloudApp" parameterType="CloudApp">
+        insert into cloud_app
+        <trim prefix="(" suffix=")" suffixOverrides=",">
+            <if test="id != null">id,</if>
+            <if test="name != null">name,</if>
+            <if test="link != null">link,</if>
+            <if test="description != null">description,</if>
+            <if test="sort != null">sort,</if>
+            <if test="weight != null">weight,</if>
+            <if test="createTime != null">createTime,</if>
+            <if test="creater != null">creater,</if>
+            <if test="company != null">company,</if>
+            <if test="logo != null">logo,</if>
+            <if test="delFlag != null">delFlag,</if>
+         </trim>
+        <trim prefix="values (" suffix=")" suffixOverrides=",">
+            <if test="id != null">#{id},</if>
+            <if test="name != null">#{name},</if>
+            <if test="link != null">#{link},</if>
+            <if test="description != null">#{description},</if>
+            <if test="sort != null">#{sort},</if>
+            <if test="weight != null">#{weight},</if>
+            <if test="createTime != null">#{createTime},</if>
+            <if test="creater != null">#{creater},</if>
+            <if test="company != null">#{company},</if>
+            <if test="logo != null">#{logo},</if>
+            <if test="delFlag != null">delFlag,</if>
+         </trim>
+    </insert>
+
+    <update id="updateCloudApp" parameterType="CloudApp">
+        update cloud_app
+        <trim prefix="SET" suffixOverrides=",">
+            <if test="name != null">name = #{name},</if>
+            <if test="link != null">link = #{link},</if>
+            <if test="description != null">description = #{description},</if>
+            <if test="sort != null">sort = #{sort},</if>
+            <if test="weight != null">weight = #{weight},</if>
+            <if test="createTime != null">createTime = #{createTime},</if>
+            <if test="creater != null">creater = #{creater},</if>
+            <if test="company != null">company = #{company},</if>
+            <if test="logo != null">logo = #{logo},</if>
+            <if test="delFlag != null">delFlag = #{delFlag},</if>
+        </trim>
+        where id = #{id}
+    </update>
+
+    <update id="deleteCloudAppById" parameterType="Long">
+        update cloud_app set delFlag = 1 where id = #{id}
+    </update>
+
+    <delete id="deleteCloudAppByIds" parameterType="String">
+        update cloud_app set delFlag = 1 where id in
+        <foreach item="id" collection="array" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </delete>
+</mapper>
