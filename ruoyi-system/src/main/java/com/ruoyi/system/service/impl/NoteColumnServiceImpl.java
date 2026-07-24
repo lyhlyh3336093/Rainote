@@ -579,8 +579,11 @@ public class NoteColumnServiceImpl implements INoteColumnService
                 String restoredProperty = noteBlockContentService.restoreAnchors(
                     propertyJson, columnId, reverseLinkIds, forwardKeys);
                 if (restoredProperty != null && !restoredProperty.equals(propertyJson)) {
-                    block.setProperty(restoredProperty);
-                    noteBlockMapper.updateNoteBlock(block); // selective update，只更新 property
+                    // 部分更新：只写 property 字段，避免覆盖并发修改的 parentId/childId/blockType/sort
+                    NoteBlock patch = new NoteBlock();
+                    patch.setId(block.getId());
+                    patch.setProperty(restoredProperty);
+                    noteBlockMapper.updateNoteBlock(patch);
                 }
             } catch (Exception e) {
                 // R9: per-block try-catch + log.error（标识键，来自 learnings 修复3）
@@ -590,12 +593,12 @@ public class NoteColumnServiceImpl implements INoteColumnService
             }
         }
 
+        // R5: 删除 FORWARD 的 NoteDwtableItem（先执行 fail-fast 操作，与 F2 路径顺序一致）
+        noteDwtableItemMapper.deleteNoteDwtableItemByColumnId(columnId);
+
         // R4: 删除 REVERSE 的 NoteNotelink（传被删列自身 id，非 back_field_id）
         // 已有 deleteNoteNotelinkByColumnId 含 try-catch，符合 best-effort
         noteNotelinkService.deleteNoteNotelinkByColumnId(columnId);
-
-        // R5: 删除 FORWARD 的 NoteDwtableItem（移到收集之后，修复原顺序致命问题）
-        noteDwtableItemMapper.deleteNoteDwtableItemByColumnId(columnId);
     }
 
     /**
