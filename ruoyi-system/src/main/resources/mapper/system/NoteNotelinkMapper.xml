@@ -55,11 +55,17 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     <!--
         U5: 按 noteId 查询引用列表,用于追溯面板(R9)
         查所有引用该笔记的 NoteNotelink,按 id 升序返回
+        LEFT JOIN note_dwtable 用 COALESCE 补全 linkNoteId:
+        历史 NoteNotelink 记录的 linkNoteId 为 null,从 NoteDwtable.noteId 补全
     -->
     <select id="selectNoteNotelinkByNoteId" parameterType="Long" resultMap="NoteNotelinkResult">
-        <include refid="selectNoteNotelinkVo"/>
-        where noteId = #{noteId}
-        order by id asc
+        select n.id, n.contextText, n.noteId, n.blockId,
+               COALESCE(n.linkNoteId, d.noteId) as linkNoteId,
+               n.linkDwTableId, n.linkRecordId, n.linkColumnId, n.linkItemId, n.itemValue
+        from note_notelink n
+        LEFT JOIN note_dwtable d ON n.linkDwTableId = d.id
+        where n.noteId = #{noteId}
+        order by n.id asc
     </select>
         
     <insert id="insertNoteNotelink" parameterType="NoteNotelink" useGeneratedKeys="true" keyProperty="id">
