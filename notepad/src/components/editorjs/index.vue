@@ -211,7 +211,7 @@ const renderReferenceBadges = () => {
         e.stopPropagation();
         if (!ref) return;
         jumpToTableCell({
-          noteId: props.id,
+          noteId: ref.linkNoteId,
           linkDwTableId: ref.linkDwTableId,
           linkColumnId: ref.linkColumnId,
           linkItemId: ref.linkItemId,

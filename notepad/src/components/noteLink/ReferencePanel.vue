@@ -156,7 +156,7 @@ const groupedData = computed(() => {
 
 const onLocate = (item: any) => {
   jumpToTableCell({
-    noteId: props.noteId,
+    noteId: item.linkNoteId,
     linkDwTableId: item.linkDwTableId,
     linkColumnId: item.linkColumnId,
     linkItemId: item.linkItemId,
