@@ -189,7 +189,7 @@ public class NoteBlockServiceImpl implements INoteBlockService
      * @return 结果
      */
     @Override
-    public int linkToDwtable(NoteBlockVo noteBlockVo) {
+    public Long linkToDwtable(NoteBlockVo noteBlockVo) {
         //要对多维表格进行双向关联,首先要在多维表格的列里面加一个新的列.
         //拿到dwtable,新增一个column,类型是25,默认列名为"关联笔记",
         //再在这个列下面创建所有record的item,具体字段内容都用默认值
@@ -236,9 +236,9 @@ public class NoteBlockServiceImpl implements INoteBlockService
         queryItem.setColumnId(noteColumn.getId());
         checkItemList=noteDwtableItemMapper.selectNoteDwtableItemList(queryItem);
         if(checkItemList.size()>0){
-            return 1;
+            return noteColumn.getId();
         }
-        return 0;
+        return null;
     }
 
 

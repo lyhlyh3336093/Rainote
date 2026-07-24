@@ -2,15 +2,21 @@ package com.ruoyi.system.service.impl;
 
 import com.alibaba.fastjson2.JSONObject;
 import com.ruoyi.common.utils.myHashMap;
+import com.ruoyi.system.domain.NoteBlock;
 import com.ruoyi.system.domain.NoteColumn;
 import com.ruoyi.system.domain.NoteDwtable;
+import com.ruoyi.system.domain.NoteDwtableItem;
+import com.ruoyi.system.domain.NoteNotelink;
 import com.ruoyi.system.domain.vo.NoteColumnVo;
 import com.ruoyi.system.domain.vo.NoteRecordVo;
+import com.ruoyi.system.mapper.NoteBlockMapper;
 import com.ruoyi.system.mapper.NoteColumnMapper;
 import com.ruoyi.system.mapper.NoteDwtableItemMapper;
 import com.ruoyi.system.mapper.NoteDwtableMapper;
 import com.ruoyi.system.mapper.NoteRecordMapper;
+import com.ruoyi.system.service.INoteNotelinkService;
 import com.ruoyi.system.service.INoteRecordService;
+import com.ruoyi.system.service.NoteBlockContentService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -22,11 +28,13 @@ import org.mockito.quality.Strictness;
 
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 /**
@@ -54,6 +62,16 @@ public class NoteColumnServiceImplTest
 
     @Mock
     private INoteRecordService noteRecordService;
+
+    // type=25 级联删除新增依赖（U3）
+    @Mock
+    private INoteNotelinkService noteNotelinkService;
+
+    @Mock
+    private NoteBlockContentService noteBlockContentService;
+
+    @Mock
+    private NoteBlockMapper noteBlockMapper;
 
     @InjectMocks
     private NoteColumnServiceImpl noteColumnService;
@@ -759,5 +777,318 @@ public class NoteColumnServiceImplTest
         assertEquals(0, result);
         verify(noteColumnMapper, never()).updateNoteColumn(any(NoteColumn.class));
         verify(noteRecordService, never()).recomputeLookupColumnValues(any(NoteColumn.class));
+    }
+
+    // ============ U3: type=25 级联删除核心测试 ============
+
+    /**
+     * AE1（REVERSE-only）：列有 NoteNotelink 无 FORWARD NoteDwtableItem
+     * → NoteNotelink 删除 + REVERSE 锚点按 data-link-id 恢复
+     */
+    @Test
+    void testDeleteNoteColumnByIds_type25_reverseOnly_restoresAnchorAndDeletesLinks()
+    {
+        NoteColumn column = new NoteColumn();
+        column.setId(50L);
+        column.setType(25L);
+        column.setDwtableId(1L);
+
+        when(noteColumnMapper.selectNoteColumnByIds(any(String[].class)))
+                .thenReturn(Collections.singletonList(column));
+        // 无 FORWARD
+        when(noteDwtableItemMapper.selectItemsByColumnIdWithLinkBlockId(50L))
+                .thenReturn(Collections.emptyList());
+        // 有 REVERSE：NoteNotelink(id=100, blockId=200)
+        NoteNotelink link = new NoteNotelink();
+        link.setId(100L);
+        link.setBlockId(200L);
+        link.setLinkColumnId(50L);
+        when(noteNotelinkService.selectNoteNotelinkList(any(NoteNotelink.class)))
+                .thenReturn(Collections.singletonList(link));
+        // 受影响 NoteBlock
+        NoteBlock block = new NoteBlock();
+        block.setId(200L);
+        block.setProperty("{\"data\":{\"text\":\"<a data-link-id=\\\"100\\\">[X]</a>\"}}");
+        when(noteBlockMapper.selectNoteBlockById(200L)).thenReturn(block);
+        // 文本恢复返回新 property
+        when(noteBlockContentService.restoreAnchors(anyString(), eq(50L), anySet(), anySet()))
+                .thenReturn("{\"data\":{\"text\":\"X\"}}");
+
+        noteColumnService.deleteNoteColumnByIds(new String[]{"50"});
+
+        // R4: 删除 REVERSE 的 NoteNotelink（传被删列自身 id）
+        verify(noteNotelinkService).deleteNoteNotelinkByColumnId(50L);
+        // R5: 删除 FORWARD 的 NoteDwtableItem
+        verify(noteDwtableItemMapper).deleteNoteDwtableItemByColumnId(50L);
+        // R7/R8: 文本恢复写回
+        verify(noteBlockMapper).updateNoteBlock(any(NoteBlock.class));
+        // 列本身删除
+        verify(noteColumnMapper).deleteNoteColumnByIds(any(String[].class));
+        // 表名重算
+        verify(noteRecordService).recomputeRecordNamesForTable(1L);
+    }
+
+    /**
+     * AE2（FORWARD-only）：列有 NoteDwtableItem(linkBlockId 非空) 无 NoteNotelink
+     * → FORWARD 收集 + 锚点按 data-column-id 恢复
+     */
+    @Test
+    void testDeleteNoteColumnByIds_type25_forwardOnly_restoresAnchorAndDeletesItems()
+    {
+        NoteColumn column = new NoteColumn();
+        column.setId(50L);
+        column.setType(25L);
+        column.setDwtableId(1L);
+
+        when(noteColumnMapper.selectNoteColumnByIds(any(String[].class)))
+                .thenReturn(Collections.singletonList(column));
+        // 有 FORWARD：NoteDwtableItem(linkBlockId=200, dwtId=1, recordId=2)
+        NoteDwtableItem item = new NoteDwtableItem();
+        item.setLinkBlockId(200L);
+        item.setDwtId(1L);
+        item.setRecordId(2L);
+        when(noteDwtableItemMapper.selectItemsByColumnIdWithLinkBlockId(50L))
+                .thenReturn(Collections.singletonList(item));
+        // 无 REVERSE
+        when(noteNotelinkService.selectNoteNotelinkList(any(NoteNotelink.class)))
+                .thenReturn(Collections.emptyList());
+        // 受影响 NoteBlock
+        NoteBlock block = new NoteBlock();
+        block.setId(200L);
+        block.setProperty("{\"data\":{\"text\":\"<a data-column-id=\\\"50\\\">[X]</a>\"}}");
+        when(noteBlockMapper.selectNoteBlockById(200L)).thenReturn(block);
+        when(noteBlockContentService.restoreAnchors(anyString(), eq(50L), anySet(), anySet()))
+                .thenReturn("{\"data\":{\"text\":\"X\"}}");
+
+        noteColumnService.deleteNoteColumnByIds(new String[]{"50"});
+
+        verify(noteNotelinkService).deleteNoteNotelinkByColumnId(50L);
+        verify(noteDwtableItemMapper).deleteNoteDwtableItemByColumnId(50L);
+        verify(noteBlockMapper).updateNoteBlock(any(NoteBlock.class));
+        verify(noteColumnMapper).deleteNoteColumnByIds(any(String[].class));
+        verify(noteRecordService).recomputeRecordNamesForTable(1L);
+    }
+
+    /**
+     * AE3（corrupted block）：一个 NoteBlock property 畸形 → 该块 skip + log.error
+     * + 其他块正常 + 列与记录仍删除（best-effort，R10）
+     */
+    @Test
+    void testDeleteNoteColumnByIds_type25_corruptedBlockSkipped_othersRestored_columnStillDeleted()
+    {
+        NoteColumn column = new NoteColumn();
+        column.setId(50L);
+        column.setType(25L);
+        column.setDwtableId(1L);
+
+        when(noteColumnMapper.selectNoteColumnByIds(any(String[].class)))
+                .thenReturn(Collections.singletonList(column));
+        // 两个 FORWARD item：blockId=200(正常), blockId=201(畸形)
+        NoteDwtableItem item1 = new NoteDwtableItem();
+        item1.setLinkBlockId(200L);
+        item1.setDwtId(1L);
+        item1.setRecordId(2L);
+        NoteDwtableItem item2 = new NoteDwtableItem();
+        item2.setLinkBlockId(201L);
+        item2.setDwtId(1L);
+        item2.setRecordId(3L);
+        when(noteDwtableItemMapper.selectItemsByColumnIdWithLinkBlockId(50L))
+                .thenReturn(Arrays.asList(item1, item2));
+        when(noteNotelinkService.selectNoteNotelinkList(any(NoteNotelink.class)))
+                .thenReturn(Collections.emptyList());
+
+        // block 200 正常
+        NoteBlock goodBlock = new NoteBlock();
+        goodBlock.setId(200L);
+        goodBlock.setProperty("{\"data\":{\"text\":\"a\"}}");
+        when(noteBlockMapper.selectNoteBlockById(200L)).thenReturn(goodBlock);
+        // block 201 畸形：restoreAnchors 抛异常模拟 property 解析失败
+        NoteBlock badBlock = new NoteBlock();
+        badBlock.setId(201L);
+        badBlock.setProperty("malformed-json");
+        when(noteBlockMapper.selectNoteBlockById(201L)).thenReturn(badBlock);
+        // 正常块恢复成功
+        when(noteBlockContentService.restoreAnchors(eq("{\"data\":{\"text\":\"a\"}}"), eq(50L), anySet(), anySet()))
+                .thenReturn("{\"data\":{\"text\":\"restored\"}}");
+        // 畸形块抛异常（模拟 JSON 解析失败）
+        when(noteBlockContentService.restoreAnchors(eq("malformed-json"), eq(50L), anySet(), anySet()))
+                .thenThrow(new IllegalArgumentException("bad json"));
+
+        // 不应抛异常（per-block catch）
+        assertDoesNotThrow(() -> noteColumnService.deleteNoteColumnByIds(new String[]{"50"}));
+
+        // 正常块被更新
+        verify(noteBlockMapper, times(1)).updateNoteBlock(any(NoteBlock.class));
+        // 即使有块失败，列与记录仍删除（R10）
+        verify(noteNotelinkService).deleteNoteNotelinkByColumnId(50L);
+        verify(noteDwtableItemMapper).deleteNoteDwtableItemByColumnId(50L);
+        verify(noteColumnMapper).deleteNoteColumnByIds(any(String[].class));
+        verify(noteRecordService).recomputeRecordNamesForTable(1L);
+    }
+
+    /**
+     * AE4（empty column）：无 cell value 无 NoteNotelink → 走 F2 路径
+     * → R4/R5 防御性删除，无文本恢复（不调 restoreAnchors / updateNoteBlock）
+     */
+    @Test
+    void testDeleteNoteColumnByIds_type25_emptyColumn_f2PathDefensiveDeleteNoRestore()
+    {
+        NoteColumn column = new NoteColumn();
+        column.setId(50L);
+        column.setType(25L);
+        column.setDwtableId(1L);
+
+        when(noteColumnMapper.selectNoteColumnByIds(any(String[].class)))
+                .thenReturn(Collections.singletonList(column));
+        when(noteDwtableItemMapper.selectItemsByColumnIdWithLinkBlockId(50L))
+                .thenReturn(Collections.emptyList());
+        when(noteNotelinkService.selectNoteNotelinkList(any(NoteNotelink.class)))
+                .thenReturn(Collections.emptyList());
+
+        noteColumnService.deleteNoteColumnByIds(new String[]{"50"});
+
+        // F2: 防御性删除
+        verify(noteDwtableItemMapper).deleteNoteDwtableItemByColumnId(50L);
+        verify(noteNotelinkService).deleteNoteNotelinkByColumnId(50L);
+        verify(noteColumnMapper).deleteNoteColumnByIds(any(String[].class));
+        verify(noteRecordService).recomputeRecordNamesForTable(1L);
+        // 无文本恢复
+        verify(noteBlockContentService, never()).restoreAnchors(anyString(), anyLong(), anySet(), anySet());
+        verify(noteBlockMapper, never()).updateNoteBlock(any(NoteBlock.class));
+    }
+
+    /**
+     * linkBlockId 不变量：FORWARD-only cell value 被清空（linkBlockId 保留）
+     * → selectItemsByColumnIdWithLinkBlockId 仍命中 → F1 路径执行 FORWARD 文本恢复
+     */
+    @Test
+    void testDeleteNoteColumnByIds_type25_clearedValueLinkBlockIdPreserved_forwardRestored()
+    {
+        NoteColumn column = new NoteColumn();
+        column.setId(50L);
+        column.setType(25L);
+        column.setDwtableId(1L);
+
+        when(noteColumnMapper.selectNoteColumnByIds(any(String[].class)))
+                .thenReturn(Collections.singletonList(column));
+        // value 为空但 linkBlockId 保留 → selectItemsByColumnIdWithLinkBlockId 命中
+        NoteDwtableItem item = new NoteDwtableItem();
+        item.setLinkBlockId(200L);
+        item.setDwtId(1L);
+        item.setRecordId(2L);
+        item.setValue(""); // value 被清空
+        when(noteDwtableItemMapper.selectItemsByColumnIdWithLinkBlockId(50L))
+                .thenReturn(Collections.singletonList(item));
+        when(noteNotelinkService.selectNoteNotelinkList(any(NoteNotelink.class)))
+                .thenReturn(Collections.emptyList());
+        NoteBlock block = new NoteBlock();
+        block.setId(200L);
+        block.setProperty("{\"data\":{\"text\":\"<a data-column-id=\\\"50\\\">[X]</a>\"}}");
+        when(noteBlockMapper.selectNoteBlockById(200L)).thenReturn(block);
+        when(noteBlockContentService.restoreAnchors(anyString(), eq(50L), anySet(), anySet()))
+                .thenReturn("{\"data\":{\"text\":\"X\"}}");
+
+        noteColumnService.deleteNoteColumnByIds(new String[]{"50"});
+
+        // 即使 value 为空，FORWARD 文本恢复仍执行
+        verify(noteBlockMapper).updateNoteBlock(any(NoteBlock.class));
+        verify(noteDwtableItemMapper).deleteNoteDwtableItemByColumnId(50L);
+    }
+
+    /**
+     * 删除时 linkColumnId 匹配：只删本列 NoteNotelink（传被删列自身 id 50，非 back_field_id）
+     */
+    @Test
+    void testDeleteNoteColumnByIds_type25_deletesOwnNotelinkByOwnColumnId()
+    {
+        NoteColumn column = new NoteColumn();
+        column.setId(50L);
+        column.setType(25L);
+        column.setDwtableId(1L);
+
+        when(noteColumnMapper.selectNoteColumnByIds(any(String[].class)))
+                .thenReturn(Collections.singletonList(column));
+        when(noteDwtableItemMapper.selectItemsByColumnIdWithLinkBlockId(50L))
+                .thenReturn(Collections.emptyList());
+        when(noteNotelinkService.selectNoteNotelinkList(any(NoteNotelink.class)))
+                .thenReturn(Collections.emptyList());
+
+        noteColumnService.deleteNoteColumnByIds(new String[]{"50"});
+
+        // R4: 传被删列自身 id（50），不是 back_field_id
+        verify(noteNotelinkService).deleteNoteNotelinkByColumnId(50L);
+        verify(noteNotelinkService, never()).deleteNoteNotelinkByColumnId(999L);
+    }
+
+    /**
+     * 多列批量删除（ids 含多个 type=25）：每列独立收集与恢复，互不干扰
+     */
+    @Test
+    void testDeleteNoteColumnByIds_multipleType25Columns_independentCascade()
+    {
+        NoteColumn col1 = new NoteColumn();
+        col1.setId(50L);
+        col1.setType(25L);
+        col1.setDwtableId(1L);
+        NoteColumn col2 = new NoteColumn();
+        col2.setId(60L);
+        col2.setType(25L);
+        col2.setDwtableId(2L);
+
+        when(noteColumnMapper.selectNoteColumnByIds(any(String[].class)))
+                .thenReturn(Arrays.asList(col1, col2));
+        // 两列都无数据（F2）
+        when(noteDwtableItemMapper.selectItemsByColumnIdWithLinkBlockId(anyLong()))
+                .thenReturn(Collections.emptyList());
+        when(noteNotelinkService.selectNoteNotelinkList(any(NoteNotelink.class)))
+                .thenReturn(Collections.emptyList());
+
+        noteColumnService.deleteNoteColumnByIds(new String[]{"50", "60"});
+
+        // 每列各自删除 NoteNotelink 和 NoteDwtableItem
+        verify(noteNotelinkService).deleteNoteNotelinkByColumnId(50L);
+        verify(noteNotelinkService).deleteNoteNotelinkByColumnId(60L);
+        verify(noteDwtableItemMapper).deleteNoteDwtableItemByColumnId(50L);
+        verify(noteDwtableItemMapper).deleteNoteDwtableItemByColumnId(60L);
+        // 两个表都重算
+        verify(noteRecordService).recomputeRecordNamesForTable(1L);
+        verify(noteRecordService).recomputeRecordNamesForTable(2L);
+    }
+
+    /**
+     * F1 路径顺序约束：先 SELECT 收集 → 文本恢复 → DELETE records
+     * （验证 deleteNoteDwtableItemByColumnId 在 restoreAnchors 之后调用，通过 InOrder）
+     */
+    @Test
+    void testDeleteNoteColumnByIds_type25_correctOrder_selectBeforeDelete()
+    {
+        NoteColumn column = new NoteColumn();
+        column.setId(50L);
+        column.setType(25L);
+        column.setDwtableId(1L);
+
+        when(noteColumnMapper.selectNoteColumnByIds(any(String[].class)))
+                .thenReturn(Collections.singletonList(column));
+        NoteDwtableItem item = new NoteDwtableItem();
+        item.setLinkBlockId(200L);
+        item.setDwtId(1L);
+        item.setRecordId(2L);
+        when(noteDwtableItemMapper.selectItemsByColumnIdWithLinkBlockId(50L))
+                .thenReturn(Collections.singletonList(item));
+        when(noteNotelinkService.selectNoteNotelinkList(any(NoteNotelink.class)))
+                .thenReturn(Collections.emptyList());
+        NoteBlock block = new NoteBlock();
+        block.setId(200L);
+        block.setProperty("{\"data\":{\"text\":\"x\"}}");
+        when(noteBlockMapper.selectNoteBlockById(200L)).thenReturn(block);
+        when(noteBlockContentService.restoreAnchors(anyString(), eq(50L), anySet(), anySet()))
+                .thenReturn("{\"data\":{\"text\":\"restored\"}}");
+
+        noteColumnService.deleteNoteColumnByIds(new String[]{"50"});
+
+        // 顺序：selectItemsByColumnIdWithLinkBlockId 在 deleteNoteDwtableItemByColumnId 之前
+        org.mockito.InOrder inOrder = inOrder(noteDwtableItemMapper);
+        inOrder.verify(noteDwtableItemMapper).selectItemsByColumnIdWithLinkBlockId(50L);
+        inOrder.verify(noteDwtableItemMapper).deleteNoteDwtableItemByColumnId(50L);
     }
 }

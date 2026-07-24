@@ -100,7 +100,11 @@ public class NoteBlockController extends BaseController
     @RequestMapping(value = "/linkToDwtable",method = org.springframework.web.bind.annotation.RequestMethod.POST)
     public AjaxResult linkToDwtable(@Validated @RequestBody NoteBlockVo noteBlockVo)
     {
-        return toAjax(noteBlockService.linkToDwtable(noteBlockVo));
+        Long columnId = noteBlockService.linkToDwtable(noteBlockVo);
+        if (columnId != null) {
+            return AjaxResult.success(columnId);
+        }
+        return AjaxResult.error("创建关联列失败");
     }
 
 

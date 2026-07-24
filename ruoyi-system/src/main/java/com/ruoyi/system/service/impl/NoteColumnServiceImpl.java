@@ -1,17 +1,22 @@
 package com.ruoyi.system.service.impl;
 
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 
 import com.alibaba.fastjson2.JSONObject;
 import com.ruoyi.common.utils.myHashMap;
+import com.ruoyi.system.domain.NoteBlock;
 import com.ruoyi.system.domain.NoteDwtable;
 import com.ruoyi.system.domain.NoteDwtableItem;
+import com.ruoyi.system.domain.NoteNotelink;
 import com.ruoyi.system.domain.NoteRecord;
 import com.ruoyi.system.domain.vo.NoteColumnVo;
 import com.ruoyi.system.domain.vo.NoteRecordVo;
+import com.ruoyi.system.mapper.NoteBlockMapper;
 import com.ruoyi.system.mapper.NoteDwtableItemMapper;
 import com.ruoyi.system.mapper.NoteDwtableMapper;
 import com.ruoyi.system.mapper.NoteRecordMapper;
@@ -24,6 +29,7 @@ import com.ruoyi.system.domain.NoteColumn;
 import com.ruoyi.system.service.INoteColumnService;
 import com.ruoyi.system.service.INoteNotelinkService;
 import com.ruoyi.system.service.INoteRecordService;
+import com.ruoyi.system.service.NoteBlockContentService;
 
 /**
  * 列信息Service业务层处理
@@ -53,6 +59,12 @@ public class NoteColumnServiceImpl implements INoteColumnService
 
     @Autowired
     private INoteNotelinkService noteNotelinkService;
+
+    @Autowired
+    private NoteBlockContentService noteBlockContentService;
+
+    @Autowired
+    private NoteBlockMapper noteBlockMapper;
 
     /**
      * 查询列信息
@@ -364,16 +376,19 @@ public class NoteColumnServiceImpl implements INoteColumnService
         java.util.Set<Long> affectedDwtableIds = new java.util.HashSet<>();
         if(columnList.size()>0){
             for (NoteColumn noteColumn:columnList) {
-                //删除列信息的时候，同时去检查是否有item信息，找到并删除
-                noteDwtableItemMapper.deleteNoteDwtableItemByColumnId(noteColumn.getId());
                 if(noteColumn.getDwtableId() != null){
                     affectedDwtableIds.add(noteColumn.getDwtableId());
                 }
-                if(noteColumn.getType()==21||noteColumn.getType()==25){
-                    //先执行删除关联列和关联列下的item的操作
-                    deleteDataWhenLink(noteColumn);
+                if(noteColumn.getType()!=null && noteColumn.getType()==25){
+                    // type=25 语义关联列:级联删除 + 文本恢复（R4-R10）
+                    cascadeDeleteType25Column(noteColumn);
+                } else {
+                    // 其他类型:保持现有逻辑（先删 items,type=21 调 deleteDataWhenLink 清理配对列）
+                    noteDwtableItemMapper.deleteNoteDwtableItemByColumnId(noteColumn.getId());
+                    if(noteColumn.getType()!=null && noteColumn.getType()==21){
+                        deleteDataWhenLink(noteColumn);
+                    }
                 }
-
             }
         }
 
@@ -468,6 +483,119 @@ public class NoteColumnServiceImpl implements INoteColumnService
             noteRecordService.recomputeRecordNamesForTable(linkColumn.getDwtableId());
         }
         return true;
+    }
+
+
+    /**
+     * type=25 语义关联列级联删除：R4-R10 完整流程。
+     * <p>
+     * 顺序约束（F1）：先 SELECT 收集 → 文本恢复 → DELETE records。
+     * 列本身的删除由调用方 deleteNoteColumnByIds 统一执行。
+     * <p>
+     * 错误处理（R9/R10）：per-block try-catch，文本恢复失败不中断记录删除；
+     * 列与记录始终删除（best-effort，与现有 deleteNoteNotelinkByColumnId 模式一致）。
+     * <p>
+     * 约束（来自 docs/solutions/architecture-patterns/lookup-column-dedupe-cascade-recompute.md）：
+     * - NPE 守护：收集 tuple 时同时检查三者非空（修复4）
+     * - per-block catch 用标识键 log.error，绝不静默吞（修复3）
+     * - 严格按顺序：先 SELECT 收集，再 DELETE（itemMap-vs-DB 时序不变量）
+     *
+     * @param noteColumn 被删的 type=25 列
+     */
+    private void cascadeDeleteType25Column(NoteColumn noteColumn) {
+        Long columnId = noteColumn.getId();
+
+        // R6: 收集 FORWARD 方向的 NoteDwtableItem（linkBlockId IS NOT NULL，解耦条件）
+        // 解耦 R6 收集条件：基于 linkBlockId 存在性而非 cell value 非空，
+        // 修复 value-clear 路径下 linkBlockId 保留导致 F2 遗漏 FORWARD 文本恢复的问题
+        List<NoteDwtableItem> forwardItems = noteDwtableItemMapper.selectItemsByColumnIdWithLinkBlockId(columnId);
+
+        // R4 前置: 收集 REVERSE 方向的 NoteNotelink（按 linkColumnId）
+        NoteNotelink queryNotelink = new NoteNotelink();
+        queryNotelink.setLinkColumnId(columnId);
+        List<NoteNotelink> reverseLinks = noteNotelinkService.selectNoteNotelinkList(queryNotelink);
+
+        boolean hasForward = forwardItems != null && !forwardItems.isEmpty();
+        boolean hasReverse = reverseLinks != null && !reverseLinks.isEmpty();
+
+        // F2: 无 FORWARD 和 REVERSE 数据，只做防御性删除（R4/R5 在每次 type=25 删除时运行）
+        if (!hasForward && !hasReverse) {
+            noteDwtableItemMapper.deleteNoteDwtableItemByColumnId(columnId);
+            noteNotelinkService.deleteNoteNotelinkByColumnId(columnId);
+            return;
+        }
+
+        // F1: 有数据路径，执行文本恢复（R6-R8）
+        // 收集 REVERSE 的 linkId 集合（R7 REVERSE 匹配谓词：data-link-id ∈ reverseLinkIds）
+        Set<Long> reverseLinkIds = new HashSet<>();
+        if (hasReverse) {
+            for (NoteNotelink link : reverseLinks) {
+                if (link.getId() != null) {
+                    reverseLinkIds.add(link.getId());
+                }
+            }
+        }
+
+        // 收集 FORWARD 的匹配键集合 "dwtId:recordId"（R7 FORWARD 历史锚点降级匹配）
+        Set<String> forwardKeys = new HashSet<>();
+        if (hasForward) {
+            for (NoteDwtableItem item : forwardItems) {
+                // NPE 守护：同时检查三者非空（learnings 修复4）
+                if (item.getLinkBlockId() != null && item.getDwtId() != null && item.getRecordId() != null) {
+                    forwardKeys.add(item.getDwtId() + ":" + item.getRecordId());
+                }
+            }
+        }
+
+        // 收集需要恢复的 NoteBlock ID 集合（REVERSE by blockId + FORWARD by linkBlockId）
+        Set<Long> blockIdsToRestore = new HashSet<>();
+        if (hasReverse) {
+            for (NoteNotelink link : reverseLinks) {
+                if (link.getBlockId() != null) {
+                    blockIdsToRestore.add(link.getBlockId());
+                }
+            }
+        }
+        if (hasForward) {
+            for (NoteDwtableItem item : forwardItems) {
+                if (item.getLinkBlockId() != null) {
+                    blockIdsToRestore.add(item.getLinkBlockId());
+                }
+            }
+        }
+
+        // R7/R8/R9: 文本恢复（per-block try-catch）
+        for (Long blockId : blockIdsToRestore) {
+            try {
+                NoteBlock block = noteBlockMapper.selectNoteBlockById(blockId);
+                if (block == null) {
+                    // NoteBlock 已被独立删除，跳过（不 NPE，来自 learnings lookup-column-set-operation-logic-errors 修复4）
+                    continue;
+                }
+                String propertyJson = block.getProperty();
+                if (propertyJson == null || propertyJson.isEmpty()) {
+                    continue;
+                }
+                String restoredProperty = noteBlockContentService.restoreAnchors(
+                    propertyJson, columnId, reverseLinkIds, forwardKeys);
+                if (restoredProperty != null && !restoredProperty.equals(propertyJson)) {
+                    block.setProperty(restoredProperty);
+                    noteBlockMapper.updateNoteBlock(block); // selective update，只更新 property
+                }
+            } catch (Exception e) {
+                // R9: per-block try-catch + log.error（标识键，来自 learnings 修复3）
+                log.error("[CASCADE-DELETE] columnId={}, blockId={}, text restoration failed",
+                    columnId, blockId, e);
+                // 不中断后续块处理（来自 learnings 修复6，不贯穿空结果）
+            }
+        }
+
+        // R4: 删除 REVERSE 的 NoteNotelink（传被删列自身 id，非 back_field_id）
+        // 已有 deleteNoteNotelinkByColumnId 含 try-catch，符合 best-effort
+        noteNotelinkService.deleteNoteNotelinkByColumnId(columnId);
+
+        // R5: 删除 FORWARD 的 NoteDwtableItem（移到收集之后，修复原顺序致命问题）
+        noteDwtableItemMapper.deleteNoteDwtableItemByColumnId(columnId);
     }
 
     /**

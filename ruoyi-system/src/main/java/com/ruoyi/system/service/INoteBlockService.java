@@ -66,9 +66,9 @@ public interface INoteBlockService
      * 对多维表格进行双向关联
      *
      * @param noteBlockVo
-     * @return 结果
+     * @return 新建列的 columnId;失败返回 null
      */
-    int linkToDwtable(NoteBlockVo noteBlockVo);
+    Long linkToDwtable(NoteBlockVo noteBlockVo);
 
     /**
      * 对多维表格取消双向关联

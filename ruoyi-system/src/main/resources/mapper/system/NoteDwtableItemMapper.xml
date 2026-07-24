@@ -23,7 +23,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 
     <select id="selectNoteDwtableItemList" parameterType="NoteDwtableItem" resultMap="NoteDwtableItemResult">
         <include refid="selectNoteDwtableItemVo"/>
-        <where>  
+        <where>
             <if test="dwtId != null "> and dwtId = #{dwtId}</if>
             <if test="columnId != null "> and columnId = #{columnId}</if>
             <if test="value != null  and value != ''"> and value = #{value}</if>
@@ -34,6 +34,11 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
             <if test="linkBlockId != null  and linkBlockId != ''"> and linkBlockId = #{linkBlockId}</if>
             <if test="linkNoteId != null  and linkNoteId != ''"> and linkNoteId = #{linkNoteId}</if>
         </where>
+    </select>
+
+    <select id="selectItemsByColumnIdWithLinkBlockId" parameterType="Long" resultMap="NoteDwtableItemResult">
+        <include refid="selectNoteDwtableItemVo"/>
+        where columnId = #{columnId} and linkBlockId is not null
     </select>
     
     <select id="selectNoteDwtableItemById" parameterType="Long" resultMap="NoteDwtableItemResult">

@@ -84,6 +84,18 @@ public interface NoteDwtableItemMapper
      */
     public int deleteNoteDwtableItemByColumnId(Long columnId);
 
+    /**
+     * 查询指定列下 linkBlockId 非空的 NoteDwtableItem（FORWARD 方向锚点信息）。
+     * <p>
+     * 用于 type=25 列级联删除时 R6 收集 FORWARD 锚点元数据。
+     * 解耦 R6 收集条件：基于 linkBlockId 存在性而非 cell value 非空，
+     * 修复 value-clear 路径下 linkBlockId 保留导致 F2 遗漏 FORWARD 文本恢复的问题。
+     *
+     * @param columnId 列主键
+     * @return linkBlockId 非空的 NoteDwtableItem 集合
+     */
+    public List<NoteDwtableItem> selectItemsByColumnIdWithLinkBlockId(Long columnId);
+
 
     /**
      * 根据数据表id删除多维表格数据表内容
