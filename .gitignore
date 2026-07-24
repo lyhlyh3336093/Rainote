@@ -57,4 +57,5 @@ ruoyi-admin/src/main/resources/META-INF/MANIFEST.MF
 
 ######################################################################
 # Standalone sub-project (has its own .gitignore / node_modules)
-notepad/
+# notepad/ 已取消排除：notepad 目录有自己的 .gitignore 排除 node_modules/dist
+# notepad/

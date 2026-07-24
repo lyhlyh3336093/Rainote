@@ -1,0 +1,114 @@
+.ant-picker-calendar-header .ant-picker-calendar-month-select,
+.ant-picker-calendar-header .ant-picker-calendar-year-select {
+  width: 100px;
+}
+
+.btn-primary {
+  &:focus {
+    outline: none !important;
+  }
+}
+
+.btn:disabled {
+  cursor: not-allowed;
+  pointer-events: unset !important;
+}
+
+.fc-daygrid-day-frame {
+  &:hover {
+    .add-task {
+      display: block;
+    }
+  }
+}
+
+.fc-daygrid-day-top {
+  flex-direction: row;
+  width: 100%;
+
+  >a {
+    width: 100%;
+  }
+
+  .add-task {
+    font-size: 20px;
+    display: none;
+    margin: 0;
+  }
+
+}
+
+.ant-dropdown {
+  // width: 100%;
+  min-width: unset !important;
+}
+
+.fc {
+  .ant-dropdown {
+    max-width: 130px;
+  }
+
+  .ant-dropdown-menu-submenu,
+  .ant-dropdown-menu-item {
+    min-width: 130px;
+  }
+}
+
+.ant-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ant-message-custom-content {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ant-layout .ant-layout-sider {
+  background: #ffffff;
+}
+
+.ant-tabs-tab-remove {
+  display: flex;
+  height: 100%;
+  align-items: center;
+}
+
+#app {
+  .vxe-table--body-wrapper {
+    .vxe-table--column .vxe-cell {
+      padding: 20px;
+    }
+
+    .col--checkbox {
+      .vxe-cell {
+        // padding: 0 30px;
+      }
+    }
+  }
+
+  .ant-tag {
+    display: inline-flex;
+    align-items: center;
+    margin: 2px;
+  }
+
+  .vxe-cell--title {
+    >* {
+      display: inline-flex;
+      align-items: center;
+    }
+  }
+
+
+}
+
+.ce-popover--inline .ce-popover--nested .ce-popover__container {
+  width: auto;
+}
+
+.ant-picker-dropdown {
+  position: fixed;
+}

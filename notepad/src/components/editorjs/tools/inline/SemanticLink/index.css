@@ -1,0 +1,25 @@
+.ce-inline-tool-link-preview {
+  display: none;
+}
+
+.ce-paragraph font {
+  color: #fff;
+}
+
+.ce-paragraph font a {
+  color: inherit !important;
+}
+
+.ce-paragraph a {
+  display: inline-block;
+}
+
+.ce-paragraph div[class^=ant-] {
+  display: inline-block;
+}
+.ce-inline-tool--link{
+  svg{
+    width: 15px;
+    height: 15px;
+  }
+}

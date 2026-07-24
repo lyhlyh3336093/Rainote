@@ -1,0 +1,32 @@
+.ce-inline-tool-link-preview {
+    display: none;
+}
+
+.ce-paragraph {
+    font{
+        color: #fff;
+        a{
+            color: inherit !important ;
+        }
+    }
+    a{
+        display: inline-block;
+    }
+    div[class^=ant-]{
+        display: inline-block;
+    }
+}
+.ce-inline-tool--semantic-link{
+   svg{
+     width: 15px;
+    height: 15px;
+   }
+}
+.ce-inline-tool-link-wrapper{
+  width: 500px;
+
+}
+.semantic-link-highlight{
+  cursor: pointer !important;
+  color: #1890ff !important;
+}

@@ -1,0 +1,382 @@
+* {
+  padding: 0;
+  margin: 0;
+}
+
+@import './mixin.scss';
+@import './transition.scss';
+@import "./color.scss";
+@import "./table.scss";
+
+
+html,
+body {
+  padding: 0;
+  margin: 0;
+
+  .gantt_container {
+    border: none;
+  }
+
+  table td {
+    border: none;
+  }
+}
+
+ul,
+li {
+  list-style: none;
+}
+
+.cdx-list--ordered {
+  list-style: initial;
+
+  li {
+    list-style: initial;
+  }
+}
+
+img {
+  width: 100%;
+  height: auto;
+  max-width: 100%;
+}
+
+body {
+  height: 100%;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-family: Helvetica Neue, Helvetica, PingFang SC, Hiragino Sans GB, Microsoft YaHei, Arial, sans-serif;
+  background: var(--np-bg-color) !important;
+  overflow: hidden;
+
+  .ant-select {
+
+    .ant-select-clear {
+      margin-top: -9px;
+    }
+  }
+
+  .full-modal {
+    overflow: hidden;
+
+    .ant-modal {
+      max-width: 100%;
+      top: 0;
+      padding-bottom: 0;
+      margin: 0;
+    }
+
+    .ant-modal-content {
+      display: flex;
+      flex-direction: column;
+      height: calc(100vh);
+    }
+
+    .ant-modal-body {
+      flex: 1;
+    }
+  }
+
+  .ant-layout-sider {
+    padding: 20px 0;
+    background: var(--np-bg-color-overlay);
+    margin: 16px;
+    height: calc(100vh - 30px);
+    box-shadow: var(--np-box-shadow);
+    border-radius: var(--np-border-radius);
+    overflow: auto;
+    transition: width .3s ease;
+  }
+
+  .ant-layout,
+  .app-main,
+  .vxe-list {
+    width: 100%;
+    height: 100%;
+  }
+
+  .ant-layout-content {
+    height: 100%;
+    padding: 16px 0;
+    margin-right: 16px;
+  }
+
+  .layout-main {
+    padding: 20px;
+    margin: 10px 0;
+    border-radius: var(--np-border-radius);
+    background: var(--np-bg-color-overlay);
+    box-shadow: var(--np-box-shadow);
+    overflow: hidden;
+  }
+
+  .ellipsis {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    word-break: keep-all;
+  }
+
+  .ant-tooltip {
+    max-width: unset;
+  }
+
+  .ant-dropdown-menu {
+    padding: 0;
+  }
+
+  .ant-dropdown-menu-submenu-popup ul {
+    margin: 10px 0;
+    padding: 0;
+  }
+
+  .ant-dropdown-menu-submenu,
+  .ant-dropdown-menu-item {
+    min-width: 160px;
+  }
+
+  .ant-dropdown-menu-item,
+  .ant-dropdown-menu-submenu-title {
+    padding: 10px 20px;
+
+  }
+
+  &.ant-scrolling-effect {
+    width: 100% !important;
+  }
+
+  .weekend {
+    background: #f4f7f4 !important;
+  }
+
+  //.ant-menu-light .ant-menu-item:hover,
+  //.ant-menu-light .ant-menu-item-active,
+  //.ant-menu-light .ant-menu:not(.ant-menu-inline) .ant-menu-submenu-open,
+  //.ant-menu-light .ant-menu-submenu-active,
+  //.ant-menu-light .ant-menu-submenu-title:hover {
+  //  background: #1890ff;
+  //  color: #fff;
+  //}
+
+  .ant-menu-item .ant-menu-item-icon,
+  .ant-menu-submenu-title .ant-menu-item-icon,
+  .ant-menu-item .anticon,
+  .ant-menu-submenu-title .anticon,
+  .ant-menu-item .ant-menu-item-icon+span,
+  .ant-menu-submenu-title .ant-menu-item-icon+span,
+  .ant-menu-item .anticon+span,
+  .ant-menu-submenu-title .anticon+span {
+    transition: none;
+  }
+
+  .vxe-table--render-default.vxe-editable .vxe-body--column {
+    border: none;
+  }
+}
+
+iframe {
+  body {
+    background: transparent !important;
+  }
+}
+
+
+label {
+  font-weight: 700;
+}
+
+html {
+  height: 100%;
+  box-sizing: border-box;
+}
+
+.el-notification.right {
+  --el-notification-width: auto;
+  width: auto;
+  max-width: 500px;
+}
+
+#app {
+  height: 100%;
+}
+
+*,
+*:before,
+*:after {
+  box-sizing: inherit;
+}
+
+a:focus,
+a:active {
+  outline: none;
+}
+
+a,
+a:focus,
+a:hover {
+  cursor: pointer;
+  color: inherit;
+  text-decoration: none;
+}
+
+div:focus {
+  outline: none;
+}
+
+.clearfix {
+  &:after {
+    visibility: hidden;
+    display: block;
+    font-size: 0;
+    content: " ";
+    clear: both;
+    height: 0;
+  }
+}
+
+aside {
+  background: #eef1f6;
+  padding: 8px 24px;
+  margin-bottom: 20px;
+  border-radius: 2px;
+  display: block;
+  line-height: 32px;
+  font-size: 16px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, "Fira Sans", "Droid Sans", "Helvetica Neue", sans-serif;
+  color: #2c3e50;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+
+  a {
+    color: #337ab7;
+    cursor: pointer;
+
+    &:hover {
+      color: rgb(32, 160, 255);
+    }
+  }
+}
+
+#app {
+  >div {
+    width: 100%;
+    height: 100%;
+  }
+}
+
+iframe {
+  width: 100%;
+  height: 100%;
+  border: none;
+  padding: 0;
+}
+
+.ant-picker,
+.ant-select,
+.ant-spin-container,
+.ant-spin-nested-loading {
+  width: 100%;
+  height: 100%;
+}
+
+.w-screen {
+  .ant-modal {
+    width: 100% !important;
+    max-width: 100%;
+    top: 0;
+    padding-bottom: 0;
+    margin: 0;
+    max-width: unset;
+  }
+
+  .ant-modal-content {
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh);
+  }
+
+  .ant-modal-body {
+    flex: 1;
+  }
+
+}
+
+.tree.ant-tree-directory .ant-tree-switcher {
+  display: none;
+}
+
+.vxe-table--render-default .vxe-body--column.col--selected {
+  box-shadow: inset 0 0 0 2px #1890ff;
+}
+
+.vxe-table--render-default .vxe-body--column.col--checkbox.col--selected {
+  box-shadow: unset;
+}
+
+.ant-table-wrapper .ant-table-thead>tr>th {
+  background: none;
+}
+
+.vxe-table .vxe-header--column {
+  background: #fff;
+}
+
+select {
+  outline: none;
+  position: relative;
+  background-color: #fff;
+  border: 1px solid #d9d9d9;
+  border-radius: 2px;
+  transition: all .3s cubic-bezier(.645, .045, .355, 1);
+}
+
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+*::-webkit-scrollbar-thumb {
+  border-radius: 10px;
+  box-shadow: inset 0 0 5px rgba(0, 0, 0, 0.2);
+  background: rgba(0, 0, 0, 0.2);
+}
+
+*::-webkit-scrollbar-track {
+  box-shadow: inset 0 0 5px rgba(0, 0, 0, 0.2);
+  border-radius: 0;
+  background: rgba(0, 0, 0, 0.1);
+
+}
+
+.ce-block a[link],
+a {
+  color: #1890ff;
+  cursor: pointer;
+}
+
+
+.ce-block a {
+  cursor: auto;
+  color: inherit;
+  text-decoration: none;
+
+  &:hover {
+    color: inherit;
+  }
+}
+
+.sortable-ghost {
+  background-color: #dfecfb !important;
+
+  .vxe-body--column.col--selected,
+  tr,
+  td {
+    box-shadow: none !important;
+  }
+}
+
+textarea.ant-input {
+  resize: none;
+}

@@ -1,0 +1,40 @@
+.tc-toolbox.ce-block-toolbox {
+    opacity: 1;
+    left: 50%;
+    top: -28px;
+    transform: translateX(-50%);
+    margin-left: -50px;
+
+    .tc-popover {
+        top: 25px;
+    }
+}
+
+.tc-popover__item.tc-popover__children {
+    &:hover {
+        background: transparent;
+    }
+
+    align-items: start;
+    flex-direction: column;
+    padding: 0;
+    cursor: default;
+
+    .tc-popover__item-label {
+        display: flex;
+        flex-wrap: wrap;
+    }
+
+    .children {
+        min-width: 230px;
+
+        >div {
+            cursor: pointer;
+            box-shadow: inset 0 0 0 1px #fff;
+
+            &:hover {
+                border-color: #1890ff !important;
+            }
+        }
+    }
+}

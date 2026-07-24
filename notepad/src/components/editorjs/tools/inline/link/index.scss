@@ -1,0 +1,18 @@
+.ce-inline-tool-link-preview {
+    display: none;
+}
+
+.ce-paragraph {
+    font{
+        color: #fff;
+        a{
+            color: inherit !important ;
+        }
+    }
+    a{
+        display: inline-block;
+    }
+    div[class^=ant-]{
+        display: inline-block;
+    }
+}
