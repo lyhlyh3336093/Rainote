@@ -163,7 +163,7 @@ public class NoteColumnController extends BaseController
     /**
      * 删除列信息
      */
-    @PreAuthorize("@ss.hasPermi('system:column:remove')")
+    // @PreAuthorize("@ss.hasPermi('system:column:remove')")
     @Log(title = "列信息", businessType = BusinessType.DELETE)
     @RequestMapping(value = "/remove/{ids}",method = org.springframework.web.bind.annotation.RequestMethod.GET)
     public AjaxResult remove(@PathVariable String ids)
