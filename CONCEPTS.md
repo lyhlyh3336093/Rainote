@@ -19,7 +19,15 @@ property JSON中可携带 `dedupe` 布尔开关。为true时，派生结果中�
 A column whose value is computed by performing set operations (union, intersection, subtraction, complement) on the linkRecordId lists of two other columns (A and B). Uses `CollectionUtils` operations on linkRecordId, then reverse-looks up values from a mapping.
 
 ### Semantic Link Column (type=25)
-A column linking a note to a multi-dimensional table cell/record. Distinct from type=21 (record↔record) and type=26 (derived lookup): it expresses the note↔table relationship. Its anchor representation inside note text is the `<a data-type="semantic">` element produced by the SemanticLink Editor.js inline tool (separate from the `<c id=...>` page-navigation anchor system). The link record is stored as a NoteNotelink row (id, noteId, blockId, linkColumnId, linkItemId, contextText, itemValue). Forward direction (note→table) is implemented; reverse direction (table→note) extends it to word-level granularity, where each anchor carries a unique `data-link-id` equal to the NoteNotelink id so a cell can address a specific selected word among many.
+A column linking a note to a multi-dimensional table cell/record. Distinct from type=21 (record↔record) and type=26 (derived lookup): it expresses the note↔table relationship. Its anchor representation inside note text is the `<a data-type="semantic">` element produced by the SemanticLink Editor.js inline tool (separate from the `<c id=...>` page-navigation anchor system). The link record is stored as a NoteNotelink row (id, noteId, blockId, linkNoteId, linkDwTableId, linkRecordId, linkColumnId, linkItemId, contextText, itemValue). Forward direction (note→table) is implemented; reverse direction (table→note) extends it to word-level granularity, where each anchor carries a unique `data-link-id` equal to the NoteNotelink id so a cell can address a specific selected word among many.
+
+`linkNoteId`（目标多维表格的归属笔记 id）与 `linkDwTableId`（目标数据表 id）共同定位跳转目标，URL 形如 `/base/{linkNoteId}/{linkDwTableId}`。`linkNoteId` 是反向语义关联功能引入时才加入创建路径的，此前创建的历史记录该字段为 null；查询时需 LEFT JOIN NoteDwtable 并用 `COALESCE(linkNoteId, NoteDwtable.noteId)` 兜底，否则跨标签页跳转会因 noteId 缺失而失败。
+
+### NoteDwtable
+A multi-dimensional table data table owned by a note. Its `id` is the data-table primary key; its `noteId` is the owner note that hosts the table view. NoteNotelink's `linkDwTableId` references this `id`, and the owner `noteId` is the value NoteNotelink's `linkNoteId` should hold.
+
+### NoteNotelink
+A link record representing a semantic association between a note and a multi-dimensional table cell, persisted per anchor. `noteId`/`blockId` identify the source note and block; `linkDwTableId`/`linkColumnId`/`linkItemId`/`linkRecordId` identify the target cell; `linkNoteId` is the target table's owner note id (used as the navigation URL's first segment). Historical rows may have null `linkNoteId` — see the Semantic Link Column entry for the recovery rule.
 
 ### back_field_id
 A property in type=21 columns that references the paired column in the other table. If column 3262 has `back_field_id=3263`, then column 3263 has `back_field_id=3262`. This pairing is essential for indirect trigger matching in set operations.
