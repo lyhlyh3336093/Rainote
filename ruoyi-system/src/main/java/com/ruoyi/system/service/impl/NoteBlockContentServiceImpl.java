@@ -155,6 +155,10 @@ public class NoteBlockContentServiceImpl implements NoteBlockContentService {
         boolean changed = false;
         for (Element anchor : doc.select(SEMANTIC_ANCHOR_SELECTOR)) {
             if (shouldRestore(anchor, columnId, reverseLinkIds, forwardKeys)) {
+                // 移除运行时 UI 子元素(.semantic-ref-badge 角标,由前端 renderReferenceBadges 添加)。
+                // anchor.text() 会合并所有后代文本节点,若不移除 badge,其文本 "1" 会污染还原结果,
+                // 导致 [关键词]1 → replaceAll("^\[|\]$","") → 关键词]1,残留右括号和数字1。
+                anchor.select(".semantic-ref-badge").remove();
                 String text = anchor.text();
                 // R8: strip 首尾的 [ 和 ]，与前端 executeUnlink 的 replace(/^\[|\]$/g, '') 一致
                 text = text.replaceAll("^\\[|\\]$", "");

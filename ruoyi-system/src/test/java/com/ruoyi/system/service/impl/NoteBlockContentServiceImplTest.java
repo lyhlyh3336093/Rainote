@@ -335,4 +335,30 @@ class NoteBlockContentServiceImplTest {
         assertTrue(text.contains("data-column-id=\"60\""), "存活列锚点应保留完整标签");
         assertTrue(text.contains("[他列]"), "存活列锚点括号文本应保留");
     }
+
+    // ============ 含运行时 UI 元素（.semantic-ref-badge）的还原 ============
+
+    /**
+     * 场景13：锚点内含 .semantic-ref-badge 角标子元素（renderReferenceBadges 运行时添加）。
+     * <p>
+     * 当 NoteBlock.property 持久化时混入了 .semantic-ref-badge（U5 副作用修复前历史数据，
+     * 或 save 时序导致 badge 被序列化），anchor.text() 会读取所有后代文本，包括 badge 的 "1"。
+     * 结果：[关键词]1 → replaceAll("^\[|\]$","") → 关键词]1，残留右括号和数字1。
+     * <p>
+     * 期望：应先移除运行时 UI 子元素，再读取文本，准确还原为"关键词"。
+     */
+    @Test
+    void testRestoreAnchors_anchorWithRefBadge_shouldNotLeakBadgeText() {
+        // 模拟运行时 DOM：renderReferenceBadges 添加的 .semantic-ref-badge 角标
+        String html = "<a data-type=\"semantic\" data-link-id=\"100\" class=\"semantic-link-highlight semantic-ref-anchor\">[关键词]<span class=\"semantic-ref-badge\" contenteditable=\"false\">1</span></a>";
+        String property = paragraphBlock(html);
+
+        Set<Long> reverseLinkIds = new HashSet<>();
+        reverseLinkIds.add(100L);
+
+        String result = service.restoreAnchors(property, 50L, reverseLinkIds, Collections.emptySet());
+
+        String text = extractText(result);
+        assertEquals("关键词", text, "含 .semantic-ref-badge 的锚点应准确还原为关键词，不应残留 ]1");
+    }
 }
