@@ -148,10 +148,12 @@ def main(
             typer.echo("rainote —— 雨滴笔记 CLI。使用 --help 查看可用命令。", err=True)
 
 
-# 占位：子命令组在 U2/U4/U5/U6 中注册
-# app.add_typer(note_app, name="note")   # U4
+# 子命令组注册
+from .commands.note import note_app  # U4
+
+app.add_typer(note_app, name="note")
 # app.add_typer(dwtable_app, name="dwtable")  # U5
-# ...
+# app.add_typer(notelink_app, name="notelink")  # U6
 
 
 if __name__ == "__main__":
