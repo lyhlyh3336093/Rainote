@@ -150,10 +150,18 @@ def main(
 
 # 子命令组注册
 from .commands.note import note_app  # U4
+from .commands.dwtable import dwtable_app  # U5
+from .commands.column import column_app  # U5
+from .commands.record import record_app  # U5
+from .commands.block import block_app  # U5
+from .commands.notelink import notelink_app  # U6
 
 app.add_typer(note_app, name="note")
-# app.add_typer(dwtable_app, name="dwtable")  # U5
-# app.add_typer(notelink_app, name="notelink")  # U6
+app.add_typer(dwtable_app, name="dwtable")
+app.add_typer(column_app, name="column")
+app.add_typer(record_app, name="record")
+app.add_typer(block_app, name="block")
+app.add_typer(notelink_app, name="notelink")
 
 
 if __name__ == "__main__":
