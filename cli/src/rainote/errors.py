@@ -18,6 +18,11 @@ from __future__ import annotations
 
 import re
 
+import typer
+# typer 0.27 vendored click 为 ``typer._click``（pip 不再单独安装 click）。
+# 锁定 typer>=0.27,<0.28，故 ``typer._click.ClickException`` 可用。
+from typer._click import ClickException
+
 
 class ExitCode:
     """语义化退出码常量。"""
@@ -32,13 +37,32 @@ class ExitCode:
     NETWORK = 10
 
 
-class RainoteError(Exception):
-    """CLI 业务异常，携带退出码与消息。"""
+class RainoteError(ClickException):
+    """CLI 业务异常，携带退出码与消息。
+
+    继承 :class:`typer._click.ClickException` 使 Typer/Click 在命令执行时自动捕获并按
+    ``exit_code`` 退出，无需在每个命令函数中 try-except。CliRunner 也会正确读取
+    ``exit_code``（``standalone_mode=False`` 下 ClickException 由 CliRunner 处理）。
+
+    :ivar message: 错误消息
+    :ivar exit_code: 语义化退出码（见 :class:`ExitCode`）
+    """
+
+    # 类默认退出码，实例 __init__ 可覆盖
+    exit_code: int = ExitCode.SERVER
 
     def __init__(self, message: str, exit_code: int = ExitCode.SERVER) -> None:
         super().__init__(message)
         self.message = message
         self.exit_code = exit_code
+
+    def show(self) -> None:  # type: ignore[override]
+        """输出错误信息到 stderr（重写 ClickException.show）。
+
+        Click/CliRunner 在捕获 ClickException 时调用 ``show()``，本方法将错误消息
+        输出到 stderr，与 ``_common.emit_error`` 的格式保持一致（``"错误: ..."``）。
+        """
+        typer.echo(f"错误: {self.message}", err=True)
 
 
 # /login 端点特判关键词（KTD3）
