@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rainote"
+version = "0.1.0"
+description = "雨滴笔记 CLI 工具 —— 复用 RuoYi-Vue 后端 18 个 Note*Controller REST 接口的命令行入口"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Rainote" }]
+keywords = ["rainote", "cli", "ruoyi", "notes"]
+
+# 核心依赖（Phase 1）
+# - Typer: 类型驱动 CLI 定义。锁定 >=0.27,<0.28（0.27.0 含 metavar Breaking Change，PR #1863）
+#   子 app 挂载必须传 name 参数避免 shadow
+# - httpx: HTTP 客户端。锁定 >=0.28,<0.29（0.28.1 功能完整但已停滞维护，
+#   Pydantic fork 的 httpx2 接管安全补丁；respx 0.23.1 尚不支持 httpx2 → 短期继续用 httpx）
+#   TODO(phase2): 评估 httpx2 迁移（https://httpx2.pydantic.dev/migration/）
+# - Rich: 表格/诊断渲染。锁定 >=15.0,<16.0（15.0 弃 Python 3.8）
+#   仅用于 table 模式与 stderr 诊断；--json/--csv 走独立路径绕过 Rich
+dependencies = [
+    "typer>=0.27,<0.28",
+    "httpx>=0.28,<0.29",
+    "rich>=15.0,<16.0",
+]
+
+# 可选依赖：pydantic 降级为可选（Phase 1 用 dataclass，避免 pydantic V2 的 Optional 默认值坑点）
+[project.optional-dependencies]
+pydantic = ["pydantic>=2.0"]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov",
+    "respx>=0.21",
+]
+
+[project.scripts]
+rainote = "rainote.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra"
