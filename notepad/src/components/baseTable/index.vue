@@ -377,12 +377,16 @@ export default defineComponent({
           if (!record) return;
 
           // 设置关联状态
+          // 已选集合解析键：双向链接列直接用 cell.column；lookup 列(type=26) item 不存储
+          // linkRecordId（恒为 NULL），需经其引用的双向链接列 double_link_column_id 取键，
+          // 与后端 getLookupLinkRecordIds 解析路径一致。
+          const linkRecordKey = type === FieldEnum.lookUp ? props.double_link_column_id : cell.column;
           table.state.related = {
             type,
             ...related,
             id: targetId,
             cell,
-            record: record['linkRecordId']?.[cell.column]?.split(',') || []
+            record: record['linkRecordId']?.[linkRecordKey]?.split(',') || []
           };
           table.state.visible = true;
         },
