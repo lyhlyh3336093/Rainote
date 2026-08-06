@@ -110,7 +110,7 @@
         </template>
       </s-table> -->
     <a-modal width="70%" okText="确定" cancelText="取消" :title="`已关联 ${table.state.related.name}`"
-      v-model:open="table.state.visible" destroyOnClose @ok="table.cell.related"
+      v-model:open="table.state.visible" destroyOnClose @ok="table.cell.related" @cancel="table.onPanelCancel"
       :ok-button-props="{ disabled: [FieldEnum.集合运算, FieldEnum.lookUp].includes(table.state.related.type) }"
       :cancel-button-props="{ disabled: [FieldEnum.集合运算, FieldEnum.lookUp].includes(table.state.related.type) }">
       <Related ref="relatedRef" :data="table.state.related" />
@@ -388,11 +388,30 @@ export default defineComponent({
             cell,
             record: record['linkRecordId']?.[linkRecordKey]?.split(',') || []
           };
+          // [PinPanel] 打开节点：记录列类型、解析键、已选集合、目标表
+          console.log('[PinPanel] open cell.click', {
+            type,
+            cellId: cell.id,
+            cellColumn: cell.column,
+            linkRecordKey,
+            record: table.state.related.record,
+            targetId,
+            relatedName: related?.name,
+          });
           table.state.visible = true;
         },
         related() {
           const rows = relatedRef.value.xTable.getCheckboxRecords();
-          if (rows.length === 0) return message.warning('请选择需要关联的数据');
+          // [PinPanel] OK 保存节点：记录当前勾选行
+          console.log('[PinPanel] OK save related()', {
+            selectedCount: rows.length,
+            selectedIds: rows.map(r => r.id),
+            panelType: table.state.related.type,
+          });
+          if (rows.length === 0) {
+            console.warn('[PinPanel] OK save aborted: no rows selected, panel stays open');
+            return message.warning('请选择需要关联的数据');
+          }
           const cell = columns.value[table.state.related.cell.index];
           const row = table1.value.list.find(item => item.id === table.state.related.cell.id);
           const oldRecordId = row.linkRecordId[cell.id] || '';
@@ -407,7 +426,14 @@ export default defineComponent({
           cell.recordId = ids.toString();
           cell.value = rows.map((v, i) => Object.values(v)[0]).filter(Boolean).toString();
           let { name, value, recordId, id } = cell;
-          if (!row['itemId'][id]) return;
+          if (!row['itemId'][id]) {
+            // [PinPanel] OK 保存静默中止：缺少 itemId，面板保持打开（潜在数据不一致风险）
+            console.warn('[PinPanel] OK save aborted: row.itemId[cellId] missing, panel stays open', {
+              rowId: table.state.related.cell.id,
+              cellId: id,
+            });
+            return;
+          }
           const items = [
             {
               name,
@@ -432,9 +458,20 @@ export default defineComponent({
       async update(params) {
         const { data } = await useFetch('/system/record/update').post(params).json();
         if (data?.value) {
+          // [PinPanel] 关闭节点-OK保存成功：刷新列表并关闭面板
+          console.log('[PinPanel] update success, closing panel', { cellId: params.id });
           table.get.list();
           table.state.visible = false;
+        } else {
+          console.warn('[PinPanel] update failed, panel stays open');
         }
+      },
+      // [PinPanel] 关闭节点-取消/X/遮罩：a-modal @cancel 触发
+      onPanelCancel() {
+        console.log('[PinPanel] cancel close (cancel btn / X / mask / ESC)', {
+          panelType: table.state.related.type,
+          hadUnsavedChanges: false,
+        });
       },
       tagClick({ columnId, property, record, value, label }) {
         const { table_id, table_name } = property;

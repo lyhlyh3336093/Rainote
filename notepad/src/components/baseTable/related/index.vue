@@ -34,7 +34,7 @@
 </template>
 
 <script lang="tsx">
-import { defineComponent, reactive, ref, onMounted, } from 'vue';
+import { defineComponent, reactive, ref, onMounted, onUnmounted, } from 'vue';
 import type { VxeTableInstance } from 'vxe-table'
 import { storeToRefs } from 'pinia';
 import { useStore } from '../../../stores/table';
@@ -116,23 +116,53 @@ export default defineComponent({
       }
     }
     onMounted(async () => {
+      // [PinPanel] 面板挂载节点：记录入参与列类型
+      console.log('[PinPanel] onMounted', {
+        type: props.data.type,
+        isLookup: props.data.type === FieldEnum.lookUp,
+        record: props.data.record,
+        recordCount: props.data.record?.length ?? 0,
+        tableId: props.data.id,
+      });
       table.state.loading = true;
       await Promise.allSettled([table.get.list(), table.get.columns()]);
+      // [PinPanel] 数据加载完成节点：记录加载到的记录数
+      const loadedRows = (table.state.tableData as any[]).length;
+      console.log('[PinPanel] data loaded', { loadedRows, columnsLoaded: table.state.columns.length });
       // 稳定分区：已选记录置顶，组内保留后端原顺序（R4）。快照语义——不设 watcher 重算（R1/AE3）。
       // data.record 为空或 undefined（如列配置预览路径）时跳过分区，列表按原顺序展示（R3）。
       const records = props.data.record as any[];
       if (records && records.length > 0) {
         selectedSet.value = new Set(records.map(String));
         const tableData = table.state.tableData as any[];
+        const beforeOrder = tableData.map((r: any) => r.id);
         const selectedRows = tableData.filter(row => selectedSet.value.has(String(row.id)));
         const unselectedRows = tableData.filter(row => !selectedSet.value.has(String(row.id)));
         table.state.tableData = [...selectedRows, ...unselectedRows];
         selectedCount.value = selectedRows.length;
+        // [PinPanel] 分区完成节点：记录类型安全的已选集合、分组前后顺序、命中/未命中
+        console.log('[PinPanel] partition done', {
+          selectedSet: [...selectedSet.value],
+          selectedCount: selectedCount.value,
+          unselectedCount: unselectedRows.length,
+          beforeOrder,
+          afterOrder: [...selectedRows, ...unselectedRows].map((r: any) => r.id),
+          staleIdsInRecord: records.filter((id: any) => !tableData.some((r: any) => String(r.id) === String(id))),
+        });
       } else {
         selectedSet.value = new Set();
         selectedCount.value = 0;
+        // [PinPanel] 分区跳过节点：空已选集合或预览路径
+        console.log('[PinPanel] partition skipped (empty/undefined data.record)', { records });
       }
       table.state.loading = false;
+    })
+    // [PinPanel] 面板销毁节点：destroyOnClose 下关闭即卸载，确认生命周期收尾
+    onUnmounted(() => {
+      console.log('[PinPanel] onUnmounted (panel destroyed)', {
+        type: props.data.type,
+        finalSelectedCount: selectedCount.value,
+      });
     })
     // 行类名：两组都非空时给已选组末行加边界类，scoped CSS 渲染下边框作分组分隔（R7）。
     // 不注入合成数据行，避免干扰 checkbox/keyField 逻辑。
