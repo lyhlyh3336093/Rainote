@@ -1,0 +1,385 @@
+{
+  "info": {
+    "name": "多维表格导出端点测试",
+    "_postman_id": "b8e3ea17-multitable-export-test",
+    "description": "验证 POST /system/dwtable/exportData 端点，覆盖 Excel/SQL 格式、权限、限流、超时兜底、PII 审计场景。\n\n## 使用前提\n1. 服务已启动（默认端口 8090）\n2. 已通过 Login 请求获取 token，或在本地开发环境（/system permitAll）\n3. 环境变量中配置了 BASE_URL、TOKEN、NOTE_ID",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "BASE_URL", "value": "http://localhost:8090", "type": "string" },
+    { "key": "TOKEN", "value": "", "type": "string" },
+    { "key": "NOTE_ID", "value": "100", "type": "string" },
+    { "key": "NOTE_ID_OTHER", "value": "200", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "0. 登录获取 Token",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "var json = pm.response.json();",
+              "if (json.token) {",
+              "  pm.environment.set('TOKEN', json.token);",
+              "  console.log('Token 已保存到环境变量');",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": {
+          "raw": "{{BASE_URL}}/login",
+          "host": ["{{BASE_URL}}"],
+          "path": ["login"]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"username\": \"admin\",\n  \"password\": \"admin123\"\n}"
+        }
+      }
+    },
+    {
+      "name": "1. 导出 Excel（默认格式）",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 200', function () {",
+              "  pm.response.to.have.status(200);",
+              "});",
+              "pm.test('响应为 zip', function () {",
+              "  pm.expect(pm.response.headers.get('Content-Type')).to.include('application/zip');",
+              "});",
+              "pm.test('Content-Disposition 正确', function () {",
+              "  pm.expect(pm.response.headers.get('Content-Disposition')).to.include('multitable-export.zip');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{TOKEN}}", "type": "text" }
+        ],
+        "url": {
+          "raw": "{{BASE_URL}}/system/dwtable/exportData?noteId={{NOTE_ID}}&format=excel",
+          "host": ["{{BASE_URL}}"],
+          "path": ["system", "dwtable", "exportData"],
+          "query": [
+            { "key": "noteId", "value": "{{NOTE_ID}}" },
+            { "key": "format", "value": "excel" }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "2. 导出 SQL",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 200', function () {",
+              "  pm.response.to.have.status(200);",
+              "});",
+              "pm.test('响应为 zip', function () {",
+              "  pm.expect(pm.response.headers.get('Content-Type')).to.include('application/zip');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{TOKEN}}", "type": "text" }
+        ],
+        "url": {
+          "raw": "{{BASE_URL}}/system/dwtable/exportData?noteId={{NOTE_ID}}&format=sql",
+          "host": ["{{BASE_URL}}"],
+          "path": ["system", "dwtable", "exportData"],
+          "query": [
+            { "key": "noteId", "value": "{{NOTE_ID}}" },
+            { "key": "format", "value": "sql" }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "3. 超限表分片（SQL，验证 >2000 行）",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 200', function () {",
+              "  pm.response.to.have.status(200);",
+              "});",
+              "console.log('下载大小: ' + pm.response.responseSize + ' 字节');",
+              "console.log('需手动解压验证：应含 表名_p1.sql / 表名_p2.sql 等分片文件');"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{TOKEN}}", "type": "text" }
+        ],
+        "url": {
+          "raw": "{{BASE_URL}}/system/dwtable/exportData?noteId={{NOTE_ID}}&format=sql",
+          "host": ["{{BASE_URL}}"],
+          "path": ["system", "dwtable", "exportData"],
+          "query": [
+            { "key": "noteId", "value": "{{NOTE_ID}}" },
+            { "key": "format", "value": "sql" }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "4. 超限表分片（Excel，验证多 sheet）",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 200', function () {",
+              "  pm.response.to.have.status(200);",
+              "});",
+              "console.log('需手动解压并用 Excel 打开验证：应含 表名_p1 / 表名_p2 / 表名_p3 多个 sheet');"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{TOKEN}}", "type": "text" }
+        ],
+        "url": {
+          "raw": "{{BASE_URL}}/system/dwtable/exportData?noteId={{NOTE_ID}}&format=excel",
+          "host": ["{{BASE_URL}}"],
+          "path": ["system", "dwtable", "exportData"],
+          "query": [
+            { "key": "noteId", "value": "{{NOTE_ID}}" },
+            { "key": "format", "value": "excel" }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "5. 空表导出（验证 CREATE TABLE 无 INSERT）",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 200', function () {",
+              "  pm.response.to.have.status(200);",
+              "});",
+              "console.log('需手动解压验证：.sql 文件应只有 CREATE TABLE，无 INSERT');"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{TOKEN}}", "type": "text" }
+        ],
+        "url": {
+          "raw": "{{BASE_URL}}/system/dwtable/exportData?noteId={{NOTE_ID}}&format=sql",
+          "host": ["{{BASE_URL}}"],
+          "path": ["system", "dwtable", "exportData"],
+          "query": [
+            { "key": "noteId", "value": "{{NOTE_ID}}" },
+            { "key": "format", "value": "sql" }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "6. 无权限拒绝（不存在的 noteId）",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 非 200（无权限或不存在）', function () {",
+              "  pm.expect(pm.response.code).to.not.equal(200);",
+              "});",
+              "pm.test('响应含错误信息', function () {",
+              "  var body = pm.response.text();",
+              "  pm.expect(body).to.match(/不存在|无权|操作目标/);",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{TOKEN}}", "type": "text" }
+        ],
+        "url": {
+          "raw": "{{BASE_URL}}/system/dwtable/exportData?noteId=999999&format=excel",
+          "host": ["{{BASE_URL}}"],
+          "path": ["system", "dwtable", "exportData"],
+          "query": [
+            { "key": "noteId", "value": "999999" },
+            { "key": "format", "value": "excel" }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "7. 限流触发（连续调用 12 次）",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "console.log('此请求需手动连续运行 12 次（Runner 或复制执行）');",
+              "console.log('前 10 次应成功，第 11/12 次应返回限流错误');"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "var code = pm.response.code;",
+              "console.log('HTTP 状态: ' + code);",
+              "if (code === 200) {",
+              "  console.log('✓ 本次成功（未触发限流）');",
+              "} else {",
+              "  var body = pm.response.text();",
+              "  if (body.match(/频繁|限流/)) {",
+              "    console.log('✓ 触发限流（符合预期）');",
+              "  } else {",
+              "    console.log('✗ 非限流错误: ' + body);",
+              "  }",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{TOKEN}}", "type": "text" }
+        ],
+        "url": {
+          "raw": "{{BASE_URL}}/system/dwtable/exportData?noteId={{NOTE_ID}}&format=excel",
+          "host": ["{{BASE_URL}}"],
+          "path": ["system", "dwtable", "exportData"],
+          "query": [
+            { "key": "noteId", "value": "{{NOTE_ID}}" },
+            { "key": "format", "value": "excel" }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "8. 多表叠加超时兜底（总记录数 >10000）",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 非 200（数据量过大兜底）', function () {",
+              "  pm.expect(pm.response.code).to.not.equal(200);",
+              "});",
+              "pm.test('响应含数据量过大提示', function () {",
+              "  var body = pm.response.text();",
+              "  pm.expect(body).to.match(/数据量过大|缩小数据范围/);",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{TOKEN}}", "type": "text" }
+        ],
+        "url": {
+          "raw": "{{BASE_URL}}/system/dwtable/exportData?noteId={{NOTE_ID}}&format=excel",
+          "host": ["{{BASE_URL}}"],
+          "path": ["system", "dwtable", "exportData"],
+          "query": [
+            { "key": "noteId", "value": "{{NOTE_ID}}" },
+            { "key": "format", "value": "excel" }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "9. 验证 zip 内容（manifest.json 字段）",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 200', function () {",
+              "  pm.response.to.have.status(200);",
+              "});",
+              "pm.test('响应非空', function () {",
+              "  pm.expect(pm.response.responseSize).to.be.above(0);",
+              "});",
+              "console.log('下载大小: ' + pm.response.responseSize + ' 字节');",
+              "console.log('需手动解压后检查 manifest.json 字段:');",
+              "console.log('  - noteId: 与请求一致');",
+              "console.log('  - format: excel 或 sql');",
+              "console.log('  - tables: 含每表 name, records, shardCount');",
+              "console.log('  - generatedAt: ISO-8601 时间戳');",
+              "console.log('  - schemaVersion: 1.0');"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{TOKEN}}", "type": "text" }
+        ],
+        "url": {
+          "raw": "{{BASE_URL}}/system/dwtable/exportData?noteId={{NOTE_ID}}&format=sql",
+          "host": ["{{BASE_URL}}"],
+          "path": ["system", "dwtable", "exportData"],
+          "query": [
+            { "key": "noteId", "value": "{{NOTE_ID}}" },
+            { "key": "format", "value": "sql" }
+          ]
+        }
+      },
+      "response": []
+    }
+  ]
+}

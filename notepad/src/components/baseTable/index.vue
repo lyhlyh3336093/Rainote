@@ -5,6 +5,22 @@
         <delete-outlined />
         删除记录
       </a-button>
+      <a-tooltip v-if="exportDisabled" title="请先选择多维表格" placement="bottom">
+        <a-button class="m-2.5" disabled>
+          <download-outlined />
+          导出
+        </a-button>
+      </a-tooltip>
+      <a-button
+        v-else
+        class="m-2.5"
+        :loading="exportModal.loading"
+        :disabled="exportModal.loading"
+        @click="exportModal.open"
+      >
+        <download-outlined />
+        导出
+      </a-button>
     </Toolbar>
     <vxe-table ref="xTable" :column-config="{ resizable: true, minWidth: 150 }" :data="table1.tableData" :edit-config="{
       trigger: 'dblclick',
@@ -143,6 +159,32 @@
       </div>
     </a-modal>
 
+    <!-- 多维表格导出格式选择 -->
+    <a-modal
+      v-model:open="exportModal.visible"
+      title="导出多维表格"
+      width="420px"
+      :footer="null"
+      destroyOnClose
+      centered
+    >
+      <a-radio-group v-model:value="exportModal.format" style="width: 100%">
+        <a-radio value="excel" style="display: block; margin-bottom: 8px">Excel（.xlsx，适合查看与分享）</a-radio>
+        <a-radio value="sql" style="display: block">SQL（.sql，适合数据迁移与备份）</a-radio>
+      </a-radio-group>
+      <div style="text-align: right; margin-top: 16px">
+        <a-button style="margin-right: 8px" :disabled="exportModal.loading" @click="exportModal.cancel">取消</a-button>
+        <a-button
+          type="primary"
+          :disabled="!exportModal.format"
+          :loading="exportModal.loading"
+          @click="exportModal.confirm"
+        >
+          确认导出
+        </a-button>
+      </div>
+    </a-modal>
+
     <!-- 多行文本选词关联弹出框 -->
     <a-modal v-model:open="textLink.visible" title="文本关联" width="800px" @ok="textLink.confirmLink" :footer="null">
       <div class="text-link-content-wrapper">
@@ -191,7 +233,7 @@
 </template>
 
 <script lang="tsx">
-import { defineComponent, reactive, ref, provide, onMounted, inject, Ref, onUnmounted, nextTick, watch } from 'vue';
+import { defineComponent, reactive, ref, provide, onMounted, inject, Ref, onUnmounted, nextTick, watch, computed } from 'vue';
 import type { VxeTableInstance } from 'vxe-table'
 import Toolbar from './toolbar/index.vue';
 import { message } from 'ant-design-vue';
@@ -199,6 +241,7 @@ import { storeToRefs } from 'pinia';
 import { useRoute, useRouter } from 'vue-router';
 import { useStore } from '../../stores/table';
 import { useFetch, useSortable } from '../../hooks';
+import { exportDwtable, type ExportFormat } from '@/api/export';
 import Related from './related/index.vue';
 import Form from './form/index.vue';
 import { clone } from 'xe-utils';
@@ -512,6 +555,49 @@ export default defineComponent({
       const found = all.find((item: any) => `${item.id}` === `${datasheetID.value}`);
       return found?.noteId ?? null;
     }
+    // 多维表格导出:当前归属笔记 id(对应后端 exportData?noteId= 参数)
+    const tableNoteId = computed(() => getCurrentTableNoteId());
+    const exportDisabled = computed(() => !tableNoteId.value);
+    const exportModal = reactive({
+      visible: false,
+      format: null as ExportFormat | null,
+      loading: false,
+      open() {
+        if (!tableNoteId.value) {
+          return message.warning('请先选择多维表格');
+        }
+        exportModal.format = null;
+        exportModal.visible = true;
+      },
+      cancel() {
+        if (exportModal.loading) return;
+        exportModal.visible = false;
+        exportModal.format = null;
+      },
+      async confirm() {
+        if (!exportModal.format) {
+          return message.warning('请选择导出格式');
+        }
+        const noteId = tableNoteId.value;
+        if (!noteId) {
+          return message.error('未找到当前多维表格归属笔记');
+        }
+        exportModal.loading = true;
+        const hide = message.loading({ content: '正在导出，请稍候…', duration: 0 });
+        try {
+          await exportDwtable(noteId, exportModal.format);
+          hide();
+          message.success('导出成功，已开始下载');
+          exportModal.visible = false;
+          exportModal.format = null;
+        } catch (e: any) {
+          hide();
+          message.error(e?.message || '导出失败，请稍后重试');
+        } finally {
+          exportModal.loading = false;
+        }
+      },
+    });
     // 反向关联:选笔记 picker
     const notePicker = reactive({
       visible: false,
@@ -1202,6 +1288,8 @@ export default defineComponent({
       edit,
       note,
       notePicker,
+      exportModal,
+      exportDisabled,
       openNotePicker,
       textLink,
       datasheet,

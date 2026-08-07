@@ -16,5 +16,10 @@ public enum LimitType
     /**
      * 根据请求者IP进行限流
      */
-    IP
+    IP,
+
+    /**
+     * 根据请求者用户ID进行限流（单用户独立计数，互不影响）
+     */
+    USER
 }
