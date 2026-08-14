@@ -48,6 +48,8 @@ public class NoteDwtableSqlRenderer
             return files;
         }
         String tableName = matrix.getTableName() != null ? matrix.getTableName() : "table_" + matrix.getDwtableId();
+        // 文件名追加数据表 id 做区分（dwtableId 对应 NoteDwtable.id）
+        String idSuffix = matrix.getDwtableId() != null ? "_" + matrix.getDwtableId() : "";
         List<List<String>> rows = matrix.getRows();
         int totalRows = rows != null ? rows.size() : 0;
 
@@ -55,7 +57,7 @@ public class NoteDwtableSqlRenderer
         {
             // 合格表：单文件含 CREATE TABLE + INSERT
             String sql = buildCreateTable(matrix, tableName) + buildInserts(matrix, 0, totalRows);
-            String fileName = tableName + ".sql";
+            String fileName = tableName + idSuffix + ".sql";
             files.add(new ExportFile(fileName, sql.getBytes(StandardCharsets.UTF_8)));
         }
         else
@@ -73,7 +75,7 @@ public class NoteDwtableSqlRenderer
                     sb.append(buildCreateTable(matrix, tableName));
                 }
                 sb.append(buildInserts(matrix, from, to));
-                String fileName = tableName + "_p" + (s + 1) + ".sql";
+                String fileName = tableName + idSuffix + "_p" + (s + 1) + ".sql";
                 files.add(new ExportFile(fileName, sb.toString().getBytes(StandardCharsets.UTF_8)));
             }
         }

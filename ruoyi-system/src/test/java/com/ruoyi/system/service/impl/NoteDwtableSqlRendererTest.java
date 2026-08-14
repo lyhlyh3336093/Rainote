@@ -51,7 +51,7 @@ class NoteDwtableSqlRendererTest
         ExportMatrix matrix = buildMatrix("T1", 100);
         List<ExportFile> files = renderer.render(matrix);
         assertEquals(1, files.size());
-        assertEquals("T1.sql", files.get(0).getFileName());
+        assertEquals("T1_1.sql", files.get(0).getFileName());
         String sql = new String(files.get(0).getContent(), StandardCharsets.UTF_8);
         // 含 CREATE TABLE + INSERT
         assertTrue(sql.contains("CREATE TABLE"));
@@ -67,9 +67,9 @@ class NoteDwtableSqlRendererTest
         List<ExportFile> files = renderer.render(matrix);
         // 5000 行 / 2000 = 3 片
         assertEquals(3, files.size());
-        assertEquals("T_p1.sql", files.get(0).getFileName());
-        assertEquals("T_p2.sql", files.get(1).getFileName());
-        assertEquals("T_p3.sql", files.get(2).getFileName());
+        assertEquals("T_1_p1.sql", files.get(0).getFileName());
+        assertEquals("T_1_p2.sql", files.get(1).getFileName());
+        assertEquals("T_1_p3.sql", files.get(2).getFileName());
         // 首片含 CREATE TABLE
         String p1 = new String(files.get(0).getContent(), StandardCharsets.UTF_8);
         assertTrue(p1.contains("CREATE TABLE"));
