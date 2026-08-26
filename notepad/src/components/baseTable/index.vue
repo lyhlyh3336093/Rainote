@@ -7,6 +7,29 @@
       </a-button>
       <a-tooltip v-if="exportDisabled" title="请先选择多维表格" placement="bottom">
         <a-button class="m-2.5" disabled>
+          <upload-outlined />
+          导入
+        </a-button>
+      </a-tooltip>
+      <a-button
+        v-else
+        class="m-2.5"
+        :loading="importState.loading"
+        :disabled="importState.loading"
+        @click="importState.pick"
+      >
+        <upload-outlined />
+        导入
+      </a-button>
+      <input
+        ref="importFileInput"
+        type="file"
+        accept=".sql,.zip"
+        style="display: none"
+        @change="importState.onFileChosen"
+      />
+      <a-tooltip v-if="exportDisabled" title="请先选择多维表格" placement="bottom">
+        <a-button class="m-2.5" disabled>
           <download-outlined />
           导出
         </a-button>
@@ -236,12 +259,13 @@
 import { defineComponent, reactive, ref, provide, onMounted, inject, Ref, onUnmounted, nextTick, watch, computed } from 'vue';
 import type { VxeTableInstance } from 'vxe-table'
 import Toolbar from './toolbar/index.vue';
-import { message } from 'ant-design-vue';
+import { message, Modal } from 'ant-design-vue';
 import { storeToRefs } from 'pinia';
 import { useRoute, useRouter } from 'vue-router';
 import { useStore } from '../../stores/table';
 import { useFetch, useSortable } from '../../hooks';
 import { exportDwtable, type ExportFormat } from '@/api/export';
+import { importDwtable } from '@/api/import';
 import Related from './related/index.vue';
 import Form from './form/index.vue';
 import { clone } from 'xe-utils';
@@ -595,6 +619,45 @@ export default defineComponent({
           message.error(e?.message || '导出失败，请稍后重试');
         } finally {
           exportModal.loading = false;
+        }
+      },
+    });
+    // 多维表格导入:隐藏 file input + 导入状态(R2 accept .sql/.zip,无中间确认弹窗)
+    const importFileInput = ref<HTMLInputElement | null>(null);
+    const importState = reactive({
+      loading: false,
+      pick() {
+        if (!tableNoteId.value) {
+          return message.warning('请先选择多维表格');
+        }
+        importFileInput.value?.click();
+      },
+      async onFileChosen(e: Event) {
+        const input = e.target as HTMLInputElement;
+        const file = input.files?.[0];
+        // 清空选择,允许重复导入同一文件
+        input.value = '';
+        if (!file) return;
+        const name = file.name.toLowerCase();
+        if (!name.endsWith('.sql') && !name.endsWith('.zip')) {
+          return message.error('不支持的文件类型，仅支持 .sql / .zip');
+        }
+        const noteId = tableNoteId.value;
+        if (!noteId) {
+          return message.error('未找到当前多维表格归属笔记');
+        }
+        importState.loading = true;
+        const hide = message.loading({ content: '正在导入，请稍候…', duration: 0 });
+        try {
+          const recordCount = await importDwtable({ noteId, dwtableId: datasheetID.value, file });
+          hide();
+          Modal.success({ title: '导入成功', content: `成功导入 ${recordCount} 条记录` });
+          table.get.list();
+        } catch (e: any) {
+          hide();
+          Modal.error({ title: '导入失败', content: e?.message || '导入失败，请稍后重试' });
+        } finally {
+          importState.loading = false;
         }
       },
     });
@@ -1289,6 +1352,8 @@ export default defineComponent({
       note,
       notePicker,
       exportModal,
+      importState,
+      importFileInput,
       exportDisabled,
       openNotePicker,
       textLink,
