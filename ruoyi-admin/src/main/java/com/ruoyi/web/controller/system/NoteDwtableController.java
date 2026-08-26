@@ -1,5 +1,7 @@
 package com.ruoyi.web.controller.system;
 
+import java.io.IOException;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -16,16 +18,23 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
 import com.ruoyi.common.annotation.Log;
 import com.ruoyi.common.annotation.RateLimiter;
 import com.ruoyi.common.core.controller.BaseController;
 import com.ruoyi.common.core.domain.AjaxResult;
 import com.ruoyi.common.enums.BusinessType;
 import com.ruoyi.common.enums.LimitType;
+import com.ruoyi.common.exception.ServiceException;
 import com.ruoyi.common.utils.SecurityUtils;
+import com.ruoyi.system.agent.security.AgentOwnershipChecker;
 import com.ruoyi.system.domain.NoteDwtable;
+import com.ruoyi.system.domain.dto.ParsedInsert;
 import com.ruoyi.system.service.INoteDwtableService;
 import com.ruoyi.system.service.INoteDwtableExportService;
+import com.ruoyi.system.service.INoteDwtableImportService;
+import com.ruoyi.system.service.impl.SqlInsertParser;
+import com.ruoyi.system.service.impl.ZipImportExtractor;
 import com.ruoyi.common.utils.poi.ExcelUtil;
 import com.ruoyi.common.core.page.TableDataInfo;
 
@@ -44,6 +53,12 @@ public class NoteDwtableController extends BaseController
 
     @Autowired
     private INoteDwtableExportService noteDwtableExportService;
+
+    @Autowired
+    private INoteDwtableImportService noteDwtableImportService;
+
+    @Autowired
+    private AgentOwnershipChecker agentOwnershipChecker;
 
     /**
      * 查询多维表格数据表列表分页
@@ -116,6 +131,65 @@ public class NoteDwtableController extends BaseController
         {
             logger.error("导出下载失败 noteId={}, error={}", noteId, e.getMessage(), e);
         }
+    }
+
+    /**
+     * 导入多维表格数据（.sql / .zip，对称导出能力）
+     * <p>
+     * 安全（KTD6）：归属校验复用 {@link AgentOwnershipChecker}（admin 通行）、
+     * 额外断言 dwtable.noteId 与 noteId 匹配、按用户限流（对称导出 60s/10 次）。
+     * .sql 直接解析；.zip 内存解压后按文件名升序逐个解析（R5/R8）；
+     * 解析产物交由导入服务在单事务内写入（R19）；
+     * 失败抛 {@link ServiceException} 由全局异常处理返回 HTTP 200 + JSON（R20）。
+     *
+     * @param noteId    多维表格（笔记）ID
+     * @param dwtableId 目标数据表ID
+     * @param file      上传的 .sql 或 .zip 文件
+     * @return 成功导入的记录数
+     */
+    @Log(title = "多维表格导入", businessType = BusinessType.IMPORT)
+    @RateLimiter(time = 60, count = 10, limitType = LimitType.USER)
+    @PostMapping("/importData")
+    public AjaxResult importData(@RequestParam("noteId") Long noteId,
+            @RequestParam("dwtableId") Long dwtableId,
+            @RequestParam("file") MultipartFile file) throws IOException
+    {
+        Long userId = SecurityUtils.getUserId();
+        // KTD6：归属校验（admin 通行）+ noteId↔dwtableId 匹配断言
+        agentOwnershipChecker.checkDwtableOwnership(dwtableId, userId);
+        NoteDwtable dwtable = noteDwtableService.selectNoteDwtableById(dwtableId);
+        if (dwtable == null || !noteId.equals(dwtable.getNoteId()))
+        {
+            throw new ServiceException("导入失败：多维表与笔记不匹配");
+        }
+        if (file == null || file.isEmpty())
+        {
+            throw new ServiceException("导入失败：上传文件为空");
+        }
+        byte[] bytes = file.getBytes();
+        String filename = file.getOriginalFilename();
+        List<ParsedInsert> parsedList;
+        if (filename != null && filename.toLowerCase().endsWith(".sql"))
+        {
+            parsedList = SqlInsertParser.parse(bytes);
+        }
+        else if (filename != null && filename.toLowerCase().endsWith(".zip"))
+        {
+            List<byte[]> sqlFiles = ZipImportExtractor.extract(bytes);
+            parsedList = new ArrayList<>();
+            for (byte[] sqlBytes : sqlFiles)
+            {
+                parsedList.addAll(SqlInsertParser.parse(sqlBytes));
+            }
+        }
+        else
+        {
+            throw new ServiceException("不支持的文件类型，仅支持 .sql / .zip");
+        }
+        int recordCount = noteDwtableImportService.importData(noteId, dwtableId, parsedList, userId);
+        Map<String, Object> data = new HashMap<>();
+        data.put("recordCount", recordCount);
+        return AjaxResult.success().put("data", data);
     }
 
     /**
