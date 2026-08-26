@@ -140,6 +140,30 @@ class ZipImportExtractorTest
     }
 
     @Test
+    void extract_shardNamesWithDoubleDigits_naturalOrder() throws IOException
+    {
+        // 导出分片 _p1.._p10：纯字典序会把 T_p10 排在 T_p2 前，自然序按数值比较（R8）
+        byte[] zip = makeZip(
+                new String[] {"T_p10.sql", "T_p2.sql", "T_p1.sql"},
+                new byte[][] {bytesOf("n10"), bytesOf("n2"), bytesOf("n1")});
+        List<byte[]> result = ZipImportExtractor.extract(zip);
+        assertEquals(3, result.size());
+        assertEquals("n1", new String(result.get(0), java.nio.charset.StandardCharsets.UTF_8));
+        assertEquals("n2", new String(result.get(1), java.nio.charset.StandardCharsets.UTF_8));
+        assertEquals("n10", new String(result.get(2), java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void extract_uppercaseSqlExtension_included() throws IOException
+    {
+        // .sql 后缀判断大小写不敏感，与控制器外层文件分流行为一致
+        byte[] zip = makeZip(new String[] {"T_P1.SQL"}, new byte[][] {bytesOf("INSERT 1")});
+        List<byte[]> result = ZipImportExtractor.extract(zip);
+        assertEquals(1, result.size());
+        assertEquals("INSERT 1", new String(result.get(0), java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    @Test
     void extract_corruptedZip_throwsServiceException()
     {
         byte[] notZip = bytesOf("this is definitely not a zip file");

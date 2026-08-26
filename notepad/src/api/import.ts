@@ -27,7 +27,8 @@ export interface ImportDwtableParams {
  * 导入 .sql / .zip 到目标多维表格。
  *
  * @param params noteId / dwtableId / file
- * @param options.timeoutMs 可选，默认 120000（2 分钟）
+ * @param options.timeoutMs 可选，默认 600000（10 分钟——大表导入远超常规请求时长，
+ *   过短的超时只会在服务端事务仍在执行时让前端提前放弃）
  * @returns 成功导入的记录数
  * @throws Error 失败时抛出，message 为后端中文 msg 或网络异常提示
  */
@@ -37,7 +38,7 @@ export async function importDwtable(
 ): Promise<number> {
     const { noteId, dwtableId, file } = params;
     const token = cookie.get('token');
-    const timeoutMs = options?.timeoutMs ?? 120000;
+    const timeoutMs = options?.timeoutMs ?? 600000;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -59,7 +60,11 @@ export async function importDwtable(
             signal: controller.signal,
         });
     } catch (e: any) {
-        if (e?.name === 'AbortError') throw new Error('导入超时，请稍后重试');
+        // 导入为纯追加、无幂等键：超时只代表前端放弃等待，服务端事务可能仍在执行并最终成功提交，
+        // 此时立即重试会造成整批重复导入——文案必须引导先确认结果而非重发
+        if (e?.name === 'AbortError') {
+            throw new Error('导入仍在后台执行中，请稍后刷新表格确认结果；请勿立即重新导入，否则可能造成数据重复');
+        }
         throw new Error('网络异常，请稍后重试');
     } finally {
         clearTimeout(timer);

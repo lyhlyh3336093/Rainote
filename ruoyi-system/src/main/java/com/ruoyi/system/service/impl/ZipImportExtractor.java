@@ -4,7 +4,6 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipException;
@@ -78,7 +77,8 @@ public final class ZipImportExtractor
                     // zip-slip 防护：净化名仅用于排序与日志（无落盘，KTD3）
                     String safeName = ZipEntryNameSanitizer.sanitize(entry.getName(), idx);
                     idx++;
-                    if (!entry.getName().endsWith(".sql"))
+                    // 大小写不敏感判断 .sql 后缀，与控制器外层文件分流行为一致
+                    if (!entry.getName().toLowerCase(java.util.Locale.ROOT).endsWith(".sql"))
                     {
                         log.info("zip 导入：跳过非 .sql 入口 {}", safeName);
                         continue;
@@ -120,7 +120,9 @@ public final class ZipImportExtractor
         {
             throw new ServiceException("导入失败：zip 内未找到 .sql 文件");
         }
-        files.sort(Comparator.comparing(f -> f.name));
+        // 自然序排序（R8）：导出分片名形如 T_p1.sql、T_p2.sql…T_p10.sql，
+        // 纯字典序会把 T_p10 排在 T_p2 前，数字段按数值比较保证分片顺序
+        files.sort((a, b) -> compareNatural(a.name, b.name));
         // F10：.zip 路径下 multipart 限制的是压缩字节，实际事务规模由 100MB 解压上限决定
         log.warn("zip 导入路径：解压 {} 个 SQL 文件共 {} 字节（上限 100MB），导入事务规模由此解压上限决定",
                 files.size(), totalUncompressed);
@@ -143,5 +145,49 @@ public final class ZipImportExtractor
             this.name = name;
             this.bytes = bytes;
         }
+    }
+
+    /**
+     * 自然序比较：数字段按数值比较，其余字符按字典序（数字段等值时继续比较剩余部分）。
+     * 保证 T_p2.sql 排在 T_p10.sql 之前。
+     */
+    private static int compareNatural(String a, String b)
+    {
+        int ia = 0;
+        int ib = 0;
+        while (ia < a.length() && ib < b.length())
+        {
+            char ca = a.charAt(ia);
+            char cb = b.charAt(ib);
+            if (Character.isDigit(ca) && Character.isDigit(cb))
+            {
+                int ja = ia;
+                while (ja < a.length() && Character.isDigit(a.charAt(ja)))
+                {
+                    ja++;
+                }
+                int jb = ib;
+                while (jb < b.length() && Character.isDigit(b.charAt(jb)))
+                {
+                    jb++;
+                }
+                long na = Long.parseLong(a.substring(ia, ja));
+                long nb = Long.parseLong(b.substring(ib, jb));
+                if (na != nb)
+                {
+                    return Long.compare(na, nb);
+                }
+                ia = ja;
+                ib = jb;
+                continue;
+            }
+            if (ca != cb)
+            {
+                return Character.compare(ca, cb);
+            }
+            ia++;
+            ib++;
+        }
+        return Integer.compare(a.length() - ia, b.length() - ib);
     }
 }

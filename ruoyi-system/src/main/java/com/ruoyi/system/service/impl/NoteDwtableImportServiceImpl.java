@@ -21,7 +21,6 @@ import com.ruoyi.system.domain.dto.ParsedInsert;
 import com.ruoyi.system.mapper.NoteColumnMapper;
 import com.ruoyi.system.mapper.NoteDwtableItemMapper;
 import com.ruoyi.system.mapper.NoteRecordMapper;
-import com.ruoyi.system.service.INoteRecordService;
 import com.ruoyi.system.service.INoteDwtableImportService;
 
 /**
@@ -34,7 +33,8 @@ import com.ruoyi.system.service.INoteDwtableImportService;
  *       （单批上限 500 单元格，Deferred），全程 {@code #{}} 参数化禁 {@code ${}}</li>
  *   <li>默认值策略重新实现（KTD2）：dwtableId=目标表 id；viewId/property/linkRecordId/linkName=null；
  *       sort=当前最大 sort+1 递增（F2 追加语义，区别 UI 新路径 sort=null）；
- *       name 由 {@code deriveRecordName(dwtableId, null, items)} 派生（不调用整个 insertNoteRecord）</li>
+ *       name 派生语义与 {@code deriveRecordName(dwtableId, null, items)} 等价（首个 type=1 列值），
+ *       但在上下文预解析派生源列后内联取值，避免导入循环内每行重查列定义（N+1）；不调用整个 insertNoteRecord</li>
  *   <li>列名区分大小写 {@code String.equals} 匹配（KTD4，无全角/半角归一化）</li>
  *   <li>排除类型列（18/20/21/23/24/25/26）不进映射 → SQL 侧与目标表侧统一跳过（R12）</li>
  *   <li>NULL → 空串（R15）；link 字段不导入（R16）</li>
@@ -70,9 +70,6 @@ public class NoteDwtableImportServiceImpl implements INoteDwtableImportService
     @Autowired
     private NoteDwtableItemMapper noteDwtableItemMapper;
 
-    @Autowired
-    private INoteRecordService noteRecordService;
-
     @Override
     @Transactional(rollbackFor = Exception.class)
     public int importData(Long noteId, Long dwtableId, List<ParsedInsert> parsedList, Long userId)
@@ -107,7 +104,7 @@ public class NoteDwtableImportServiceImpl implements INoteDwtableImportService
     }
 
     /**
-     * 构建导入上下文：查目标表列定义、构建列名映射（排除类型列）、确定 sort 起点。
+     * 构建导入上下文：查目标表列定义、构建列名映射（排除类型列）、确定 name 派生源列与 sort 起点。
      */
     private ImportContext buildContext(Long noteId, Long dwtableId, Long userId)
     {
@@ -115,8 +112,14 @@ public class NoteDwtableImportServiceImpl implements INoteDwtableImportService
         query.setDwtableId(dwtableId);
         List<NoteColumn> columns = noteColumnMapper.selectNoteColumnList(query);
         Map<String, NoteColumn> columnByName = new HashMap<>();
+        Long nameColumnId = null;
         for (NoteColumn column : columns)
         {
+            // name 派生源列：按 sort 排序的首个 type=1 列（与 deriveRecordName 语义一致）
+            if (nameColumnId == null && column.getType() != null && column.getType() == 1L)
+            {
+                nameColumnId = column.getId();
+            }
             if (column.getName() == null || column.getType() == null)
             {
                 continue;
@@ -130,7 +133,28 @@ public class NoteDwtableImportServiceImpl implements INoteDwtableImportService
         // F2：导入 sort = 当前最大 sort + 1 递增（空表视为 0 → 从 1 开始）
         Long maxSort = noteRecordMapper.selectMaxSortByDwtableId(dwtableId);
         long firstSort = (maxSort == null ? 0L : maxSort) + 1;
-        return new ImportContext(noteId, dwtableId, userId, columnByName, firstSort, BATCH_LIMIT);
+        return new ImportContext(noteId, dwtableId, userId, columnByName, nameColumnId, firstSort, BATCH_LIMIT);
+    }
+
+    /**
+     * 派生行 name：取 nameColumnId（首个 type=1 列）在本行 items 中的值，无匹配或 null 返回空串。
+     * 与 {@code NoteRecordServiceImpl.deriveRecordName(dwtableId, null, items)} 语义等价
+     * （incomingItems=null 时仅走 existingItems 分支），内联实现避免导入循环内每行重查列定义（N+1）。
+     */
+    private static String deriveName(ImportContext ctx, List<NoteDwtableItem> rowItems)
+    {
+        if (ctx.nameColumnId == null)
+        {
+            return "";
+        }
+        for (NoteDwtableItem item : rowItems)
+        {
+            if (ctx.nameColumnId.equals(item.getColumnId()))
+            {
+                return item.getValue() == null ? "" : item.getValue();
+            }
+        }
+        return "";
     }
 
     /**
@@ -164,8 +188,8 @@ public class NoteDwtableImportServiceImpl implements INoteDwtableImportService
         record.setDwtableId(ctx.dwtableId);
         record.setSort(ctx.allocateSort());
         // viewId/property/linkRecordId/linkName 保持 null（KTD2 UI 新增路径默认值）
-        // name 派生（KTD2：直接调 deriveRecordName，第三参数传 NoteDwtableItem 列表）
-        record.setName(noteRecordService.deriveRecordName(ctx.dwtableId, null, rowItems));
+        // name 派生（KTD2 语义：首个 type=1 列值；内联实现避免行级 N+1 列查询）
+        record.setName(deriveName(ctx, rowItems));
         noteRecordMapper.insertNoteRecord(record);
         for (NoteDwtableItem item : rowItems)
         {

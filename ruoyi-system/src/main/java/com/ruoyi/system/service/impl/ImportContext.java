@@ -33,6 +33,9 @@ class ImportContext
     /** 目标表列名（trim）→ 列定义映射（不含排除类型列） */
     final Map<String, NoteColumn> columnByName;
 
+    /** name 派生源列 id（目标表按 sort 排序的首个 type=1 列；无则为 null，name 派生为空串） */
+    final Long nameColumnId;
+
     /** 下一行分配的 sort 值（初始 = 目标表当前最大 sort + 1） */
     private long nextSort;
 
@@ -40,12 +43,14 @@ class ImportContext
     final int batchLimit;
 
     ImportContext(Long noteId, Long dwtableId, Long userId,
-                  Map<String, NoteColumn> columnByName, long firstSort, int batchLimit)
+                  Map<String, NoteColumn> columnByName, Long nameColumnId,
+                  long firstSort, int batchLimit)
     {
         this.noteId = noteId;
         this.dwtableId = dwtableId;
         this.userId = userId;
         this.columnByName = columnByName;
+        this.nameColumnId = nameColumnId;
         this.nextSort = firstSort;
         this.batchLimit = batchLimit;
     }

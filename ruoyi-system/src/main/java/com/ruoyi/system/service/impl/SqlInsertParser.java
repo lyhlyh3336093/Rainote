@@ -3,7 +3,9 @@ package com.ruoyi.system.service.impl;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 import com.ruoyi.common.exception.ServiceException;
 import com.ruoyi.system.domain.dto.ParsedInsert;
@@ -180,7 +182,9 @@ public final class SqlInsertParser
 
     /**
      * 构建一条 ParsedInsert。
-     * 列名与值按位置对应；record_id 列的值解析为 Long，且不写入 columnValues（R17）。
+     * 列名与值按位置对应；record_id 锚点仅识别首列（R6 位置契约），
+     * 且不写入 columnValues（R17）；非首列的同名列按普通数据列处理。
+     * 数据列出现重复列名时抛 ServiceException（把静默 last-wins 丢列变为可读失败，R19）。
      */
     private static ParsedInsert buildParsedInsert(List<String> columnNames, List<String> values)
     {
@@ -189,13 +193,27 @@ public final class SqlInsertParser
             throw new ServiceException("SQL 解析失败：列数 " + columnNames.size()
                     + " 与值数 " + values.size() + " 不匹配");
         }
+        // 重复列名检测（首列 record_id 锚点豁免——导出端固定首列 record_id + 用户同名列共存场景）
+        Set<String> seen = new HashSet<>();
+        for (int idx = 0; idx < columnNames.size(); idx++)
+        {
+            String col = columnNames.get(idx);
+            if (idx == 0 && "record_id".equals(col))
+            {
+                continue;
+            }
+            if (!seen.add(col))
+            {
+                throw new ServiceException("SQL 解析失败：检测到重复列名 '" + col + "'，无法确定列映射");
+            }
+        }
         Long recordId = null;
         ParsedInsert parsed = new ParsedInsert();
         for (int idx = 0; idx < columnNames.size(); idx++)
         {
             String col = columnNames.get(idx);
             String val = values.get(idx);
-            if ("record_id".equals(col))
+            if (idx == 0 && "record_id".equals(col))
             {
                 if (val != null)
                 {

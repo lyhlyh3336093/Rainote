@@ -168,4 +168,77 @@ class SqlInsertParserTest
         ServiceException ex = assertThrows(ServiceException.class, () -> SqlInsertParser.parse(sql));
         assertTrue(ex.getMessage().contains("SQL 解析失败"));
     }
+
+    @Test
+    void parse_sqlWithComments_skipsAndParsesInsert()
+    {
+        String sql = "-- dump header\n"
+                + "/* block\n"
+                + "   comment */\n"
+                + "INSERT INTO `T` (`record_id`,`名称`) VALUES (10,'foo')";
+        List<ParsedInsert> result = SqlInsertParser.parse(sql);
+        assertEquals(1, result.size());
+        assertEquals(Long.valueOf(10L), result.get(0).getRecordId());
+        assertEquals("foo", result.get(0).getColumnValues().get("名称"));
+    }
+
+    @Test
+    void parse_commentContainingInsertKeyword_ignored()
+    {
+        // 对抗用例：注释内容含 INSERT 关键字，不得被误解析
+        String sql = "-- INSERT INTO fake (a) VALUES (999)\n"
+                + "INSERT INTO `T` (`record_id`,`名称`) VALUES (10,'foo')";
+        List<ParsedInsert> result = SqlInsertParser.parse(sql);
+        assertEquals(1, result.size());
+        assertEquals(Long.valueOf(10L), result.get(0).getRecordId());
+    }
+
+    @Test
+    void parse_columnValueCountMismatch_throwsServiceException()
+    {
+        String sql = "INSERT INTO T (a,b) VALUES (1)";
+        ServiceException ex = assertThrows(ServiceException.class, () -> SqlInsertParser.parse(sql));
+        assertTrue(ex.getMessage().contains("不匹配"));
+    }
+
+    @Test
+    void parse_nonNumericRecordId_throwsServiceException()
+    {
+        String sql = "INSERT INTO T (record_id,a) VALUES ('x','y')";
+        ServiceException ex = assertThrows(ServiceException.class, () -> SqlInsertParser.parse(sql));
+        assertTrue(ex.getMessage().contains("record_id 非数值"));
+    }
+
+    @Test
+    void parse_recordIdNotFirstColumn_treatedAsDataColumn()
+    {
+        // 用户自建名为 record_id 的列在非首列位置：按普通数据列处理，值保留在 columnValues
+        String sql = "INSERT INTO `T` (`名称`,`record_id`) VALUES ('foo', 42)";
+        List<ParsedInsert> result = SqlInsertParser.parse(sql);
+        assertEquals(1, result.size());
+        // 首列非 record_id → 无锚点
+        assertNull(result.get(0).getRecordId());
+        assertEquals("foo", result.get(0).getColumnValues().get("名称"));
+        assertEquals("42", result.get(0).getColumnValues().get("record_id"));
+    }
+
+    @Test
+    void parse_anchorAndDataColumnBothNamedRecordId_bothHandled()
+    {
+        // 导出端固定首列 record_id + 用户同名列共存：首列为锚点，第二列为数据列
+        String sql = "INSERT INTO `T` (`record_id`,`record_id`) VALUES (10, 'user-data')";
+        List<ParsedInsert> result = SqlInsertParser.parse(sql);
+        assertEquals(1, result.size());
+        assertEquals(Long.valueOf(10L), result.get(0).getRecordId());
+        assertEquals("user-data", result.get(0).getColumnValues().get("record_id"));
+    }
+
+    @Test
+    void parse_duplicateDataColumnNames_throwsServiceException()
+    {
+        // 重复列名静默 last-wins 会丢列，改为可读失败（R19）
+        String sql = "INSERT INTO T (a, a) VALUES (1, 2)";
+        ServiceException ex = assertThrows(ServiceException.class, () -> SqlInsertParser.parse(sql));
+        assertTrue(ex.getMessage().contains("重复列名"));
+    }
 }

@@ -642,6 +642,10 @@ export default defineComponent({
         if (!name.endsWith('.sql') && !name.endsWith('.zip')) {
           return message.error('不支持的文件类型，仅支持 .sql / .zip');
         }
+        // 与后端 multipart max-file-size(10MB) 对齐的前端预检，避免超限后才收到全局异常
+        if (file.size > 10 * 1024 * 1024) {
+          return message.error('文件超过 10MB 上传上限，请分批导入');
+        }
         const noteId = tableNoteId.value;
         if (!noteId) {
           return message.error('未找到当前多维表格归属笔记');
