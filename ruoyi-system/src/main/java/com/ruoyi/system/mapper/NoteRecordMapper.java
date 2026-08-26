@@ -90,9 +90,17 @@ public interface NoteRecordMapper
 
     /**
      * 批量删除记录
-     * 
+     *
      * @param ids 需要删除的数据主键集合
      * @return 结果
      */
     public int deleteNoteRecordByIds(String[] ids);
+
+    /**
+     * 查询指定数据表当前最大 sort 值（多维表格导入追加语义，KTD2/F2）
+     *
+     * @param dwtableId 数据表主键
+     * @return 最大 sort；表内无记录时返回 null
+     */
+    public Long selectMaxSortByDwtableId(Long dwtableId);
 }

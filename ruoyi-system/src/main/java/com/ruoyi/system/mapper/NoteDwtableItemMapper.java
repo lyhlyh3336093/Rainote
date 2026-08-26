@@ -53,11 +53,19 @@ public interface NoteDwtableItemMapper
 
     /**
      * 新增多维表格数据表内容
-     * 
+     *
      * @param noteDwtableItem 多维表格数据表内容
      * @return 结果
      */
     public int insertNoteDwtableItem(NoteDwtableItem noteDwtableItem);
+
+    /**
+     * 批量新增多维表格数据表内容（多维表格导入，KTD5 foreach 批量写入）
+     *
+     * @param items 数据表内容列表（dwtId/columnId/recordId/value 均必填）
+     * @return 结果
+     */
+    public int insertNoteDwtableItems(List<NoteDwtableItem> items);
 
     /**
      * 修改多维表格数据表内容

@@ -103,9 +103,13 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     </delete>
 
     <delete id="deleteNoteRecordByIds" parameterType="String">
-        delete from note_record where id in 
+        delete from note_record where id in
         <foreach item="id" collection="array" open="(" separator="," close=")">
             #{id}
         </foreach>
     </delete>
+
+    <select id="selectMaxSortByDwtableId" parameterType="Long" resultType="Long">
+        select max(sort) from note_record where dwtableId = #{dwtableId}
+    </select>
 </mapper>

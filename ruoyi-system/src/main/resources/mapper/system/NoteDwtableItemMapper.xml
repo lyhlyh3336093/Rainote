@@ -110,6 +110,13 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
          </trim>
     </insert>
 
+    <insert id="insertNoteDwtableItems" parameterType="java.util.List">
+        insert into note_dwtable_item (dwtId, columnId, recordId, value) values
+        <foreach collection="list" item="item" separator=",">
+            (#{item.dwtId}, #{item.columnId}, #{item.recordId}, #{item.value})
+        </foreach>
+    </insert>
+
     <update id="updateNoteDwtableItem" parameterType="NoteDwtableItem">
         update note_dwtable_item
         <trim prefix="SET" suffixOverrides=",">
