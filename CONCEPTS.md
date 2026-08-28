@@ -26,6 +26,11 @@ A column linking a note to a multi-dimensional table cell/record. Distinct from 
 ### NoteDwtable
 A multi-dimensional table data table owned by a note. Its `id` is the data-table primary key; its `noteId` is the owner note that hosts the table view. NoteNotelink's `linkDwTableId` references this `id`, and the owner `noteId` is the value NoteNotelink's `linkNoteId` should hold.
 
+### NoteRecord
+A row of a data table. A row's cells are NoteDwtableItems; the row itself carries only table-level attributes (owning table, view, ordering, display name).
+
+A row's display name is derived, not user-authored: it takes the value of the table's leftmost text column (type=1), and is empty when the table has no such column or the cell is empty. Ordering is driven by the `sort` attribute with an intentional divergence between creation paths: UI-created rows carry no sort (null sorts first under ascending order), while imported rows are appended with monotonically increasing sort starting from the current maximum — so UI rows cluster at the top of a table and imported rows settle below them.
+
 ### NoteNotelink
 A link record representing a semantic association between a note and a multi-dimensional table cell, persisted per anchor. `noteId`/`blockId` identify the source note and block; `linkDwTableId`/`linkColumnId`/`linkItemId`/`linkRecordId` identify the target cell; `linkNoteId` is the target table's owner note id (used as the navigation URL's first segment). Historical rows may have null `linkNoteId` — see the Semantic Link Column entry for the recovery rule.
 
