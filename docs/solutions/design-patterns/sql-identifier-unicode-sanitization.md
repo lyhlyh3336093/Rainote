@@ -1,6 +1,7 @@
 ---
 title: "SQL 标识符 Unicode 净化器模式（三层净化策略）"
 date: 2026-08-07
+last_refreshed: 2026-08-28
 category: design-patterns
 module: ruoyi-system
 problem_type: design_pattern
@@ -273,9 +274,9 @@ assertEquals("`col__x__name`", SqlIdentifierSanitizer.sanitize("col/*x*/name", 1
 
 ## Related
 
-- **同模块的净化器伙伴**：本模式与 [ZipEntryNameSanitizer](../../../ruoyi-system/src/main/java/com/ruoyi/system/service/impl/ZipEntryNameSanitizer.java)（zip slip 防御）、[SqlValueEscaper](../../../ruoyi-system/src/main/java/com/ruoyi/system/service/impl/SqlValueEscaper.java)（SQL 字面值转义）共同构成多维表格导出的安全净化链。标识符层走 `SqlIdentifierSanitizer`，字面值层走 `SqlValueEscaper`，文件名层走 `ZipEntryNameSanitizer`。
+- **同模块的净化器伙伴**：本模式与 [ZipEntryNameSanitizer](../../../ruoyi-system/src/main/java/com/ruoyi/system/service/impl/ZipEntryNameSanitizer.java)（zip slip 防御）、[SqlValueEscaper](../../../ruoyi-system/src/main/java/com/ruoyi/system/service/impl/SqlValueEscaper.java)（SQL 字面值转义）共同构成多维表格导出/导入的双向安全净化链：标识符层走 `SqlIdentifierSanitizer`，字面值层走 `SqlValueEscaper`，文件名层走 `ZipEntryNameSanitizer`；导入方向由 [SqlInsertParser](../../../ruoyi-system/src/main/java/com/ruoyi/system/service/impl/SqlInsertParser.java) 反向剥离反引号并做对称反转义，管线全貌见 [multitable-sql-import-pipeline.md](../architecture-patterns/multitable-sql-import-pipeline.md)。**已知 round-trip 缺口**：列名含空格/标点时第三层净化改写（`col name`→`col_name`）在导入端严格列名匹配下无法回中，单元格被静默跳过（导入管线的显式 Deferred，详见该文档"已知残留"节）——净化改写与反向归一化必须配套设计。
 - **SQL 注入防御分层**：本模式是"标识符层"的注入防御，需与"字面值层"（参数化查询/预编译语句）配合使用。标识符不能用占位符，必须走白名单净化；字面值必须用占位符，不能拼字符串。
 - **MySQL 8.0 Unicode 标识符支持**：MySQL 8.0 的 lexer 原生支持反引号包裹的 Unicode 标识符，无需额外配置。低版本（5.7 及以下）也支持，但建议确认目标版本。
 - **多数据库适配**：若需支持 PostgreSQL/SQL Server，把反引号抽成 `quoteChar` 配置项（PostgreSQL 用 `"`，SQL Server 用 `[]`），白名单正则无需改动。
 - **MyBatis 动态 SQL**：在 MyBatis 中用 `${}` 拼接表名/列名时，必须先经过本净化器；`${}` 不会做任何转义，是 SQL 注入的高风险点。
-- **设计模式交叉引用**：[lookup-column-code-simplification-patterns.md](../design-patterns/lookup-column-code-simplification-patterns.md) 展示了类似的"提取核心决策逻辑集中化"思想，适用于 service 层 helper 设计。
+- **设计模式交叉引用**：[lookup-column-code-simplification-patterns.md](lookup-column-code-simplification-patterns.md) 展示了类似的"提取核心决策逻辑集中化"思想，适用于 service 层 helper 设计。
