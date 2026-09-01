@@ -132,6 +132,47 @@ class NoteDwtableExcelRendererTest
     }
 
     @Test
+    void render_columnAfterDualColumn_notSkipped() throws Exception
+    {
+        // 双列后跟普通列：列 [record_id, 双列, 备注]，行数据 4 单元格——
+        // 复用列索引作数据索引会跳过双列后的普通列，数据行与表头错位
+        ExportMatrix matrix = new ExportMatrix();
+        matrix.setDwtableId(1L);
+        matrix.setTableName("T1");
+        List<ExportColumn> columns = new ArrayList<>();
+        columns.add(new ExportColumn(null, "record_id", null, false, true));
+        columns.add(new ExportColumn(11L, "关联", 21L, true, false));
+        columns.add(new ExportColumn(12L, "备注", 1L, false, false));
+        matrix.setColumns(columns);
+        List<List<String>> rows = new ArrayList<>();
+        List<String> row = new ArrayList<>();
+        row.add("1");
+        row.add("100,101");
+        row.add("张三,李四");
+        row.add("note_v");
+        rows.add(row);
+        matrix.setRows(rows);
+
+        List<ExportMatrix> matrices = new ArrayList<>();
+        matrices.add(matrix);
+        ExportFile file = renderer.render(matrices);
+        try (Workbook wb = new XSSFWorkbook(new ByteArrayInputStream(file.getContent())))
+        {
+            Sheet sheet = wb.getSheetAt(0);
+            // 表头 4 列：record_id, 关联_ID, 关联_文本, 备注
+            assertEquals("record_id", sheet.getRow(0).getCell(0).getStringCellValue());
+            assertEquals("关联_ID", sheet.getRow(0).getCell(1).getStringCellValue());
+            assertEquals("关联_文本", sheet.getRow(0).getCell(2).getStringCellValue());
+            assertEquals("备注", sheet.getRow(0).getCell(3).getStringCellValue());
+            // 数据行 4 列与表头逐一对齐，双列后普通列不丢
+            assertEquals("1", sheet.getRow(1).getCell(0).getStringCellValue());
+            assertEquals("100,101", sheet.getRow(1).getCell(1).getStringCellValue());
+            assertEquals("张三,李四", sheet.getRow(1).getCell(2).getStringCellValue());
+            assertEquals("note_v", sheet.getRow(1).getCell(3).getStringCellValue());
+        }
+    }
+
+    @Test
     void render_largeText_truncated() throws Exception
     {
         ExportMatrix matrix = new ExportMatrix();

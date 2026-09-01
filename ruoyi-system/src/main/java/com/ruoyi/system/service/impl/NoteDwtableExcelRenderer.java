@@ -148,21 +148,25 @@ public class NoteDwtableExcelRenderer
             List<String> rowData = rows.get(r);
             Row row = sheet.createRow(rowIdx++);
             int dataColIdx = 0;
+            // 数据索引独立推进：普通列消费 1 个单元格，双列消费 2 个（ID + 文本）——
+            // 列索引与数据索引在首个双列后即错位，复用列索引会跳过双列后的普通列
+            int dataIdx = 0;
             for (int c = 0; c < columns.size(); c++)
             {
                 ExportColumn col = columns.get(c);
-                String value = c < rowData.size() ? rowData.get(c) : "";
                 if (col.isDualColumn())
                 {
                     // 双列在行数据中占两个相邻位置
-                    String idValue = value;
-                    String textValue = c + 1 < rowData.size() ? rowData.get(c + 1) : "";
+                    String idValue = dataIdx < rowData.size() ? rowData.get(dataIdx) : "";
+                    String textValue = dataIdx + 1 < rowData.size() ? rowData.get(dataIdx + 1) : "";
+                    dataIdx += 2;
                     row.createCell(dataColIdx++).setCellValue(truncateIfNeeded(idValue));
                     row.createCell(dataColIdx++).setCellValue(truncateIfNeeded(textValue));
-                    c++; // 跳过文本列（已消费）
                 }
                 else
                 {
+                    String value = dataIdx < rowData.size() ? rowData.get(dataIdx) : "";
+                    dataIdx++;
                     row.createCell(dataColIdx++).setCellValue(truncateIfNeeded(value));
                 }
             }

@@ -162,4 +162,86 @@ class NoteDwtableSqlRendererTest
         // 不应出现注入的 DROP TABLE 作为独立语句
         assertFalse(sql.contains("1; DROP TABLE--"));
     }
+
+    /**
+     * 构建含双列的测试矩阵：列 [record_id, 双列(关联,21), 普通列(备注,1)]，
+     * 行数据双列占两个相邻单元格（ID + 文本）。
+     */
+    private ExportMatrix buildDualMatrix()
+    {
+        ExportMatrix matrix = new ExportMatrix();
+        matrix.setDwtableId(1L);
+        matrix.setTableName("T1");
+        List<ExportColumn> columns = new ArrayList<>();
+        columns.add(new ExportColumn(null, "record_id", null, false, true));
+        columns.add(new ExportColumn(11L, "关联", 21L, true, false));
+        columns.add(new ExportColumn(12L, "备注", 1L, false, false));
+        matrix.setColumns(columns);
+        List<List<String>> rows = new ArrayList<>();
+        List<String> row = new ArrayList<>();
+        row.add("1");
+        row.add("100,101");   // 双列 ID 值
+        row.add("张三,李四");  // 双列文本值
+        row.add("note_v");    // 双列后普通列的值
+        rows.add(row);
+        matrix.setRows(rows);
+        return matrix;
+    }
+
+    @Test
+    void render_dualColumn_expandedToIdAndTextColumns()
+    {
+        List<ExportFile> files = renderer.render(buildDualMatrix());
+        String sql = new String(files.get(0).getContent(), StandardCharsets.UTF_8);
+        // CREATE TABLE：双列展开为 关联_ID + 关联_文本（VARCHAR(2000），普通列不丢
+        assertTrue(sql.contains("`关联_ID` VARCHAR(2000)"));
+        assertTrue(sql.contains("`关联_文本` VARCHAR(2000)"));
+        assertTrue(sql.contains("`备注` TEXT"));
+        // INSERT：双列后普通列不错位、不丢失
+        assertTrue(sql.contains("INSERT INTO `T1` (`record_id`, `关联_ID`, `关联_文本`, `备注`)"));
+        assertTrue(sql.contains("VALUES (1, '100,101', '张三,李四', 'note_v')"));
+    }
+
+    @Test
+    void render_dualColumn_parsesBackViaSqlInsertParser()
+    {
+        // 导出 → 导入 round-trip：渲染产物经 SqlInsertParser 解析后列名与值逐一对齐
+        List<ExportFile> files = renderer.render(buildDualMatrix());
+        String sql = new String(files.get(0).getContent(), StandardCharsets.UTF_8);
+
+        List<com.ruoyi.system.domain.dto.ParsedInsert> parsed = SqlInsertParser.parse(sql);
+
+        assertEquals(1, parsed.size());
+        assertEquals(Long.valueOf(1L), parsed.get(0).getRecordId());
+        assertEquals("100,101", parsed.get(0).getColumnValues().get("关联_ID"));
+        assertEquals("张三,李四", parsed.get(0).getColumnValues().get("关联_文本"));
+        assertEquals("note_v", parsed.get(0).getColumnValues().get("备注"));
+    }
+
+    @Test
+    void render_dualColumnAsLastColumn_valuesAligned()
+    {
+        // 双列为末列（既有导出布局）：列 [record_id, 普通列, 双列]
+        ExportMatrix matrix = new ExportMatrix();
+        matrix.setDwtableId(1L);
+        matrix.setTableName("T1");
+        List<ExportColumn> columns = new ArrayList<>();
+        columns.add(new ExportColumn(null, "record_id", null, false, true));
+        columns.add(new ExportColumn(10L, "name", 1L, false, false));
+        columns.add(new ExportColumn(11L, "关联", 21L, true, false));
+        matrix.setColumns(columns);
+        List<List<String>> rows = new ArrayList<>();
+        List<String> row = new ArrayList<>();
+        row.add("1");
+        row.add("value1");
+        row.add("100,101");
+        row.add("张三,李四");
+        rows.add(row);
+        matrix.setRows(rows);
+
+        List<ExportFile> files = renderer.render(matrix);
+        String sql = new String(files.get(0).getContent(), StandardCharsets.UTF_8);
+        // 双列前普通列不错位，双列两值按序输出
+        assertTrue(sql.contains("VALUES (1, 'value1', '100,101', '张三,李四')"));
+    }
 }

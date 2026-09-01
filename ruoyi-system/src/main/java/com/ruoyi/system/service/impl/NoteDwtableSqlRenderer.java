@@ -85,30 +85,36 @@ public class NoteDwtableSqlRenderer
 
     /**
      * 构造 CREATE TABLE 语句（含列定义与类型映射）。
+     * 双列（关联/派生类）展开为 名_ID + 名_文本 两列，与行数据的双单元格布局对齐。
      */
     private String buildCreateTable(ExportMatrix matrix, String tableName)
     {
         StringBuilder sb = new StringBuilder();
         sb.append("CREATE TABLE ").append(SqlIdentifierSanitizer.sanitizeTable(tableName)).append(" (\n");
         List<ExportColumn> columns = matrix.getColumns();
-        for (int i = 0; i < columns.size(); i++)
+        List<String> colDefs = new ArrayList<>();
+        for (ExportColumn col : columns)
         {
-            ExportColumn col = columns.get(i);
-            String colName = SqlIdentifierSanitizer.sanitize(col.getName(), col.getColumnId());
             String sqlType = mapSqlType(col);
-            sb.append("  ").append(colName).append(" ").append(sqlType);
-            if (i < columns.size() - 1)
+            if (col.isDualColumn())
             {
-                sb.append(",");
+                colDefs.add("  " + SqlIdentifierSanitizer.sanitize(col.getName() + "_ID", col.getColumnId()) + " " + sqlType);
+                colDefs.add("  " + SqlIdentifierSanitizer.sanitize(col.getName() + "_文本", col.getColumnId()) + " " + sqlType);
             }
-            sb.append("\n");
+            else
+            {
+                colDefs.add("  " + SqlIdentifierSanitizer.sanitize(col.getName(), col.getColumnId()) + " " + sqlType);
+            }
         }
-        sb.append(");\n\n");
+        sb.append(String.join(",\n", colDefs));
+        sb.append("\n);\n\n");
         return sb.toString();
     }
 
     /**
      * 构造 INSERT 语句（rows[from..to) 范围）。
+     * 双列展开为 名_ID + 名_文本 两列；行数据中双列占两个相邻单元格（ID + 文本），
+     * 值循环用独立数据索引消费——列索引与数据索引在首个双列后即错位，不可复用。
      */
     private String buildInserts(ExportMatrix matrix, int from, int to)
     {
@@ -119,18 +125,21 @@ public class NoteDwtableSqlRenderer
         StringBuilder sb = new StringBuilder();
         List<ExportColumn> columns = matrix.getColumns();
         List<List<String>> rows = matrix.getRows();
-        // 构造列名列表
-        StringBuilder colNames = new StringBuilder("(");
-        for (int i = 0; i < columns.size(); i++)
+        // 构造输出列名列表（双列展开）
+        List<String> outColNames = new ArrayList<>();
+        for (ExportColumn col : columns)
         {
-            ExportColumn col = columns.get(i);
-            if (i > 0)
+            if (col.isDualColumn())
             {
-                colNames.append(", ");
+                outColNames.add(SqlIdentifierSanitizer.sanitize(col.getName() + "_ID", col.getColumnId()));
+                outColNames.add(SqlIdentifierSanitizer.sanitize(col.getName() + "_文本", col.getColumnId()));
             }
-            colNames.append(SqlIdentifierSanitizer.sanitize(col.getName(), col.getColumnId()));
+            else
+            {
+                outColNames.add(SqlIdentifierSanitizer.sanitize(col.getName(), col.getColumnId()));
+            }
         }
-        colNames.append(")");
+        String colNames = "(" + String.join(", ", outColNames) + ")";
 
         for (int r = from; r < to; r++)
         {
@@ -138,15 +147,33 @@ public class NoteDwtableSqlRenderer
             sb.append("INSERT INTO ")
                     .append(SqlIdentifierSanitizer.sanitizeTable(matrix.getTableName() != null ? matrix.getTableName() : "table_" + matrix.getDwtableId()))
                     .append(" ").append(colNames).append(" VALUES (");
-            for (int c = 0; c < columns.size(); c++)
+            // 数据索引独立推进：普通列消费 1 个单元格，双列消费 2 个（ID + 文本）
+            int dataIdx = 0;
+            boolean first = true;
+            for (ExportColumn col : columns)
             {
-                if (c > 0)
+                if (col.isDualColumn())
                 {
-                    sb.append(", ");
+                    String idValue = dataIdx < row.size() ? row.get(dataIdx) : null;
+                    String textValue = dataIdx + 1 < row.size() ? row.get(dataIdx + 1) : null;
+                    dataIdx += 2;
+                    if (!first)
+                    {
+                        sb.append(", ");
+                    }
+                    sb.append(escapeValue(idValue, col)).append(", ").append(escapeValue(textValue, col));
                 }
-                ExportColumn col = columns.get(c);
-                String value = c < row.size() ? row.get(c) : null;
-                sb.append(escapeValue(value, col));
+                else
+                {
+                    String value = dataIdx < row.size() ? row.get(dataIdx) : null;
+                    dataIdx++;
+                    if (!first)
+                    {
+                        sb.append(", ");
+                    }
+                    sb.append(escapeValue(value, col));
+                }
+                first = false;
             }
             sb.append(");\n");
         }
