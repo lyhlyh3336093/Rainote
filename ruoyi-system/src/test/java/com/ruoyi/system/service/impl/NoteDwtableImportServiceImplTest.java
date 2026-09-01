@@ -20,20 +20,27 @@ import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
 import com.ruoyi.common.exception.ServiceException;
+import com.ruoyi.system.agent.annotation.AgentOperation;
+import com.ruoyi.system.agent.annotation.AgentParam;
+import com.ruoyi.system.agent.security.AgentOwnershipChecker;
 import com.ruoyi.system.domain.NoteColumn;
+import com.ruoyi.system.domain.NoteDwtable;
 import com.ruoyi.system.domain.NoteDwtableItem;
 import com.ruoyi.system.domain.NoteRecord;
 import com.ruoyi.system.domain.dto.ParsedInsert;
 import com.ruoyi.system.mapper.NoteColumnMapper;
 import com.ruoyi.system.mapper.NoteDwtableItemMapper;
+import com.ruoyi.system.mapper.NoteDwtableMapper;
 import com.ruoyi.system.mapper.NoteRecordMapper;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -64,6 +71,12 @@ class NoteDwtableImportServiceImplTest
 
     @Mock
     private NoteDwtableItemMapper noteDwtableItemMapper;
+
+    @Mock
+    private NoteDwtableMapper noteDwtableMapper;
+
+    @Mock
+    private AgentOwnershipChecker agentOwnershipChecker;
 
     @InjectMocks
     private NoteDwtableImportServiceImpl importService;
@@ -438,6 +451,130 @@ class NoteDwtableImportServiceImplTest
         ServiceException ex = assertThrows(ServiceException.class,
                 () -> importService.importData(NOTE_ID, DWTABLE_ID, Collections.emptyList(), USER_ID));
         assertTrue(ex.getMessage().contains("INSERT"));
+    }
+
+    // ===== Agent 操作 dwtable.importSql =====
+
+    /** mock 归属校验通过 + noteId 匹配的目标表 */
+    private void mockAgentPathOk()
+    {
+        NoteDwtable dwtable = new NoteDwtable();
+        dwtable.setId(DWTABLE_ID);
+        dwtable.setNoteId(NOTE_ID);
+        when(noteDwtableMapper.selectNoteDwtableById(DWTABLE_ID)).thenReturn(dwtable);
+    }
+
+    @Test
+    void importSql_validSql_ownershipCheckedAndRecordsImported()
+    {
+        mockAgentPathOk();
+        mockStandardColumns();
+        String sql = "INSERT INTO `T` (`record_id`,`名称`) VALUES (10,'foo'),(11,'bar')";
+
+        int count = importService.importSql(NOTE_ID, DWTABLE_ID, sql, USER_ID);
+
+        // agent 路径自带归属校验（KTD6）
+        verify(agentOwnershipChecker, times(1)).checkDwtableOwnership(DWTABLE_ID, USER_ID);
+        assertEquals(2, count);
+        verify(noteRecordMapper, times(2)).insertNoteRecord(any(NoteRecord.class));
+        verify(noteDwtableItemMapper, times(1)).insertNoteDwtableItems(anyList());
+    }
+
+    @Test
+    void importSql_ownershipCheckFails_throwsAndNoWrites()
+    {
+        doThrow(new ServiceException("无权操作他人数据")).when(agentOwnershipChecker)
+                .checkDwtableOwnership(DWTABLE_ID, USER_ID);
+
+        ServiceException ex = assertThrows(ServiceException.class, () -> importService.importSql(
+                NOTE_ID, DWTABLE_ID, "INSERT INTO T (a) VALUES (1)", USER_ID));
+
+        assertEquals("无权操作他人数据", ex.getMessage());
+        verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
+    }
+
+    @Test
+    void importSql_noteIdMismatch_throwsAndNoWrites()
+    {
+        NoteDwtable otherNoteTable = new NoteDwtable();
+        otherNoteTable.setId(DWTABLE_ID);
+        otherNoteTable.setNoteId(999L);
+        when(noteDwtableMapper.selectNoteDwtableById(DWTABLE_ID)).thenReturn(otherNoteTable);
+
+        ServiceException ex = assertThrows(ServiceException.class, () -> importService.importSql(
+                NOTE_ID, DWTABLE_ID, "INSERT INTO T (a) VALUES (1)", USER_ID));
+
+        assertTrue(ex.getMessage().contains("不匹配"));
+        verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
+    }
+
+    @Test
+    void importSql_parseFailure_propagatesAndNoWrites()
+    {
+        mockAgentPathOk();
+        // 缺 VALUES 的畸形 SQL
+        ServiceException ex = assertThrows(ServiceException.class, () -> importService.importSql(
+                NOTE_ID, DWTABLE_ID, "INSERT INTO T (a) (1)", USER_ID));
+
+        assertTrue(ex.getMessage().contains("SQL 解析失败"));
+        verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
+    }
+
+    @Test
+    void importSql_agentOperationAnnotation_contractSatisfied() throws NoSuchMethodException
+    {
+        // 注册契约：@AgentOperation 元数据 + 参数 schema（3 个 LLM 参数 + 框架注入 userId）
+        java.lang.reflect.Method method = NoteDwtableImportServiceImpl.class
+                .getMethod("importSql", Long.class, Long.class, String.class, Long.class);
+        AgentOperation op = method.getAnnotation(AgentOperation.class);
+        assertNotNull(op);
+        assertEquals("dwtable.importSql", op.name());
+        // 非幂等批量追加 → destructive=true 触发执行前用户确认
+        assertTrue(op.destructive());
+
+        java.lang.reflect.Parameter[] params = method.getParameters();
+        AgentParam noteId = params[0].getAnnotation(AgentParam.class);
+        assertNotNull(noteId);
+        assertEquals("noteId", noteId.value());
+        assertEquals("long", noteId.type());
+        assertTrue(noteId.required());
+        AgentParam dwtableId = params[1].getAnnotation(AgentParam.class);
+        assertNotNull(dwtableId);
+        assertEquals("dwtableId", dwtableId.value());
+        AgentParam sql = params[2].getAnnotation(AgentParam.class);
+        assertNotNull(sql);
+        assertEquals("sql", sql.value());
+        assertEquals("string", sql.type());
+        // userId 无 @AgentParam → 框架注入，不暴露给 LLM
+        assertNull(params[3].getAnnotation(AgentParam.class));
+    }
+
+    @Test
+    void importSql_registeredInAgentOperationRegistry()
+    {
+        // 真实注册链路：registry 启动扫描 StaticApplicationContext 中的 service bean
+        org.springframework.context.support.StaticApplicationContext ctx =
+                new org.springframework.context.support.StaticApplicationContext();
+        ctx.registerSingleton("importService", NoteDwtableImportServiceImpl.class);
+        ctx.refresh();
+        com.ruoyi.system.agent.registry.AgentOperationRegistry registry =
+                new com.ruoyi.system.agent.registry.AgentOperationRegistry();
+        registry.setApplicationContext(ctx);
+        registry.afterPropertiesSet();
+
+        com.ruoyi.system.agent.registry.AgentOperationSpec spec =
+                registry.getOperation("dwtable.importSql");
+        assertNotNull(spec);
+        assertTrue(spec.isDestructive());
+        // 4 个参数规格：3 个 LLM 提供 + 1 个框架注入 userId
+        assertEquals(4, spec.getParams().size());
+        assertEquals("userId", spec.getParams().get(3).getName());
+        assertTrue(spec.getParams().get(3).isFrameworkInjected());
+        // LLM schema 只暴露 3 个 LLM 参数，框架注入参数不出现在 system prompt
+        long llmParams = spec.getParams().stream()
+                .filter(p -> !p.isFrameworkInjected())
+                .count();
+        assertEquals(3, llmParams);
     }
 
     @Test

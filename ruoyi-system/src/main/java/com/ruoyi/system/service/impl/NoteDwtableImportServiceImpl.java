@@ -15,12 +15,17 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.ruoyi.common.exception.ServiceException;
+import com.ruoyi.system.agent.annotation.AgentOperation;
+import com.ruoyi.system.agent.annotation.AgentParam;
+import com.ruoyi.system.agent.security.AgentOwnershipChecker;
 import com.ruoyi.system.domain.NoteColumn;
+import com.ruoyi.system.domain.NoteDwtable;
 import com.ruoyi.system.domain.NoteDwtableItem;
 import com.ruoyi.system.domain.NoteRecord;
 import com.ruoyi.system.domain.dto.ParsedInsert;
 import com.ruoyi.system.mapper.NoteColumnMapper;
 import com.ruoyi.system.mapper.NoteDwtableItemMapper;
+import com.ruoyi.system.mapper.NoteDwtableMapper;
 import com.ruoyi.system.mapper.NoteRecordMapper;
 import com.ruoyi.system.service.INoteDwtableImportService;
 
@@ -74,6 +79,12 @@ public class NoteDwtableImportServiceImpl implements INoteDwtableImportService
     @Autowired
     private NoteDwtableItemMapper noteDwtableItemMapper;
 
+    @Autowired
+    private NoteDwtableMapper noteDwtableMapper;
+
+    @Autowired
+    private AgentOwnershipChecker agentOwnershipChecker;
+
     @Override
     @Transactional(rollbackFor = Exception.class)
     public int importData(Long noteId, Long dwtableId, List<ParsedInsert> parsedList, Long userId)
@@ -111,6 +122,51 @@ public class NoteDwtableImportServiceImpl implements INoteDwtableImportService
         log.info("[DWTABLE-IMPORT] 导入完成 noteId={}, dwtableId={}, userId={}, recordCount={}, columnCount={}",
                 noteId, dwtableId, userId, recordCount, ctx.columnByName.size());
         return recordCount;
+    }
+
+    /**
+     * Agent 操作入口：导入 SQL INSERT 文本到指定多维表格（与 UI 导入等价），返回成功导入的记录数。
+     * <p>
+     * agent 执行器直调 service 会绕过 HTTP 控制器，故本方法必须自带：
+     * <ul>
+     *   <li>{@code @Transactional}：经代理进入本方法开启事务（内部 {@code importData}
+     *       为同类自调用，不经代理，事务由本方法注解保证）</li>
+     *   <li>归属校验 + noteId↔dwtableId 匹配断言（KTD6，与控制器 importData 对称）</li>
+     *   <li>destructive=true：导入为非幂等批量追加（重试双写、无法整体撤销），
+     *       执行前须用户二次确认</li>
+     *   <li>permissionKey 留空：与 HTTP 路径一致，访问控制由归属校验承担</li>
+     * </ul>
+     * 限流与操作日志在 HTTP 控制器层（{@code @RateLimiter}/{@code @Log}），
+     * agent 路径的对称防护由 agent 执行器（rainote-agent 分支）补齐。
+     *
+     * @param noteId    目标笔记 id（LLM 提供）
+     * @param dwtableId 目标多维表格 id（LLM 提供）
+     * @param sql       SQL INSERT 语句文本，支持多条语句与多行 VALUES（LLM 提供）
+     * @param userId    框架注入的当前用户 id（不暴露给 LLM）
+     * @return 成功导入的记录数
+     */
+    @AgentOperation(name = "dwtable.importSql", destructive = true,
+            description = "导入 SQL INSERT 文本到指定多维表格（与 UI 导入等价），返回成功导入的记录数。"
+                    + "导入为追加语义：不覆盖既有记录，列名按目标表列名匹配（区分大小写），"
+                    + "关联/公式等派生类列不导入。")
+    @Transactional(rollbackFor = Exception.class)
+    public int importSql(
+            @AgentParam(value = "noteId", type = "long", required = true, description = "目标笔记 id")
+            Long noteId,
+            @AgentParam(value = "dwtableId", type = "long", required = true, description = "目标多维表格 id")
+            Long dwtableId,
+            @AgentParam(value = "sql", type = "string", required = true, description = "SQL INSERT 语句文本，支持多条语句与多行 VALUES 元组")
+            String sql,
+            Long userId)
+    {
+        // KTD6：agent 路径自带归属校验（admin 通行）+ noteId 匹配断言
+        agentOwnershipChecker.checkDwtableOwnership(dwtableId, userId);
+        NoteDwtable dwtable = noteDwtableMapper.selectNoteDwtableById(dwtableId);
+        if (dwtable == null || !noteId.equals(dwtable.getNoteId()))
+        {
+            throw new ServiceException("导入失败：多维表与笔记不匹配");
+        }
+        return importData(noteId, dwtableId, SqlInsertParser.parse(sql), userId);
     }
 
     /**

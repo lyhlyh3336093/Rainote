@@ -107,6 +107,7 @@ mapper 新增 `selectMaxSortByDwtableId`（`select max(sort) from note_record wh
 - **行数硬上限（已落地）**：`importData` 入口对 `parsedList.size()` 设 50,000 行上限，超限快速失败抛 ServiceException（分批导入提示）——超长事务/undo log/锁持有防御的显式护栏，不再仅依赖 100MB 解压上限间接约束。
 - **导入非幂等**：前端超时文案引导"确认结果"而非盲目重试（防重试双写）；`selectMaxSortByDwtableId` 读取-递增非原子，并发导入 sort 可能交错。
 - **双实现漂移**：导入服务重实现默认值后，`insertNoteRecord` 演进不会自动传导——需语义等价测试对冲。
+- **Agent 路径**（已注册 `dwtable.importSql`）：agent 执行器直调 service 绕过 HTTP 控制器，包装方法必须**自带** `@Transactional` 与归属校验 + noteId 匹配断言——关键陷阱是内部 `importData` 为同类自调用不经 Spring 代理，事务只能由外层 agent 入口方法的注解保证；`destructive=true` 因导入为非幂等批量追加（重试双写不可撤销）。限流/操作日志的 agent 路径对称防护仍待 rainote-agent 执行器补齐。
 
 ## Why This Matters
 
