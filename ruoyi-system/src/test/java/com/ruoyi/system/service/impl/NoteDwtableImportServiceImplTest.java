@@ -362,6 +362,41 @@ class NoteDwtableImportServiceImplTest
     }
 
     @Test
+    void importData_sanitizedColumnName_matchesOriginalColumn()
+    {
+        // F3 修复：目标列 "C Name"（含空格）导出时被净化为 C_Name → 导入端净化名兜底键回中
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class)))
+                .thenReturn(Collections.singletonList(column(101L, "C Name", 1L)));
+        List<ParsedInsert> parsedList = Collections.singletonList(
+                parsed(10L, "C_Name", "foo"));
+
+        int count = importService.importData(NOTE_ID, DWTABLE_ID, parsedList, USER_ID);
+
+        assertEquals(1, count);
+        verify(noteDwtableItemMapper, times(1)).insertNoteDwtableItems(itemsCaptor.capture());
+        assertEquals(1, itemsCaptor.getValue().size());
+        assertEquals(Long.valueOf(101L), itemsCaptor.getValue().get(0).getColumnId());
+        assertEquals("foo", itemsCaptor.getValue().get(0).getValue());
+    }
+
+    @Test
+    void importData_originalNamePreferredOverSanitizedKey()
+    {
+        // 原名优先：目标表同时有 "col name"（净化名 col_name）与真名 "col_name" 列，
+        // SQL 列 col_name 应命中真名列（102），而非净化兜底键（101）
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class)))
+                .thenReturn(Arrays.asList(column(101L, "col name", 1L), column(102L, "col_name", 2L)));
+        List<ParsedInsert> parsedList = Collections.singletonList(
+                parsed(10L, "col_name", "v"));
+
+        importService.importData(NOTE_ID, DWTABLE_ID, parsedList, USER_ID);
+
+        verify(noteDwtableItemMapper, times(1)).insertNoteDwtableItems(itemsCaptor.capture());
+        assertEquals(1, itemsCaptor.getValue().size());
+        assertEquals(Long.valueOf(102L), itemsCaptor.getValue().get(0).getColumnId());
+    }
+
+    @Test
     void importData_emptyParsedList_throwsServiceException()
     {
         ServiceException ex = assertThrows(ServiceException.class,

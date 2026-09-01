@@ -3,6 +3,7 @@ package com.ruoyi.system.service.impl;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -112,6 +113,9 @@ public class NoteDwtableImportServiceImpl implements INoteDwtableImportService
         query.setDwtableId(dwtableId);
         List<NoteColumn> columns = noteColumnMapper.selectNoteColumnList(query);
         Map<String, NoteColumn> columnByName = new HashMap<>();
+        // F3 修复：导出端 SqlIdentifierSanitizer 净化改写（空格/标点→_、数字开头加_、截断）
+        // 使含特殊字符列名的导出产物无法回中原名；净化名作为附加兜底键使 round-trip 成立
+        Map<String, NoteColumn> sanitizedAliases = new LinkedHashMap<>();
         Long nameColumnId = null;
         for (NoteColumn column : columns)
         {
@@ -128,7 +132,22 @@ public class NoteDwtableImportServiceImpl implements INoteDwtableImportService
             {
                 continue;
             }
-            columnByName.put(column.getName().trim(), column);
+            String trimmedName = column.getName().trim();
+            // 第一遍：全部原名键无条件注册（若同名列重复，后者覆盖前者——表定义自身歧义）
+            columnByName.put(trimmedName, column);
+            // 记录净化名供第二遍兜底注册
+            String sanitizedBare = SqlIdentifierSanitizer.sanitize(column.getName(), column.getId());
+            sanitizedBare = sanitizedBare.substring(1, sanitizedBare.length() - 1);
+            if (!sanitizedBare.equals(trimmedName))
+            {
+                sanitizedAliases.computeIfAbsent(sanitizedBare, k -> column);
+            }
+        }
+        // 第二遍：净化名兜底键——仅当不与任何原名键冲突时注册（原名优先，
+        // 与列遍历顺序无关；同净化名多列属导出端歧义，取 sort 首列）
+        for (Map.Entry<String, NoteColumn> entry : sanitizedAliases.entrySet())
+        {
+            columnByName.putIfAbsent(entry.getKey(), entry.getValue());
         }
         // F2：导入 sort = 当前最大 sort + 1 递增（空表视为 0 → 从 1 开始）
         Long maxSort = noteRecordMapper.selectMaxSortByDwtableId(dwtableId);
