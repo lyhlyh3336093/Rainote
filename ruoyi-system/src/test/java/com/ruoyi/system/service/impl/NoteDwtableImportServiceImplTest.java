@@ -397,6 +397,42 @@ class NoteDwtableImportServiceImplTest
     }
 
     @Test
+    void importData_rowsOverLimit_throwsServiceException()
+    {
+        // F10：行数超硬上限快速失败，防御超长事务
+        mockStandardColumns();
+        List<ParsedInsert> overLimit = new ArrayList<>();
+        for (long i = 1L; i <= NoteDwtableImportServiceImpl.MAX_IMPORT_ROWS + 1L; i++)
+        {
+            overLimit.add(parsed(i, "名称", "v" + i));
+        }
+
+        ServiceException ex = assertThrows(ServiceException.class,
+                () -> importService.importData(NOTE_ID, DWTABLE_ID, overLimit, USER_ID));
+        assertTrue(ex.getMessage().contains("超过上限"));
+        // 快速失败：不应有任何写入
+        verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
+    }
+
+    @Test
+    void importData_rowsAtLimit_passes()
+    {
+        // F10：恰好等于上限（含边界）正常导入
+        mockStandardColumns();
+        List<ParsedInsert> atLimit = new ArrayList<>();
+        for (long i = 1L; i <= NoteDwtableImportServiceImpl.MAX_IMPORT_ROWS; i++)
+        {
+            atLimit.add(parsed(i, "名称", "v" + i));
+        }
+
+        int count = importService.importData(NOTE_ID, DWTABLE_ID, atLimit, USER_ID);
+
+        assertEquals(NoteDwtableImportServiceImpl.MAX_IMPORT_ROWS, count);
+        // 50000 单元格 / 500 批 = 100 次 flush
+        verify(noteDwtableItemMapper, times(100)).insertNoteDwtableItems(anyList());
+    }
+
+    @Test
     void importData_emptyParsedList_throwsServiceException()
     {
         ServiceException ex = assertThrows(ServiceException.class,

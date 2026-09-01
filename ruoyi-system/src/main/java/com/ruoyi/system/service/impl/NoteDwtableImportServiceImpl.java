@@ -62,6 +62,9 @@ public class NoteDwtableImportServiceImpl implements INoteDwtableImportService
     /** NoteDwtableItem 批量 insert 单批上限（单元格数，Deferred 初始 500） */
     private static final int BATCH_LIMIT = 500;
 
+    /** 单次导入行数硬上限（F10 Deferred 落地）：防御超长事务与 undo log 膨胀（包级可见供测试引用） */
+    static final int MAX_IMPORT_ROWS = 50000;
+
     @Autowired
     private NoteColumnMapper noteColumnMapper;
 
@@ -82,6 +85,12 @@ public class NoteDwtableImportServiceImpl implements INoteDwtableImportService
         if (parsedList == null || parsedList.isEmpty())
         {
             throw new ServiceException("导入失败：未解析到任何 INSERT 语句");
+        }
+        // F10：行数硬上限——超限快速失败，防御超长事务/undo log 膨胀/锁持有
+        if (parsedList.size() > MAX_IMPORT_ROWS)
+        {
+            throw new ServiceException("导入失败：行数 " + parsedList.size()
+                    + " 超过上限 " + MAX_IMPORT_ROWS + "，请分批导入");
         }
         ImportContext ctx = buildContext(noteId, dwtableId, userId);
         List<NoteDwtableItem> batch = new ArrayList<>();
