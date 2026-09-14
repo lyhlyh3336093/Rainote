@@ -8,6 +8,8 @@ import javax.servlet.http.HttpServletResponse;
 import com.ruoyi.system.domain.NoteRecord;
 import com.ruoyi.system.domain.vo.NoteColumnVo;
 import com.ruoyi.system.domain.vo.NoteRecordVo;
+import com.ruoyi.system.service.impl.ColumnDefaultValueSupport;
+import com.ruoyi.common.utils.SecurityUtils;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.validation.annotation.Validated;
@@ -122,12 +124,26 @@ public class NoteColumnController extends BaseController
 
     /**
      * 修改列信息
+     * <p>
+     * U2/KTD6 路由不变量：后端在保存入口对原列（查库）与提交列做字段级 diff——
+     * 仅当 diff 只含 property.default 键变更时走 mapper 直更（updateColumnDefault，
+     * 零 service 副作用，归属校验在 service 内先行）；携带任何其他字段变更
+     * （name/isShow/sort/type 等）仍走 NoteColumnServiceImpl.updateNoteColumn 原路径，
+     * 保住列改名后的 recomputeRecordNamesForTable 等合法副作用。
      */
 //    @PreAuthorize("@ss.hasPermi('system:column:edit')")
     @Log(title = "列信息", businessType = BusinessType.UPDATE)
     @RequestMapping(value = "/update",method = org.springframework.web.bind.annotation.RequestMethod.POST)
     public AjaxResult edit(@Validated @RequestBody  NoteColumnVo noteColumnvo)
     {
+        NoteColumn originColumn = noteColumnService.selectNoteColumnById(noteColumnvo.getId());
+        if (ColumnDefaultValueSupport.isDefaultOnlyChange(originColumn, noteColumnvo))
+        {
+            String defaultValue = ColumnDefaultValueSupport.readSubmittedDefault(
+                    noteColumnvo.getProperty());
+            return toAjax(noteColumnService.updateColumnDefault(
+                    noteColumnvo.getId(), defaultValue, SecurityUtils.getUserId()));
+        }
         return toAjax(noteColumnService.updateNoteColumn(noteColumnvo));
     }
 

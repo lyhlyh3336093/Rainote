@@ -8,7 +8,9 @@ import java.util.Set;
 
 
 import com.alibaba.fastjson2.JSONObject;
+import com.ruoyi.common.exception.ServiceException;
 import com.ruoyi.common.utils.myHashMap;
+import com.ruoyi.system.agent.security.AgentOwnershipChecker;
 import com.ruoyi.system.domain.NoteBlock;
 import com.ruoyi.system.domain.NoteDwtable;
 import com.ruoyi.system.domain.NoteDwtableItem;
@@ -66,6 +68,9 @@ public class NoteColumnServiceImpl implements INoteColumnService
     @Autowired
     private NoteBlockMapper noteBlockMapper;
 
+    @Autowired
+    private AgentOwnershipChecker agentOwnershipChecker;
+
     /**
      * 查询列信息
      * 
@@ -112,7 +117,16 @@ public class NoteColumnServiceImpl implements INoteColumnService
             noteColumn.setIsShow(0L);
         }
         if(noteColumnvo.getProperty()!=null&&!"".equals(noteColumnvo.getProperty())){
-            noteColumn.setProperty(noteColumnvo.getProperty().toString());
+            // U2: 新增列默认值格式校验（R7），default 空值移除键，property 序列化规范化
+            String normalizedProperty = ColumnDefaultValueSupport.inheritDefault(
+                    noteColumnvo.getProperty().toString(), null);
+            NoteColumn forValidate = new NoteColumn();
+            forValidate.setName(noteColumnvo.getName());
+            forValidate.setType(noteColumnvo.getType());
+            forValidate.setProperty(normalizedProperty);
+            ColumnDefaultValueSupport.validate(forValidate,
+                    ColumnDefaultValueSupport.readSubmittedDefault(noteColumnvo.getProperty()));
+            noteColumn.setProperty(normalizedProperty);
         }
         noteColumn.setName(noteColumnvo.getName());
         noteColumn.setType(noteColumnvo.getType());
@@ -226,7 +240,22 @@ public class NoteColumnServiceImpl implements INoteColumnService
         }
         noteColumn.setId(noteColumnvo.getId());
         if(noteColumnvo.getProperty()!=null && !noteColumnvo.getProperty().equals("")){
-            noteColumn.setProperty(noteColumnvo.getProperty().toString());
+            // U2/KTD6: 覆写 property 前经 inheritDefault 保留原列 default 键
+            // （提交 property 未携带 default 键时从原列继承，不得静默清除默认值；
+            //   类型变更时不继承——旧默认值对新类型语义失效）
+            String submitted = noteColumnvo.getProperty().toString();
+            boolean typeChanged = noteColumnvo.getType() != null && originColumn.getType() != null
+                    && !noteColumnvo.getType().equals(originColumn.getType());
+            String mergedProperty = typeChanged
+                    ? submitted
+                    : ColumnDefaultValueSupport.inheritDefault(submitted, originColumn);
+            // R7: 合并后的默认值须与提交类型匹配（类型切换或非本前端客户端的防御校验）
+            NoteColumn forValidate = new NoteColumn();
+            forValidate.setName(noteColumnvo.getName());
+            forValidate.setType(noteColumnvo.getType());
+            forValidate.setProperty(mergedProperty);
+            ColumnDefaultValueSupport.validate(forValidate, ColumnDefaultValueSupport.read(forValidate));
+            noteColumn.setProperty(mergedProperty);
         }
         noteColumn.setName(noteColumnvo.getName());
         noteColumn.setType(noteColumnvo.getType());
@@ -327,6 +356,35 @@ public class NoteColumnServiceImpl implements INoteColumnService
         return 1;
     }
 
+
+    /**
+     * 仅更新列默认值（U2/KTD6 直更路径）。
+     * <p>
+     * 归属校验先行（Controller @PreAuthorize 已注释，归属校验不可绕过）；
+     * 校验默认值格式；经 merge 合并原 property 的 default 键后直接走
+     * mapper 更新——零 service 副作用（不触发 recomputeRecordNamesForTable、
+     * 反向建列等列结构变更副作用）。
+     */
+    @Override
+    public int updateColumnDefault(Long columnId, String defaultValue, Long userId)
+    {
+        // KTD6: 直更前归属校验不可绕过（admin 通行）
+        agentOwnershipChecker.checkColumnOwnership(columnId, userId);
+
+        NoteColumn originColumn = noteColumnMapper.selectNoteColumnById(columnId);
+        if (originColumn == null)
+        {
+            throw new ServiceException("列不存在");
+        }
+        // R7: 保存时格式校验拒绝非法值
+        ColumnDefaultValueSupport.validate(originColumn, defaultValue);
+        // KTD6: 读原 property 合并 default 键（保留 select 等既有键），mapper 直更仅更新 property
+        NoteColumn update = new NoteColumn();
+        update.setId(columnId);
+        update.setProperty(ColumnDefaultValueSupport.merge(originColumn, defaultValue));
+        noteColumnMapper.updateNoteColumn(update);
+        return 1;
+    }
 
     /**
      * 修改列排序

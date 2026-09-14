@@ -22,6 +22,22 @@
       <a-input allowClear v-model:value="formState.property" placeholder="请输入选项,多个用逗号隔开" />
     </a-form-item>
 
+    <!-- U2: 六类基础列默认值配置（property JSON default 键），清空输入=清除默认值 -->
+    <a-form-item v-if="[FieldEnum.多行文本, FieldEnum.数字, FieldEnum.日期].includes(formState.type)" label="默认值"
+      name="defaultValue">
+      <a-input allowClear v-model:value="formState.defaultValue"
+        :placeholder="formState.type === FieldEnum.日期 ? '格式：yyyy-MM-dd HH:mm:ss' : formState.type === FieldEnum.数字 ? '请输入数字默认值' : '请输入默认值'" />
+    </a-form-item>
+    <a-form-item v-else-if="[FieldEnum.单选, FieldEnum.多选].includes(formState.type)" label="默认值" name="defaultValue">
+      <a-select allowClear v-model:value="formState.defaultValue"
+        :mode="formState.type === FieldEnum.多选 ? 'multiple' : undefined" placeholder="请从选项中选择默认值">
+        <a-select-option v-for="opt in selectOptions" :key="opt" :value="opt">{{ opt }}</a-select-option>
+      </a-select>
+    </a-form-item>
+    <a-form-item v-else-if="formState.type === FieldEnum.复选框" label="默认值" name="defaultValue">
+      <a-switch v-model:checked="formState.defaultValue" />
+    </a-form-item>
+
     <!-- 单向关联、双向关联、语义关联选择数据表 -->
     <a-form-item v-if="[FieldEnum.双向关联, FieldEnum.单向关联, FieldEnum.语义关联].includes(formState.type)" :rules="[
       {
@@ -160,6 +176,7 @@ import { FieldEnum } from "@/enum";
 import { useStore } from '../../../stores/menu';
 import { message } from 'ant-design-vue';
 import { useFetch } from '../../../hooks';
+import { safeParseJson } from "@/utils";
 
 export default defineComponent({
   name: 'edit-field',
@@ -188,6 +205,7 @@ export default defineComponent({
       title: null,
       type: null,
       property: null,
+      defaultValue: null, // U2: 六类基础列默认值（与后端 property JSON default 键契约一致）
       columnAId: null,
       columnBId: null,
       expression: null,
@@ -196,6 +214,10 @@ export default defineComponent({
       doubleLinkId: null,   // lookUp中选择的双向关联列
       sourceColumnId: null, // lookUp中选择的引用列（新增）
     }) as any;
+
+    // U2: 单选/多选默认值选择器的选项集（来自本面板选项配置，逗号分隔字符串）
+    const selectOptions = computed(() =>
+      `${formState.property ?? ''}`.split(/[,，]/).map((s: string) => s.trim()).filter(Boolean));
 
 
     // 处理：选择了[关联表]后，联动筛选出对应的关联列，并加载目标表的列信息
@@ -252,6 +274,18 @@ export default defineComponent({
         formState.doubleLinkId = lookupProp?.double_link_column_id;
         formState.sourceColumnId = lookupProp?.source_column_id;
       })
+    }
+
+    // U2: 编辑时回显默认值（读原列 property 的 default 键，与后端 JSON 契约一致）
+    if (edit.value && [FieldEnum.多行文本, FieldEnum.数字, FieldEnum.单选, FieldEnum.多选, FieldEnum.日期, FieldEnum.复选框].includes(props.formState.type)) {
+      const originDefault = safeParseJson(edit.value.property)?.default;
+      if (props.formState.type === FieldEnum.复选框) {
+        formState.defaultValue = originDefault === 'true';
+      } else if (props.formState.type === FieldEnum.多选) {
+        formState.defaultValue = originDefault ? `${originDefault}`.split(',').map((s: string) => s.trim()).filter(Boolean) : [];
+      } else {
+        formState.defaultValue = originDefault ?? null;
+      }
     }
 
 
@@ -342,6 +376,20 @@ export default defineComponent({
         };
       }
 
+      // U2: 六类基础列组装 default 键（与后端 KTD6 路由不变量配合：仅 default 变更走 mapper 直更）
+      // 空输入=显式清除（提交空字符串，后端移除 default 键）；复选框开="true"、关=清除
+      if ([FieldEnum.多行文本, FieldEnum.数字, FieldEnum.单选, FieldEnum.多选, FieldEnum.日期, FieldEnum.复选框].includes(type)) {
+        let dv = '';
+        if (type === FieldEnum.复选框) {
+          dv = formState.defaultValue ? 'true' : '';
+        } else if (Array.isArray(formState.defaultValue)) {
+          dv = formState.defaultValue.join(',');
+        } else if (formState.defaultValue != null) {
+          dv = `${formState.defaultValue}`.trim();
+        }
+        _property.default = dv;
+      }
+
       let col: any = {
         id: null,
         type: type,
@@ -383,6 +431,7 @@ export default defineComponent({
       calcColumns,
       filteredDoubleLinkColumns,
       sourceColumns,
+      selectOptions,
       cancel,
       fields,
       FieldEnum,

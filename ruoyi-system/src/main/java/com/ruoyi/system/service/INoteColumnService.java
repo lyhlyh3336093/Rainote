@@ -48,11 +48,25 @@ public interface INoteColumnService
 
     /**
      * 修改列信息
-     * 
+     *
      * @param noteColumnvo 列信息
      * @return 结果
      */
     public int updateNoteColumn(NoteColumnVo noteColumnvo);
+
+    /**
+     * 仅更新列默认值（U2/KTD6 直更路径）。
+     * <p>
+     * 归属校验先行，之后校验默认值格式，最后经 merge 合并原 property
+     * 的 {@code default} 键并直接走 mapper 更新（零 service 副作用，
+     * 不触发 recomputeRecordNamesForTable 等列结构变更副作用）。
+     *
+     * @param columnId 列ID
+     * @param defaultValue 新默认值（null/空=移除 default 键）
+     * @param userId 当前操作用户ID（归属校验）
+     * @return 结果
+     */
+    public int updateColumnDefault(Long columnId, String defaultValue, Long userId);
 
     /**
      * 修改排序

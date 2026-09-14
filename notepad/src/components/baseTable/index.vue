@@ -1161,6 +1161,16 @@ export default defineComponent({
         property: null,
       }
     });
+    // U2: 六类基础列默认值（property JSON default 键，与后端 JSON 契约一致）
+    // 复选框 default "true"/"false" 映射为存储值 '0'(勾选)/'1'(未勾选)——np-checkbox 消费 '0'/'1'
+    const DEFAULTABLE_TYPES = [FieldEnum.多行文本, FieldEnum.数字, FieldEnum.单选, FieldEnum.多选, FieldEnum.日期, FieldEnum.复选框];
+    const getNewRecordDefaultValue = (column: any) => {
+      if (!DEFAULTABLE_TYPES.includes(column.type)) return '';
+      const dv = safeParseJson(column.property)?.default;
+      if (dv == null || `${dv}`.trim() === '') return '';
+      if (column.type === FieldEnum.复选框) return dv === 'true' ? '0' : '1';
+      return `${dv}`;
+    };
     const toolbarAction = {
       "添加记录": async key => {
         if (columns.value.length === 0) {
@@ -1171,7 +1181,7 @@ export default defineComponent({
             return {
               name: item.name,
               columnId: item.id,
-              value: '',
+              value: getNewRecordDefaultValue(item),
               dwtId: datasheetID.value
             }
           }),
