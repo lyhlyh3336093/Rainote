@@ -29,9 +29,11 @@ import com.ruoyi.common.exception.ServiceException;
 import com.ruoyi.common.utils.SecurityUtils;
 import com.ruoyi.system.agent.security.AgentOwnershipChecker;
 import com.ruoyi.system.domain.NoteDwtable;
+import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult;
 import com.ruoyi.system.domain.dto.ParsedInsert;
 import com.ruoyi.system.service.INoteDwtableService;
 import com.ruoyi.system.service.INoteDwtableExportService;
+import com.ruoyi.system.service.INoteDwtableExcelImportService;
 import com.ruoyi.system.service.INoteDwtableImportService;
 import com.ruoyi.system.service.impl.SqlInsertParser;
 import com.ruoyi.system.service.impl.ZipImportExtractor;
@@ -56,6 +58,9 @@ public class NoteDwtableController extends BaseController
 
     @Autowired
     private INoteDwtableImportService noteDwtableImportService;
+
+    @Autowired
+    private INoteDwtableExcelImportService noteDwtableExcelImportService;
 
     @Autowired
     private AgentOwnershipChecker agentOwnershipChecker;
@@ -190,6 +195,47 @@ public class NoteDwtableController extends BaseController
         Map<String, Object> data = new HashMap<>();
         data.put("recordCount", recordCount);
         return AjaxResult.success().put("data", data);
+    }
+
+    /**
+     * 多维表格 Excel 导入预检（阶段一，不写库）
+     * <p>
+     * 解析 .xlsx + 列映射 + 关联文本匹配，返回缺参与影响面清单
+     * （缺参/歧义/默认值填充/新选项/对称写入跨表影响/忽略提示/文件指纹），
+     * 由前端分流：有缺参或歧义打开补参弹框，仅影响面信息轻量确认，完全干净直接导入（R13）。
+     * <p>
+     * 安全（R23-R25）：归属校验复用 {@link AgentOwnershipChecker}（admin 通行）、
+     * 额外断言 dwtable.noteId 与 noteId 匹配、按用户限流（对称导入 60s/10 次）；
+     * 预检清单含单元格派生值，禁入 sys_oper_log（isSaveRequestData/isSaveResponseData 均关闭）。
+     *
+     * @param noteId    多维表格（笔记）ID
+     * @param dwtableId 目标数据表ID
+     * @param file      上传的 .xlsx 文件
+     * @return 预检清单（data 字段，含文件指纹供阶段二比对）
+     */
+    @Log(title = "多维表格Excel导入预检", businessType = BusinessType.IMPORT,
+            isSaveRequestData = false, isSaveResponseData = false)
+    @RateLimiter(time = 60, count = 10, limitType = LimitType.USER)
+    @PostMapping("/precheckExcelImport")
+    public AjaxResult precheckExcelImport(@RequestParam("noteId") Long noteId,
+            @RequestParam("dwtableId") Long dwtableId,
+            @RequestParam("file") MultipartFile file)
+    {
+        Long userId = SecurityUtils.getUserId();
+        // R23：归属校验（admin 通行）+ noteId↔dwtableId 匹配断言（照 importData 模式）
+        agentOwnershipChecker.checkDwtableOwnership(dwtableId, userId);
+        NoteDwtable dwtable = noteDwtableService.selectNoteDwtableById(dwtableId);
+        if (dwtable == null || !noteId.equals(dwtable.getNoteId()))
+        {
+            throw new ServiceException("预检失败：多维表与笔记不匹配");
+        }
+        if (file == null || file.isEmpty())
+        {
+            throw new ServiceException("预检失败：上传文件为空");
+        }
+        ExcelImportPrecheckResult result =
+                noteDwtableExcelImportService.precheck(noteId, dwtableId, file, userId);
+        return AjaxResult.success().put("data", result);
     }
 
     /**
