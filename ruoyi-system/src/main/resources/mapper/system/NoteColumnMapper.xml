@@ -56,7 +56,14 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <include refid="selectNoteColumnVo"/>
         where id = #{id}
     </select>
-        
+
+    <!-- Excel 导入 U5：选项追加读-改-写的前置锁定（导入事务内调用） -->
+    <select id="selectNoteColumnByIdForUpdate" parameterType="Long" resultMap="NoteColumnResult">
+        <include refid="selectNoteColumnVo"/>
+        where id = #{id}
+        for update
+    </select>
+
     <insert id="insertNoteColumn" parameterType="NoteColumn" useGeneratedKeys="true" keyProperty="id">
         insert into note_column
         <trim prefix="(" suffix=")" suffixOverrides=",">

@@ -210,4 +210,132 @@ class NoteDwtableControllerExcelImportTest
             assertTrue(requestParam.required(), "参数 " + parameter.getName() + " 必须必传");
         }
     }
+
+    // ==================================================================
+    // 阶段二：importExcelData（U5）
+    // ==================================================================
+
+    private static final String SAMPLE_PARAMS =
+            "{\"fileFingerprint\":{\"size\":3,\"md5\":\"d41d8cd98f00b204e9800998ecf8427e\"},"
+                    + "\"precheckBaseline\":{\"missingColumns\":[],\"missNames\":[],\"ambiguity\":[]},"
+                    + "\"columnValues\":{},\"relationSelections\":[]}";
+
+    @Test
+    void importExcelData_returnsRecordCountAndPassesParamsThrough()
+    {
+        when(noteDwtableExcelImportService.importExcelData(eq(NOTE_ID), eq(DWTABLE_ID),
+                any(MultipartFile.class), eq(SAMPLE_PARAMS), eq(USER_ID))).thenReturn(7);
+
+        AjaxResult result = controller.importExcelData(NOTE_ID, DWTABLE_ID, xlsxFile(), SAMPLE_PARAMS);
+
+        assertEquals(200, result.get("code"));
+        assertEquals(7, ((java.util.Map<?, ?>) result.get("data")).get("recordCount"));
+        verify(noteDwtableExcelImportService, times(1)).importExcelData(eq(NOTE_ID), eq(DWTABLE_ID),
+                any(MultipartFile.class), eq(SAMPLE_PARAMS), eq(USER_ID));
+        // 归属校验先行（照 importData 模式）
+        verify(agentOwnershipChecker, times(1)).checkDwtableOwnership(DWTABLE_ID, USER_ID);
+    }
+
+    @Test
+    void importExcelData_emptyParams_throwsServiceException()
+    {
+        ServiceException empty = assertThrows(ServiceException.class,
+                () -> controller.importExcelData(NOTE_ID, DWTABLE_ID, xlsxFile(), ""));
+        assertTrue(empty.getMessage().contains("缺少导入参数"));
+
+        ServiceException blank = assertThrows(ServiceException.class,
+                () -> controller.importExcelData(NOTE_ID, DWTABLE_ID, xlsxFile(), "  "));
+        assertTrue(blank.getMessage().contains("缺少导入参数"));
+
+        verify(noteDwtableExcelImportService, times(0))
+                .importExcelData(any(Long.class), any(Long.class), any(MultipartFile.class),
+                        any(String.class), any(Long.class));
+    }
+
+    @Test
+    void importExcelData_ownershipCheckFails_throwsServiceException()
+    {
+        doThrow(new ServiceException("无权操作他人数据")).when(agentOwnershipChecker)
+                .checkDwtableOwnership(DWTABLE_ID, USER_ID);
+
+        ServiceException ex = assertThrows(ServiceException.class,
+                () -> controller.importExcelData(NOTE_ID, DWTABLE_ID, xlsxFile(), SAMPLE_PARAMS));
+
+        assertEquals("无权操作他人数据", ex.getMessage());
+        verify(noteDwtableExcelImportService, times(0))
+                .importExcelData(any(Long.class), any(Long.class), any(MultipartFile.class),
+                        any(String.class), any(Long.class));
+    }
+
+    @Test
+    void importExcelData_noteIdMismatch_throwsServiceException()
+    {
+        NoteDwtable otherNoteTable = new NoteDwtable();
+        otherNoteTable.setId(DWTABLE_ID);
+        otherNoteTable.setNoteId(999L);
+        when(noteDwtableService.selectNoteDwtableById(DWTABLE_ID)).thenReturn(otherNoteTable);
+
+        ServiceException ex = assertThrows(ServiceException.class,
+                () -> controller.importExcelData(NOTE_ID, DWTABLE_ID, xlsxFile(), SAMPLE_PARAMS));
+
+        assertTrue(ex.getMessage().contains("不匹配"));
+        verify(noteDwtableExcelImportService, times(0))
+                .importExcelData(any(Long.class), any(Long.class), any(MultipartFile.class),
+                        any(String.class), any(Long.class));
+    }
+
+    @Test
+    void importExcelData_emptyFile_throwsServiceException()
+    {
+        MockMultipartFile empty = new MockMultipartFile("file", "T.xlsx",
+                XLSX_CONTENT_TYPE, new byte[0]);
+
+        ServiceException ex = assertThrows(ServiceException.class,
+                () -> controller.importExcelData(NOTE_ID, DWTABLE_ID, empty, SAMPLE_PARAMS));
+
+        assertTrue(ex.getMessage().contains("为空"));
+        verify(noteDwtableExcelImportService, times(0))
+                .importExcelData(any(Long.class), any(Long.class), any(MultipartFile.class),
+                        any(String.class), any(Long.class));
+    }
+
+    @Test
+    void importExcelData_annotations_rateLimiterLogAndPathConfigured() throws NoSuchMethodException
+    {
+        Method method = NoteDwtableController.class.getMethod("importExcelData",
+                Long.class, Long.class, MultipartFile.class, String.class);
+
+        // R24：按用户限流（对称导入端点 60s/10 次）
+        RateLimiter rateLimiter = method.getAnnotation(RateLimiter.class);
+        assertNotNull(rateLimiter);
+        assertEquals(60, rateLimiter.time());
+        assertEquals(10, rateLimiter.count());
+        assertEquals(LimitType.USER, rateLimiter.limitType());
+
+        // R25：params JSON 含单元格派生值，请求与响应均禁入 sys_oper_log
+        Log logAnnotation = method.getAnnotation(Log.class);
+        assertNotNull(logAnnotation);
+        assertEquals("多维表格Excel导入", logAnnotation.title());
+        assertEquals(BusinessType.IMPORT, logAnnotation.businessType());
+        assertFalse(logAnnotation.isSaveRequestData());
+        assertFalse(logAnnotation.isSaveResponseData());
+
+        PostMapping postMapping = method.getAnnotation(PostMapping.class);
+        assertNotNull(postMapping);
+        assertArrayEquals(new String[] {"/importExcelData"}, postMapping.value());
+    }
+
+    @Test
+    void importExcelData_requiredParams_mandatory() throws NoSuchMethodException
+    {
+        // 缺 noteId/dwtableId/file/params 时 Spring MVC 参数绑定返回 400（required 默认 true）
+        Method method = NoteDwtableController.class.getMethod("importExcelData",
+                Long.class, Long.class, MultipartFile.class, String.class);
+        for (java.lang.reflect.Parameter parameter : method.getParameters())
+        {
+            RequestParam requestParam = parameter.getAnnotation(RequestParam.class);
+            assertNotNull(requestParam, "参数 " + parameter.getName() + " 缺少 @RequestParam");
+            assertTrue(requestParam.required(), "参数 " + parameter.getName() + " 必须必传");
+        }
+    }
 }

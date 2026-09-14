@@ -13,11 +13,22 @@ public interface NoteColumnMapper
 {
     /**
      * 查询列信息
-     * 
+     *
      * @param id 列信息主键
      * @return 列信息
      */
     public NoteColumn selectNoteColumnById(Long id);
+
+    /**
+     * 按主键锁定查询列信息（SELECT ... FOR UPDATE，Excel 导入 U5）。
+     * <p>
+     * 单选/多选未知选项追加的读-改-写前置锁定：须在导入事务内调用，
+     * 防并发 UI 编辑列属性（select 逗号字符串）造成丢失更新。
+     *
+     * @param id 列信息主键
+     * @return 锁定的列信息；不存在返回 null
+     */
+    public NoteColumn selectNoteColumnByIdForUpdate(Long id);
 
     /**
      * 清空所有

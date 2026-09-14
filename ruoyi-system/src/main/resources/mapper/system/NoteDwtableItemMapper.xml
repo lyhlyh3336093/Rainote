@@ -83,6 +83,13 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
             <if test="linkNoteId != null  and linkNoteId != ''"> and linkNoteId = #{linkNoteId}</if>
         </where>
     </select>
+
+    <!-- Excel 导入 U5/KTD3：双链对称写入的聚合读-改-写前置锁定（行不存在仅加间隙锁，锁内由调用方复核 upsert） -->
+    <select id="selectNoteDwtableItemByRecordAndColumnForUpdate" parameterType="NoteDwtableItem" resultMap="NoteDwtableItemResult">
+        <include refid="selectNoteDwtableItemVo"/>
+        where recordId = #{recordId} and columnId = #{columnId}
+        for update
+    </select>
         
     <insert id="insertNoteDwtableItem" parameterType="NoteDwtableItem" useGeneratedKeys="true" keyProperty="id">
         insert into note_dwtable_item
@@ -110,10 +117,12 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
          </trim>
     </insert>
 
-    <insert id="insertNoteDwtableItems" parameterType="java.util.List">
-        insert into note_dwtable_item (dwtId, columnId, recordId, value) values
+    <!-- U5 扩展：link 字段列集（linkRecordId/linkItemId/linkColumnId，非关联 item 传 null）；
+         useGeneratedKeys 回填自增 id（零缓冲不变量：对称写入的 linkItemId 须引用已落库的本表 item id） -->
+    <insert id="insertNoteDwtableItems" parameterType="java.util.List" useGeneratedKeys="true" keyProperty="id">
+        insert into note_dwtable_item (dwtId, columnId, recordId, value, linkRecordId, linkItemId, linkColumnId) values
         <foreach collection="list" item="item" separator=",">
-            (#{item.dwtId}, #{item.columnId}, #{item.recordId}, #{item.value})
+            (#{item.dwtId}, #{item.columnId}, #{item.recordId}, #{item.value}, #{item.linkRecordId}, #{item.linkItemId}, #{item.linkColumnId})
         </foreach>
     </insert>
 

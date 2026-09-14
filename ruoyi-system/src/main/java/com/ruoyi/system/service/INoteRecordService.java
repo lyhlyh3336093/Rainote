@@ -119,6 +119,19 @@ public interface INoteRecordService
     void recomputeSetOperationsForLookup(NoteColumn lookupColumn);
 
     /**
+     * 全量重算指定集合运算列(type=24)所有记录的存储值（Excel 导入 U5，KTD8 重算编排入口）。
+     * <p>
+     * {@link #recomputeSetOperationsForLookup} 以 lookup 列为键筛选集合运算列；
+     * 目标表中 columnA/B <b>直接引用导入 18/21 关联列</b>的集合运算列无现成批量方法，
+     * 本方法为其等价入口：对每条记录从 DB 重新读取 A/B 数据并执行集合运算，
+     * upsert 结果 item（逻辑与 {@code updateNoteRecord} 内联集合运算块等价，经 Spring 代理
+     * 调用可加入导入事务）。单条记录失败不中断整体流程，记录错误日志后继续。
+     *
+     * @param setColumn 需要重算的集合运算列
+     */
+    void recomputeSetOperationColumn(NoteColumn setColumn);
+
+    /**
      * 派生记录名称：取该表最左侧 type=1（多行文本）列的值。
      * 取值优先级（KTD-3）：先 incomingItems（本次写入新值），再 existingItems（DB 当前值），仍无则返回 ""。
      * 无 type=1 列时返回 ""（R6）。

@@ -46,9 +46,22 @@ public interface NoteDwtableItemMapper
      * 根据行id和双向链接列id查询数据
      *
      * @param noteDwtableItem 多维表格数据表内容
-     * @return 多维表格数据表内容
+     * @return 多维表格数据表内容集合
      */
     public NoteDwtableItem selectNoteDwtableItemByRecordAndLinkColumn(NoteDwtableItem noteDwtableItem);
+
+    /**
+     * 按记录 id + 列 id 锁定查询数据（SELECT ... FOR UPDATE，Excel 导入 U5/KTD3）。
+     * <p>
+     * 双链对称写入的聚合读-改-写前置锁定：现有 {@link #selectNoteDwtableItemByRecordAndColumn}
+     * 为快照读，无法防并发 UI 编辑丢失更新。须在导入事务内调用；
+     * 行不存在时仅加间隙锁（(recordId, columnId) 无唯一约束），
+     * 锁内复核行存在性，不存在则由调用方 upsert 创建。
+     *
+     * @param noteDwtableItem 查询条件（recordId 与 columnId 必填）
+     * @return 锁定的行；不存在返回 null
+     */
+    public NoteDwtableItem selectNoteDwtableItemByRecordAndColumnForUpdate(NoteDwtableItem noteDwtableItem);
 
 
     /**
@@ -60,9 +73,13 @@ public interface NoteDwtableItemMapper
     public int insertNoteDwtableItem(NoteDwtableItem noteDwtableItem);
 
     /**
-     * 批量新增多维表格数据表内容（多维表格导入，KTD5 foreach 批量写入）
+     * 批量新增多维表格数据表内容（多维表格导入，KTD5 foreach 批量写入）。
+     * <p>
+     * U5 扩展：列集含 link 字段（linkRecordId/linkItemId/linkColumnId，非关联 item 传 null），
+     * 单向(18)/双向(21)关联列的 link 数据经批量 insert 落库不被丢弃；
+     * useGeneratedKeys 回填自增 id（零缓冲不变量：对称写入的 linkItemId 须引用已落库的本表 item id）。
      *
-     * @param items 数据表内容列表（dwtId/columnId/recordId/value 均必填）
+     * @param items 数据表内容列表（dwtId/columnId/recordId/value 必填，link 字段可空）
      * @return 结果
      */
     public int insertNoteDwtableItems(List<NoteDwtableItem> items);

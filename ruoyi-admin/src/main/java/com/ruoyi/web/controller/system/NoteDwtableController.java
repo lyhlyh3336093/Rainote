@@ -239,6 +239,56 @@ public class NoteDwtableController extends BaseController
     }
 
     /**
+     * 导入多维表格 Excel 数据（阶段二，补参后单事务写入）
+     * <p>
+     * 携带补参 JSON（文件指纹 + 预检基线 + 基础列统一值 + 关联列逐值选择）重新上传文件，
+     * 服务端重新解析匹配后单事务写入（记录/单元格/选项/双链对称写入/重算编排），
+     * 失败整体回滚；返回成功导入的记录数（KTD3/KTD5/KTD8）。
+     * <p>
+     * 安全（R23-R26）：归属校验复用 {@link AgentOwnershipChecker}（admin 通行）、
+     * 额外断言 dwtable.noteId 与 noteId 匹配、按用户限流（对称导入 60s/10 次）；
+     * params JSON 含单元格派生值，禁入 sys_oper_log（isSaveRequestData/isSaveResponseData 均关闭）。
+     *
+     * @param noteId    多维表格（笔记）ID
+     * @param dwtableId 目标数据表ID
+     * @param file      上传的 .xlsx 文件（须与预检文件同一，指纹校验）
+     * @param params    补参 JSON 字符串（ExcelImportParams 契约：fileFingerprint/precheckBaseline/
+     *                  columnValues/relationSelections）
+     * @return data.recordCount 成功导入的记录数
+     */
+    @Log(title = "多维表格Excel导入", businessType = BusinessType.IMPORT,
+            isSaveRequestData = false, isSaveResponseData = false)
+    @RateLimiter(time = 60, count = 10, limitType = LimitType.USER)
+    @PostMapping("/importExcelData")
+    public AjaxResult importExcelData(@RequestParam("noteId") Long noteId,
+            @RequestParam("dwtableId") Long dwtableId,
+            @RequestParam("file") MultipartFile file,
+            @RequestParam("params") String params)
+    {
+        Long userId = SecurityUtils.getUserId();
+        // R23：归属校验（admin 通行）+ noteId↔dwtableId 匹配断言（照 importData 模式）
+        agentOwnershipChecker.checkDwtableOwnership(dwtableId, userId);
+        NoteDwtable dwtable = noteDwtableService.selectNoteDwtableById(dwtableId);
+        if (dwtable == null || !noteId.equals(dwtable.getNoteId()))
+        {
+            throw new ServiceException("导入失败：多维表与笔记不匹配");
+        }
+        if (file == null || file.isEmpty())
+        {
+            throw new ServiceException("导入失败：上传文件为空");
+        }
+        if (params == null || params.trim().isEmpty())
+        {
+            throw new ServiceException("导入失败：缺少导入参数（params），请通过预检后导入");
+        }
+        int recordCount = noteDwtableExcelImportService
+                .importExcelData(noteId, dwtableId, file, params, userId);
+        Map<String, Object> data = new HashMap<>();
+        data.put("recordCount", recordCount);
+        return AjaxResult.success().put("data", data);
+    }
+
+    /**
      * 获取多维表格数据表详细信息
      */
 //    @PreAuthorize("@ss.hasPermi('system:dwtable:query')")

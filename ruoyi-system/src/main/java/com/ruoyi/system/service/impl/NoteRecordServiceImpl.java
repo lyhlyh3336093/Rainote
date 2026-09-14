@@ -1250,92 +1250,7 @@ public class NoteRecordServiceImpl implements INoteRecordService
                 {
                     try
                     {
-                        List<String> aRecordIds = new ArrayList<>();
-                        List<String> aValues = new ArrayList<>();
-                        if (!fetchColumnDataFromDB(columnA, record.getId(), aRecordIds, aValues))
-                        {
-                            continue;
-                        }
-
-                        List<String> bRecordIds = new ArrayList<>();
-                        List<String> bValues = new ArrayList<>();
-                        if (!fetchColumnDataFromDB(columnB, record.getId(), bRecordIds, bValues))
-                        {
-                            continue;
-                        }
-
-                        Map<String, String> aMap = new LinkedHashMap<>();
-                        for (int i = 0; i < aRecordIds.size(); i++)
-                        {
-                            aMap.put(aRecordIds.get(i), i < aValues.size() ? aValues.get(i) : "");
-                        }
-                        Map<String, String> bMap = new LinkedHashMap<>();
-                        for (int i = 0; i < bRecordIds.size(); i++)
-                        {
-                            bMap.put(bRecordIds.get(i), i < bValues.size() ? bValues.get(i) : "");
-                        }
-
-                        List<String> rRecordIds = new ArrayList<>();
-                        if ("disjunction".equals(calcType))
-                        {
-                            rRecordIds = (List<String>) CollectionUtils.disjunction(aRecordIds, bRecordIds);
-                        }
-                        else if ("subtract".equals(calcType))
-                        {
-                            rRecordIds = (List<String>) CollectionUtils.subtract(aRecordIds, bRecordIds);
-                        }
-                        else if ("intersection".equals(calcType))
-                        {
-                            rRecordIds = (List<String>) CollectionUtils.intersection(aRecordIds, bRecordIds);
-                        }
-                        else if ("union".equals(calcType))
-                        {
-                            rRecordIds = (List<String>) CollectionUtils.union(aRecordIds, bRecordIds);
-                        }
-                        else
-                        {
-                            // 未知calcType，跳过本记录，避免清空已有结果
-                            log.warn("[RECOMPUTE-SET-OP] 未知calcType={} setColumnId={}, recordId={}",
-                                    calcType, setColumn.getId(), record.getId());
-                            continue;
-                        }
-
-                        List<String> rValues = new ArrayList<>();
-                        for (String id : rRecordIds)
-                        {
-                            String value = aMap.get(id);
-                            if (value == null)
-                            {
-                                value = bMap.get(id);
-                            }
-                            if (value == null)
-                            {
-                                value = "";
-                            }
-                            rValues.add(value);
-                        }
-
-                        NoteDwtableItem queryItem = new NoteDwtableItem();
-                        queryItem.setRecordId(record.getId());
-                        queryItem.setColumnId(setColumn.getId());
-                        NoteDwtableItem resultItem = noteDwtableItemMapper.selectNoteDwtableItemByRecordAndColumn(queryItem);
-                        if (resultItem == null)
-                        {
-                            resultItem = new NoteDwtableItem();
-                            resultItem.setRecordId(record.getId());
-                            resultItem.setColumnId(setColumn.getId());
-                            resultItem.setDwtId(lookupColumn.getDwtableId());
-                        }
-                        resultItem.setValue(String.join(",", rValues));
-                        resultItem.setLinkRecordId(String.join(",", rRecordIds));
-                        if (resultItem.getId() == null)
-                        {
-                            noteDwtableItemMapper.insertNoteDwtableItem(resultItem);
-                        }
-                        else
-                        {
-                            noteDwtableItemMapper.updateNoteDwtableItem(resultItem);
-                        }
+                        computeSetOperationForRecord(setColumn, columnA, columnB, calcType, record.getId());
                     }
                     catch (Exception e)
                     {
@@ -1349,6 +1264,167 @@ public class NoteRecordServiceImpl implements INoteRecordService
                 log.error("[RECOMPUTE-SET-OP] setColumn处理失败 setColumnId={}", setColumn.getId(), e);
             }
             log.info("[RECOMPUTE-SET-OP] done setColumnId={}", setColumn.getId());
+        }
+    }
+
+    /**
+     * 全量重算指定集合运算列(type=24)所有记录的存储值（Excel 导入 U5，KTD8 重算编排入口）。
+     * <p>
+     * {@link #recomputeSetOperationsForLookup} 以 lookup 列为键筛选集合运算列；
+     * 目标表中 columnA/B 直接引用导入 18/21 关联列的集合运算列无现成批量方法，
+     * 本方法为其等价入口：解析 property 取 A/B 列与计算类型，逐记录调
+     * {@link #computeSetOperationForRecord}（与 {@code updateNoteRecord} 内联集合运算块等价，
+     * 从 DB 读取 A/B 数据）。单条记录失败不中断整体流程，记录错误日志后继续。
+     *
+     * @param setColumn 需要重算的集合运算列
+     */
+    @Override
+    public void recomputeSetOperationColumn(NoteColumn setColumn)
+    {
+        if (setColumn == null || setColumn.getId() == null)
+        {
+            return;
+        }
+        try
+        {
+            JSONObject setProp = JSONObject.parseObject(setColumn.getProperty());
+            String columnAId = setProp.get("columnAId").toString();
+            String columnBId = setProp.get("columnBId").toString();
+            String calcType = setProp.get("calcType").toString();
+
+            NoteColumn columnA = noteColumnMapper.selectNoteColumnById(Long.parseLong(columnAId));
+            NoteColumn columnB = noteColumnMapper.selectNoteColumnById(Long.parseLong(columnBId));
+            if (columnA == null || columnB == null)
+            {
+                log.warn("[RECOMPUTE-SET-OP-COL] 参与运算列缺失，跳过 setColumnId={}, columnAId={}, columnBId={}",
+                        setColumn.getId(), columnAId, columnBId);
+                return;
+            }
+
+            NoteRecordVo queryRecord = new NoteRecordVo();
+            queryRecord.setDwtableId(setColumn.getDwtableId());
+            List<NoteRecord> records = noteRecordMapper.selectNoteRecordList(queryRecord);
+            log.info("[RECOMPUTE-SET-OP-COL] start setColumnId={}, dwtableId={}, recordCount={}",
+                    setColumn.getId(), setColumn.getDwtableId(), records.size());
+
+            for (NoteRecord record : records)
+            {
+                try
+                {
+                    computeSetOperationForRecord(setColumn, columnA, columnB, calcType, record.getId());
+                }
+                catch (Exception e)
+                {
+                    log.error("[RECOMPUTE-SET-OP-COL] 重算失败 setColumnId={}, recordId={}",
+                            setColumn.getId(), record.getId(), e);
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            log.error("[RECOMPUTE-SET-OP-COL] setColumn处理失败 setColumnId={}", setColumn.getId(), e);
+        }
+        log.info("[RECOMPUTE-SET-OP-COL] done setColumnId={}", setColumn.getId());
+    }
+
+    /**
+     * 对单条记录执行集合运算并 upsert 结果 item（recomputeSetOperationsForLookup 与
+     * recomputeSetOperationColumn 的共享实现，等价于 updateNoteRecord 内联集合运算块的 DB 读取路径）。
+     *
+     * @param setColumn 集合运算列
+     * @param columnA   A 列（21 双向关联或 26 lookup）
+     * @param columnB   B 列（21 双向关联或 26 lookup）
+     * @param calcType  计算类型（disjunction/subtract/intersection/union）
+     * @param recordId  目标记录 id
+     */
+    private void computeSetOperationForRecord(NoteColumn setColumn, NoteColumn columnA, NoteColumn columnB,
+            String calcType, Long recordId)
+    {
+        List<String> aRecordIds = new ArrayList<>();
+        List<String> aValues = new ArrayList<>();
+        if (!fetchColumnDataFromDB(columnA, recordId, aRecordIds, aValues))
+        {
+            return;
+        }
+
+        List<String> bRecordIds = new ArrayList<>();
+        List<String> bValues = new ArrayList<>();
+        if (!fetchColumnDataFromDB(columnB, recordId, bRecordIds, bValues))
+        {
+            return;
+        }
+
+        Map<String, String> aMap = new LinkedHashMap<>();
+        for (int i = 0; i < aRecordIds.size(); i++)
+        {
+            aMap.put(aRecordIds.get(i), i < aValues.size() ? aValues.get(i) : "");
+        }
+        Map<String, String> bMap = new LinkedHashMap<>();
+        for (int i = 0; i < bRecordIds.size(); i++)
+        {
+            bMap.put(bRecordIds.get(i), i < bValues.size() ? bValues.get(i) : "");
+        }
+
+        List<String> rRecordIds = new ArrayList<>();
+        if ("disjunction".equals(calcType))
+        {
+            rRecordIds = (List<String>) CollectionUtils.disjunction(aRecordIds, bRecordIds);
+        }
+        else if ("subtract".equals(calcType))
+        {
+            rRecordIds = (List<String>) CollectionUtils.subtract(aRecordIds, bRecordIds);
+        }
+        else if ("intersection".equals(calcType))
+        {
+            rRecordIds = (List<String>) CollectionUtils.intersection(aRecordIds, bRecordIds);
+        }
+        else if ("union".equals(calcType))
+        {
+            rRecordIds = (List<String>) CollectionUtils.union(aRecordIds, bRecordIds);
+        }
+        else
+        {
+            // 未知calcType，跳过本记录，避免清空已有结果
+            log.warn("[RECOMPUTE-SET-OP] 未知calcType={} setColumnId={}, recordId={}",
+                    calcType, setColumn.getId(), recordId);
+            return;
+        }
+
+        List<String> rValues = new ArrayList<>();
+        for (String id : rRecordIds)
+        {
+            String value = aMap.get(id);
+            if (value == null)
+            {
+                value = bMap.get(id);
+            }
+            if (value == null)
+            {
+                value = "";
+            }
+            rValues.add(value);
+        }
+
+        NoteDwtableItem queryItem = new NoteDwtableItem();
+        queryItem.setRecordId(recordId);
+        queryItem.setColumnId(setColumn.getId());
+        NoteDwtableItem resultItem = noteDwtableItemMapper.selectNoteDwtableItemByRecordAndColumn(queryItem);
+        if (resultItem == null)
+        {
+            resultItem = new NoteDwtableItem();
+            resultItem.setRecordId(recordId);
+            resultItem.setColumnId(setColumn.getId());
+            resultItem.setDwtId(setColumn.getDwtableId());
+        }
+        resultItem.setValue(String.join(",", rValues));
+        resultItem.setLinkRecordId(String.join(",", rRecordIds));
+        if (resultItem.getId() == null)
+        {
+            noteDwtableItemMapper.insertNoteDwtableItem(resultItem);
+        }
+        else
+        {
+            noteDwtableItemMapper.updateNoteDwtableItem(resultItem);
         }
     }
 

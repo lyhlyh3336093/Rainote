@@ -5,6 +5,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -20,6 +21,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
 import com.alibaba.fastjson2.JSONObject;
@@ -27,7 +29,9 @@ import com.ruoyi.common.exception.ServiceException;
 import com.ruoyi.system.agent.security.AgentOwnershipChecker;
 import com.ruoyi.system.domain.NoteColumn;
 import com.ruoyi.system.domain.NoteDwtable;
+import com.ruoyi.system.domain.NoteDwtableItem;
 import com.ruoyi.system.domain.NoteRecord;
+import com.ruoyi.system.domain.dto.ExcelImportParams;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.AmbiguityItem;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.DefaultValueFill;
@@ -41,16 +45,18 @@ import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.SkippedHeader;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.SymmetricWriteImpact;
 import com.ruoyi.system.domain.vo.NoteRecordVo;
 import com.ruoyi.system.mapper.NoteColumnMapper;
+import com.ruoyi.system.mapper.NoteDwtableItemMapper;
 import com.ruoyi.system.mapper.NoteDwtableMapper;
 import com.ruoyi.system.mapper.NoteRecordMapper;
 import com.ruoyi.system.service.INoteDwtableExcelImportService;
+import com.ruoyi.system.service.INoteRecordService;
 import com.ruoyi.system.service.impl.ExcelColumnMatcher.ColumnMapping;
 import com.ruoyi.system.service.impl.ExcelColumnMatcher.HeaderEntry;
 import com.ruoyi.system.service.impl.ExcelColumnMatcher.SheetSelection;
 import com.ruoyi.system.service.impl.ExcelWorkbookReader.ParsedSheet;
 
 /**
- * 多维表格 Excel 导入服务（U4：阶段一预检）。
+ * 多维表格 Excel 导入服务（U4 阶段一预检 + U5 阶段二导入写入）。
  * <p>
  * 预检流程（R9/R10/R11/R14/R15/R23/R24/R25，KTD4/KTD5）：
  * <ol>
@@ -74,6 +80,11 @@ import com.ruoyi.system.service.impl.ExcelWorkbookReader.ParsedSheet;
  * <p>
  * 预检不触碰任何写路径（零 insert/update mapper 调用）；
  * 日志只记录列名/行号/跳过原因等元数据，不含单元格值（R25）。
+ * <p>
+ * 导入流程（U5，R16-R26，KTD3/KTD5/KTD8）：非事务前置段（指纹校验 → 同一私有方法链
+ * 重新解析/映射/匹配 → params 解析 → 补参校验 R26 → 反向漂移 fail-fast）→
+ * {@code @Transactional} 写入段（逐行 NoteRecord + items 批量 ≥500 flush + 选项追加 +
+ * 全量最终 flush + 双链对称写入 + 重算编排）→ 返回 recordCount；失败整体回滚（R22）。
  *
  * @author ruoyi
  */
@@ -97,11 +108,26 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     /** 多选 */
     private static final long TYPE_MULTI_SELECT = 4L;
 
+    /** 复选框 */
+    private static final long TYPE_CHECKBOX = 7L;
+
+    /** lookup 列 */
+    private static final long TYPE_LOOKUP = 26L;
+
+    /** 集合运算列 */
+    private static final long TYPE_SET_OPERATION = 24L;
+
     /** 隐藏列标记：isShow=1 表示隐藏 */
     private static final long IS_SHOW_HIDDEN = 1L;
 
     /** 关联列选择器候选首批上限（按 sort 升序前 N 条，KTD7） */
     private static final int CANDIDATE_LIMIT = 100;
+
+    /** NoteDwtableItem 批量 insert 单批上限（单元格数，对齐 SQL 导入 BATCH_LIMIT） */
+    private static final int BATCH_LIMIT = 500;
+
+    /** 每列每次导入新选项上限（R19，超限中止回滚） */
+    private static final int NEW_OPTION_LIMIT = 100;
 
     @Autowired
     private NoteDwtableMapper noteDwtableMapper;
@@ -113,7 +139,28 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     private NoteRecordMapper noteRecordMapper;
 
     @Autowired
+    private NoteDwtableItemMapper noteDwtableItemMapper;
+
+    @Autowired
     private AgentOwnershipChecker agentOwnershipChecker;
+
+    /** 重算编排入口（KTD8：经 Spring 代理调用加入导入事务） */
+    @Autowired
+    private INoteRecordService noteRecordService;
+
+    /**
+     * 自注入代理引用：导入入口（非事务前置段）完成后经代理进入 {@code @Transactional}
+     * 写入段（同类自调用不经代理，事务由本字段承载；注入具体类依赖 CGLIB 代理，
+     * 与 {@code NoteDwtableServiceImpl} 注入 {@code NoteViewServiceImpl} 同一先例）。
+     */
+    @Autowired
+    private NoteDwtableExcelImportServiceImpl self;
+
+    /** 供单元测试注入未代理实例（生产环境由 Spring 注入代理） */
+    void setSelf(NoteDwtableExcelImportServiceImpl self)
+    {
+        this.self = self;
+    }
 
     @Override
     public ExcelImportPrecheckResult precheck(Long noteId, Long dwtableId, MultipartFile file, Long userId)
@@ -363,21 +410,10 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                 // R15：空单元格不建立关联，不算缺参不算未命中
                 continue;
             }
-            // KTD4 整串优先：整串命中即用，不拆逗号（处理记录名含逗号）
-            List<NoteRecord> full = recordsByName.get(text);
-            if (full != null)
+            // KTD4 整串优先（candidateNames）：整串命中即返回整串（不拆逗号，处理记录名含逗号），
+            // 未命中再按英文逗号拆分逐个（trim）匹配
+            for (String name : candidateNames(text, recordsByName))
             {
-                collectMatch(text, full, matchedRecordIds, ambiguityByName);
-                continue;
-            }
-            // 未命中 → 按英文逗号拆分逐个匹配
-            for (String part : text.split(","))
-            {
-                String name = part.trim();
-                if (name.isEmpty())
-                {
-                    continue;
-                }
                 List<NoteRecord> matched = recordsByName.get(name);
                 if (matched != null)
                 {
@@ -513,24 +549,21 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
 
     /**
      * 解析关联列 property JSON 的 table_id（被关联表 id）；缺失或非法抛 {@link ServiceException} 含列名。
+     * <p>
+     * U5 兼容：18 单向关联列由前端建列时写入 {@code {select: 被关联表id}}（无 table_id 键），
+     * table_id 缺失时对 18 列回退读取 select 的数字值；非数字 select 与缺失同路径报错。
      */
     private static Long parseTableId(NoteColumn column)
     {
         String columnName = column.getName() == null ? "" : column.getName();
         Long tableId = null;
-        if (column.getProperty() != null && !column.getProperty().trim().isEmpty())
+        JSONObject prop = parsePropertySafe(column);
+        if (!prop.isEmpty())
         {
-            try
+            tableId = prop.getLong("table_id");
+            if (tableId == null && column.getType() != null && column.getType() == TYPE_SINGLE_LINK)
             {
-                JSONObject prop = JSONObject.parseObject(column.getProperty());
-                if (prop != null)
-                {
-                    tableId = prop.getLong("table_id");
-                }
-            }
-            catch (Exception ignored)
-            {
-                // 非法 property 与缺失 table_id 同路径处理
+                tableId = prop.getLong("select");
             }
         }
         if (tableId == null)
@@ -538,6 +571,33 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             throw new ServiceException("关联列“" + columnName + "”的配置缺少被关联表（table_id），无法导入");
         }
         return tableId;
+    }
+
+    /**
+     * 关联文本匹配的名字序列（KTD4 整串优先，预检与导入两阶段共用）：
+     * 单元格文本（trim 后非空）先整串匹配记录名，命中返回整串单元素列表（不拆逗号）；
+     * 未命中按英文逗号拆分逐个 trim 去空。
+     */
+    static List<String> candidateNames(String text, Map<String, List<NoteRecord>> recordsByName)
+    {
+        if (text == null || text.isEmpty())
+        {
+            return Collections.emptyList();
+        }
+        if (recordsByName.containsKey(text))
+        {
+            return Collections.singletonList(text);
+        }
+        List<String> names = new ArrayList<>();
+        for (String part : text.split(","))
+        {
+            String name = part.trim();
+            if (!name.isEmpty())
+            {
+                names.add(name);
+            }
+        }
+        return names;
     }
 
     /**
@@ -641,6 +701,41 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     }
 
     /**
+     * 宽松解析 property JSON：null/空/非法时返回空 JSONObject（不抛异常）。
+     */
+    private static JSONObject parsePropertySafe(NoteColumn column)
+    {
+        if (column == null || column.getProperty() == null || column.getProperty().trim().isEmpty())
+        {
+            return new JSONObject();
+        }
+        try
+        {
+            JSONObject parsed = JSONObject.parseObject(column.getProperty());
+            return parsed == null ? new JSONObject() : parsed;
+        }
+        catch (Exception e)
+        {
+            return new JSONObject();
+        }
+    }
+
+    /**
+     * 解析关联列 property 的 back_field_id（配对列）：21 双向关联必填（对称写入目标列），
+     * 18 单向关联可选（前端建列时 18 的 property 无 back_field_id → null，对齐 UI 落库形态）。
+     */
+    private static Long parseBackFieldId(NoteColumn column)
+    {
+        Long backFieldId = parsePropertySafe(column).getLong("back_field_id");
+        if (backFieldId == null && column.getType() != null && column.getType() == TYPE_DOUBLE_LINK)
+        {
+            throw new ServiceException("关联列“" + (column.getName() == null ? "" : column.getName())
+                    + "”的配置缺少配对列（back_field_id），无法导入");
+        }
+        return backFieldId;
+    }
+
+    /**
      * 被关联表上下文（KTD4 预解析产物，同表多列共享）：
      * 表信息 + sort 升序全量记录 + name → 有序记录列表（同名多条保留全部）。
      */
@@ -674,5 +769,1210 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         {
             return recordsByName;
         }
+    }
+
+    // ==================== 阶段二：导入写入（U5） ====================
+
+    @Override
+    public int importExcelData(Long noteId, Long dwtableId, MultipartFile file, String paramsJson, Long userId)
+    {
+        // 防御性复查（Controller 已做归属校验 + noteId↔dwtableId 断言，照 importData 模式）
+        NoteDwtable dwtable = noteDwtableMapper.selectNoteDwtableById(dwtableId);
+        if (dwtable == null || !noteId.equals(dwtable.getNoteId()))
+        {
+            throw new ServiceException("导入失败：多维表与笔记不匹配");
+        }
+        if (file == null || file.isEmpty())
+        {
+            throw new ServiceException("导入失败：上传文件为空");
+        }
+        ExcelImportParams params = parseParams(paramsJson);
+        verifyFingerprint(file, params);
+        // 非事务前置段：解析/匹配/漂移/补参校验不占事务（KTD5）
+        ImportPlan plan = buildImportPlan(noteId, dwtableId, userId, dwtable, file, params);
+        // 经自注入代理进入 @Transactional 写入段（同类直接调用不经代理）
+        return self.executeImport(plan);
+    }
+
+    /**
+     * 解析 params JSON（fastjson2 → {@link ExcelImportParams}），空/非法给明确拒绝文案。
+     */
+    private static ExcelImportParams parseParams(String paramsJson)
+    {
+        if (paramsJson == null || paramsJson.trim().isEmpty())
+        {
+            throw new ServiceException("导入参数（params）不能为空，请通过预检后导入");
+        }
+        ExcelImportParams params;
+        try
+        {
+            params = JSONObject.parseObject(paramsJson, ExcelImportParams.class);
+        }
+        catch (Exception e)
+        {
+            throw new ServiceException("导入参数（params）格式错误，无法解析，请通过预检后重新导入");
+        }
+        if (params == null)
+        {
+            throw new ServiceException("导入参数（params）格式错误，无法解析，请通过预检后重新导入");
+        }
+        // 显式 null 段归一为空集合（后续遍历不做 null 防御）
+        if (params.getPrecheckBaseline() == null)
+        {
+            params.setPrecheckBaseline(new ExcelImportParams.PrecheckBaseline());
+        }
+        if (params.getColumnValues() == null)
+        {
+            params.setColumnValues(new LinkedHashMap<String, String>());
+        }
+        if (params.getRelationSelections() == null)
+        {
+            params.setRelationSelections(new ArrayList<ExcelImportParams.RelationSelection>());
+        }
+        return params;
+    }
+
+    /**
+     * 文件指纹校验（KTD5）：size 优先（廉价）再 md5（重算后比对），
+     * 不一致抛"文件与预检时不一致"（防预检 A 文件、导入 B 文件的补参错位命中）。
+     */
+    private static void verifyFingerprint(MultipartFile file, ExcelImportParams params)
+    {
+        FileFingerprint expected = params.getFileFingerprint();
+        if (expected == null || expected.getMd5() == null || expected.getMd5().trim().isEmpty())
+        {
+            throw new ServiceException("导入参数缺少文件指纹，请重新预检");
+        }
+        if (file.getSize() != expected.getSize() || !md5Hex(readBytes(file)).equals(expected.getMd5()))
+        {
+            throw new ServiceException("文件与预检时不一致，请重新预检");
+        }
+    }
+
+    /**
+     * 构建导入计划（非事务前置段主体）：与预检同一私有方法链重新解析/映射/匹配 →
+     * 阶段二原始状态汇总 → 反向漂移 fail-fast → 补参校验（R26）→
+     * 三源合并 + 补参应用构建逐行写入计划 → 重算编排清单（KTD8）。
+     */
+    private ImportPlan buildImportPlan(Long noteId, Long dwtableId, Long userId, NoteDwtable dwtable,
+            MultipartFile file, ExcelImportParams params)
+    {
+        List<ParsedSheet> sheets = ExcelWorkbookReader.parse(file);
+        SheetSelection selection = ExcelColumnMatcher.selectSheet(sheets, dwtable.getName());
+
+        NoteColumn query = new NoteColumn();
+        query.setDwtableId(dwtableId);
+        List<NoteColumn> columns = noteColumnMapper.selectNoteColumnList(query);
+        ColumnMapping mapping = ExcelColumnMatcher.mapColumns(selection.getHeaders(), columns);
+        List<List<String>> rows = selection.getRows();
+        int rowCount = rows.size();
+
+        // 参与列分类（与预检 analyzeColumns 同口径：非隐藏 且 ∈ 六类基础 + 18/21）
+        List<NoteColumn> participants = new ArrayList<>();
+        Map<String, NoteColumn> columnByName = new HashMap<>();
+        Long nameColumnId = null;
+        for (NoteColumn column : columns)
+        {
+            if (column == null || column.getType() == null)
+            {
+                continue;
+            }
+            if (column.getName() != null && !column.getName().trim().isEmpty())
+            {
+                columnByName.putIfAbsent(column.getName().trim(), column);
+            }
+            // name 派生源列：首个 type=1 列（含隐藏列，与 deriveRecordName 语义一致）
+            if (nameColumnId == null && column.getType() == 1L)
+            {
+                nameColumnId = column.getId();
+            }
+            if (isHidden(column))
+            {
+                continue;
+            }
+            Long type = column.getType();
+            if (BASIC_TYPES.contains(type) || type == TYPE_SINGLE_LINK || type == TYPE_DOUBLE_LINK)
+            {
+                participants.add(column);
+            }
+        }
+
+        Map<NoteColumn, Integer> headerIndexByColumn = new IdentityHashMap<>();
+        for (HeaderEntry entry : mapping.getMappedEntries())
+        {
+            headerIndexByColumn.put(entry.getColumn(), Integer.valueOf(entry.getHeaderIndex()));
+        }
+
+        // ===== 阶段二逐列逐行分析（重新匹配的原始状态，未应用补参——供漂移比对） =====
+        Map<Long, LinkTableContext> contextByTableId = new HashMap<>();
+        Set<String> stage2MissingColumns = new LinkedHashSet<>();
+        Map<String, Set<String>> missNamesByColumn = new LinkedHashMap<>();
+        Map<String, Map<String, Long>> ambiguityByColumn = new LinkedHashMap<>();
+        Map<Long, LinkedHashSet<String>> newOptionsByColumnId = new LinkedHashMap<>();
+        IdentityHashMap<NoteColumn, String[]> excelValuesByColumn = new IdentityHashMap<>();
+        IdentityHashMap<NoteColumn, boolean[]> violationsByColumn = new IdentityHashMap<>();
+        IdentityHashMap<NoteColumn, LinkColumnAnalysis> linkAnalysisByColumn = new IdentityHashMap<>();
+
+        for (NoteColumn column : participants)
+        {
+            String columnName = column.getName() == null ? "" : column.getName().trim();
+            Long type = column.getType();
+            boolean link = type == TYPE_SINGLE_LINK || type == TYPE_DOUBLE_LINK;
+            Integer headerIndex = headerIndexByColumn.get(column);
+            if (headerIndex == null)
+            {
+                // 缺列：基础列有默认值 → 默认填充不算缺参；否则缺参列（R10）
+                if (link || ColumnDefaultValueSupport.read(column) == null)
+                {
+                    stage2MissingColumns.add(columnName);
+                }
+                continue;
+            }
+            if (link)
+            {
+                LinkTableContext context = linkTableContext(column, noteId, userId, contextByTableId);
+                LinkColumnAnalysis analysis = new LinkColumnAnalysis();
+                analysis.context = context;
+                analysis.backFieldId = parseBackFieldId(column);
+                Set<String> missNames = new LinkedHashSet<>();
+                Map<String, Long> ambiguity = new LinkedHashMap<>();
+                for (int r = 0; r < rowCount; r++)
+                {
+                    String text = mapping.cellText(rows.get(r), headerIndex.intValue()).trim();
+                    List<String> names = candidateNames(text, context.getRecordsByName());
+                    analysis.namesPerRow.add(names);
+                    for (String name : names)
+                    {
+                        List<NoteRecord> matched = context.getRecordsByName().get(name);
+                        if (matched != null && !matched.isEmpty())
+                        {
+                            // 同名多条 → 歧义，预选 sort 靠前首条（R14）
+                            if (matched.size() > 1)
+                            {
+                                ambiguity.putIfAbsent(name, Long.valueOf(matched.get(0).getId()));
+                            }
+                        }
+                        else
+                        {
+                            missNames.add(name);
+                        }
+                    }
+                }
+                linkAnalysisByColumn.put(column, analysis);
+                if (!missNames.isEmpty())
+                {
+                    missNamesByColumn.put(columnName, missNames);
+                    stage2MissingColumns.add(columnName);
+                }
+                if (!ambiguity.isEmpty())
+                {
+                    ambiguityByColumn.put(columnName, ambiguity);
+                }
+            }
+            else
+            {
+                String defaultValue = ColumnDefaultValueSupport.read(column);
+                Set<String> options = (type == TYPE_SINGLE_SELECT || type == TYPE_MULTI_SELECT)
+                        ? parseSelectOptions(column) : null;
+                String[] excelValues = new String[rowCount];
+                boolean[] violations = new boolean[rowCount];
+                boolean hasMissing = false;
+                LinkedHashSet<String> newOptions = new LinkedHashSet<>();
+                for (int r = 0; r < rowCount; r++)
+                {
+                    String text = mapping.cellText(rows.get(r), headerIndex.intValue()).trim();
+                    if (!text.isEmpty() && ExcelColumnMatcher.validateCellText(column, text) == null)
+                    {
+                        excelValues[r] = text;
+                        // R19 新选项：单选整格、多选逗号拆分逐个匹配
+                        if (type == TYPE_SINGLE_SELECT && options != null && !options.contains(text))
+                        {
+                            newOptions.add(text);
+                        }
+                        else if (type == TYPE_MULTI_SELECT && options != null)
+                        {
+                            for (String part : text.split(","))
+                            {
+                                String candidate = part.trim();
+                                if (!candidate.isEmpty() && !options.contains(candidate))
+                                {
+                                    newOptions.add(candidate);
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // 空单元格（无默认值才算缺参）或类型违规（一律缺参，走补参链路，R11）
+                        violations[r] = !text.isEmpty();
+                        if (defaultValue == null || !text.isEmpty())
+                        {
+                            hasMissing = true;
+                        }
+                    }
+                }
+                excelValuesByColumn.put(column, excelValues);
+                violationsByColumn.put(column, violations);
+                if (hasMissing)
+                {
+                    stage2MissingColumns.add(columnName);
+                }
+                if (!newOptions.isEmpty())
+                {
+                    newOptionsByColumnId.put(column.getId(), newOptions);
+                }
+            }
+        }
+
+        // ===== 反向漂移 fail-fast（KTD5 全触发集） =====
+        checkDrift(stage2MissingColumns, missNamesByColumn, ambiguityByColumn, params);
+
+        // ===== 补参服务端校验（R26）与预解析 =====
+        validateColumnValues(params, columnByName);
+        RelationResolution relations = resolveRelationSelections(params, columnByName,
+                headerIndexByColumn, contextByTableId, noteId, userId);
+
+        // ===== 终解析：三源合并 + 补参应用，构建逐行写入计划 =====
+        ImportPlan plan = new ImportPlan();
+        plan.noteId = noteId;
+        plan.dwtableId = dwtableId;
+        plan.userId = userId;
+        plan.newOptionsByColumnId = newOptionsByColumnId;
+        for (int r = 0; r < rowCount; r++)
+        {
+            RowPlan rowPlan = new RowPlan();
+            for (NoteColumn column : participants)
+            {
+                Long type = column.getType();
+                boolean link = type == TYPE_SINGLE_LINK || type == TYPE_DOUBLE_LINK;
+                NoteDwtableItem item = new NoteDwtableItem();
+                item.setDwtId(dwtableId);
+                item.setColumnId(column.getId());
+                if (link)
+                {
+                    LinkColumnAnalysis analysis = linkAnalysisByColumn.get(column);
+                    // analysis == null：表头未映射的关联列（关联缺列，漂移检查已保证 ∈ baseline）
+                    List<NoteRecord> resolved = analysis == null ? Collections.<NoteRecord>emptyList()
+                            : resolveLinkRecords(column, analysis.namesPerRow.get(r),
+                                    relations, analysis.context.getRecordsByName());
+                    if (!resolved.isEmpty())
+                    {
+                        // 21/18 列 link 字段经扩展批量 insert 落库（P0：不得被批量 insert 丢弃）
+                        item.setLinkRecordId(joinRecordIds(resolved));
+                        item.setValue(joinRecordNames(resolved));
+                        item.setLinkColumnId(analysis.backFieldId);
+                        if (type == TYPE_DOUBLE_LINK)
+                        {
+                            SymmetricLink symmetric = new SymmetricLink();
+                            symmetric.sourceItem = item;
+                            symmetric.backFieldId = analysis.backFieldId;
+                            symmetric.relatedTableId = analysis.context.getTable().getId();
+                            symmetric.records = resolved;
+                            rowPlan.symmetricLinks.add(symmetric);
+                        }
+                    }
+                    else
+                    {
+                        // R15：空单元格/显式留空/关联缺列 → 空串 value，不建立关联
+                        item.setValue("");
+                    }
+                }
+                else
+                {
+                    item.setValue(resolveBasicValue(column, r,
+                            excelValuesByColumn.get(column), violationsByColumn.get(column),
+                            params.getColumnValues()));
+                }
+                rowPlan.items.add(item);
+            }
+            // name 派生：首个 type=1 列的本行最终值（三源合并后，对齐 SQL 导入 deriveName）
+            rowPlan.name = deriveRowName(nameColumnId, rowPlan.items);
+            plan.rows.add(rowPlan);
+        }
+
+        // ===== 重算编排清单（KTD8） =====
+        buildRecomputeTargets(plan, columns, headerIndexByColumn);
+        return plan;
+    }
+
+    /**
+     * 反向漂移 fail-fast（KTD5 全触发集，任一命中抛"数据已变化，请重新预检"整体拒绝）：
+     * <ol>
+     *   <li>阶段二未命中名 ∉ baseline.missNames（被关联记录被删等）；</li>
+     *   <li>歧义集合与 baseline 不一致（新增同名记录 / 预选变化）；</li>
+     *   <li>缺参列 ∉ baseline.missingColumns（列配置/默认值变化等）；</li>
+     * </ol>
+     * 补参 recordId 已不存在的校验在 {@link #resolveRelationSelections}（查库，KTD4 预解析记录集）。
+     */
+    private static void checkDrift(Set<String> stage2MissingColumns, Map<String, Set<String>> missNamesByColumn,
+            Map<String, Map<String, Long>> ambiguityByColumn, ExcelImportParams params)
+    {
+        ExcelImportParams.PrecheckBaseline baseline = params.getPrecheckBaseline() == null
+                ? new ExcelImportParams.PrecheckBaseline() : params.getPrecheckBaseline();
+
+        // 1. 未命中名漂移
+        Map<String, Set<String>> baselineMissByColumn = new HashMap<>();
+        for (ExcelImportParams.BaselineName miss : baseline.getMissNames())
+        {
+            if (miss == null || miss.getColumnName() == null || miss.getName() == null)
+            {
+                continue;
+            }
+            baselineMissByColumn.computeIfAbsent(miss.getColumnName(), k -> new HashSet<>()).add(miss.getName());
+        }
+        for (Map.Entry<String, Set<String>> entry : missNamesByColumn.entrySet())
+        {
+            Set<String> baselineNames = baselineMissByColumn.get(entry.getKey());
+            for (String name : entry.getValue())
+            {
+                if (baselineNames == null || !baselineNames.contains(name))
+                {
+                    throw driftException("关联列“" + entry.getKey() + "”出现预检之外的未命中名“" + name + "”");
+                }
+            }
+        }
+
+        // 2. 歧义集合漂移（新增同名记录 / 预选变化）
+        Map<String, Map<String, Long>> baselineAmbiguityByColumn = new HashMap<>();
+        for (ExcelImportParams.BaselineAmbiguity ambiguity : baseline.getAmbiguity())
+        {
+            if (ambiguity == null || ambiguity.getColumnName() == null || ambiguity.getName() == null)
+            {
+                continue;
+            }
+            baselineAmbiguityByColumn.computeIfAbsent(ambiguity.getColumnName(), k -> new HashMap<>())
+                    .put(ambiguity.getName(), ambiguity.getPreselectedRecordId());
+        }
+        for (Map.Entry<String, Map<String, Long>> entry : ambiguityByColumn.entrySet())
+        {
+            Map<String, Long> baselineByColumn = baselineAmbiguityByColumn.get(entry.getKey());
+            if (baselineByColumn == null)
+            {
+                baselineByColumn = Collections.emptyMap();
+            }
+            for (Map.Entry<String, Long> ambiguity : entry.getValue().entrySet())
+            {
+                Long baselinePreselect = baselineByColumn.get(ambiguity.getKey());
+                if (baselinePreselect == null)
+                {
+                    throw driftException("关联列“" + entry.getKey() + "”的“" + ambiguity.getKey()
+                            + "”在预检后出现新的同名记录");
+                }
+                if (!baselinePreselect.equals(ambiguity.getValue()))
+                {
+                    throw driftException("关联列“" + entry.getKey() + "”的“" + ambiguity.getKey()
+                            + "”预选记录已变化");
+                }
+            }
+        }
+
+        // 3. 缺参列漂移
+        Set<String> baselineMissingColumns = new HashSet<>();
+        for (String columnName : baseline.getMissingColumns())
+        {
+            if (columnName != null)
+            {
+                baselineMissingColumns.add(columnName);
+            }
+        }
+        for (String columnName : stage2MissingColumns)
+        {
+            if (!baselineMissingColumns.contains(columnName))
+            {
+                throw driftException("列“" + columnName + "”在预检后出现新的缺参");
+            }
+        }
+    }
+
+    private static ServiceException driftException(String detail)
+    {
+        return new ServiceException("数据已变化，请重新预检（" + detail + "）");
+    }
+
+    /**
+     * 补参 columnValues 服务端校验（R26）：列须存在且为六类基础列，
+     * 非空补值过 {@link ExcelColumnMatcher#validateCellText} 同语义类型校验（空串=显式补空）。
+     */
+    private static void validateColumnValues(ExcelImportParams params, Map<String, NoteColumn> columnByName)
+    {
+        for (Map.Entry<String, String> entry : params.getColumnValues().entrySet())
+        {
+            String columnName = entry.getKey() == null ? "" : entry.getKey().trim();
+            String value = entry.getValue();
+            if (value == null || value.trim().isEmpty())
+            {
+                continue;
+            }
+            NoteColumn column = columnByName.get(columnName);
+            if (column == null)
+            {
+                throw new ServiceException("补参列“" + columnName + "”在目标数据表中不存在，请重新预检");
+            }
+            if (column.getType() == null || !BASIC_TYPES.contains(column.getType()))
+            {
+                throw new ServiceException("补参列“" + columnName + "”不是基础列，不支持文本补值，请重新预检");
+            }
+            String violation = ExcelColumnMatcher.validateCellText(column, value);
+            if (violation != null)
+            {
+                throw new ServiceException("列“" + columnName + "”的补参值类型非法：" + violation);
+            }
+        }
+    }
+
+    /**
+     * 补参 relationSelections 服务端校验（R26）与预解析：键=列名+名；
+     * 列须为参与导入（表头映射）的 18/21 关联列；recordId 非空时须属于该列被关联表且存在
+     * （查 KTD4 预解析记录集）——不存在即漂移拒绝。
+     *
+     * @return 列名 → {名 → 选择 / 名 → 选中记录} 双映射（补参优先语义的解析基础）
+     */
+    private RelationResolution resolveRelationSelections(ExcelImportParams params,
+            Map<String, NoteColumn> columnByName, Map<NoteColumn, Integer> headerIndexByColumn,
+            Map<Long, LinkTableContext> contextByTableId, Long noteId, Long userId)
+    {
+        RelationResolution resolution = new RelationResolution();
+        for (ExcelImportParams.RelationSelection selection : params.getRelationSelections())
+        {
+            if (selection == null || selection.getColumnName() == null || selection.getName() == null)
+            {
+                throw new ServiceException("导入参数中的关联补参缺少列名或记录名，请重新预检");
+            }
+            String columnName = selection.getColumnName().trim();
+            NoteColumn column = columnByName.get(columnName);
+            if (column == null || column.getType() == null
+                    || (column.getType() != TYPE_SINGLE_LINK && column.getType() != TYPE_DOUBLE_LINK))
+            {
+                throw new ServiceException("补参选择的关联列“" + columnName + "”不存在或不是关联列，请重新预检");
+            }
+            if (!headerIndexByColumn.containsKey(column))
+            {
+                throw new ServiceException("补参选择的关联列“" + columnName + "”未参与本次导入，请重新预检");
+            }
+            resolution.selectionsByName
+                    .computeIfAbsent(columnName, k -> new LinkedHashMap<String, ExcelImportParams.RelationSelection>())
+                    .put(selection.getName(), selection);
+            if (selection.getRecordId() != null)
+            {
+                // R26：recordId 须属于该列被关联表且存在（查库——KTD4 预解析记录集）
+                LinkTableContext context = linkTableContext(column, noteId, userId, contextByTableId);
+                NoteRecord record = null;
+                for (NoteRecord candidate : context.getSortedRecords())
+                {
+                    if (selection.getRecordId().equals(candidate.getId()))
+                    {
+                        record = candidate;
+                        break;
+                    }
+                }
+                if (record == null)
+                {
+                    throw driftException("关联列“" + columnName + "”补参选择的记录（id="
+                            + selection.getRecordId() + "）不存在或已被删除");
+                }
+                resolution.selectedRecordsByName
+                        .computeIfAbsent(columnName, k -> new LinkedHashMap<String, NoteRecord>())
+                        .put(selection.getName(), record);
+            }
+        }
+        return resolution;
+    }
+
+    /**
+     * 解析一个关联单元格的最终记录序列（补参优先，KTD5）：
+     * <ul>
+     *   <li>补参覆盖（列名+名）以补参为准——recordId=null 显式留空不建立关联（即便重新匹配命中），
+     *       recordId 非空用补选记录；</li>
+     *   <li>未覆盖的键用当下匹配结果（无歧义命中或歧义预选 sort 靠前首条）；</li>
+     *   <li>阶段二未命中且无补参选择：漂移检查已保证 ∈ baseline missNames，
+     *       前端契约要求显式发射 null 选择——缺失即补参不完整，拒绝（禁止静默降级丢关联）。</li>
+     * </ul>
+     * 同单元格按记录 id 去重保序（"张三,张三" 或补选与命中共指同一记录）。
+     */
+    private static List<NoteRecord> resolveLinkRecords(NoteColumn column, List<String> names,
+            RelationResolution relations, Map<String, List<NoteRecord>> recordsByName)
+    {
+        if (names == null || names.isEmpty())
+        {
+            return Collections.emptyList();
+        }
+        String columnName = column.getName() == null ? "" : column.getName().trim();
+        Map<String, ExcelImportParams.RelationSelection> selectionsByName =
+                relations.selectionsByName.getOrDefault(columnName, Collections.emptyMap());
+        Map<String, NoteRecord> selectedRecordsByName =
+                relations.selectedRecordsByName.getOrDefault(columnName, Collections.emptyMap());
+        Map<Long, NoteRecord> resolved = new LinkedHashMap<>();
+        for (String name : names)
+        {
+            ExcelImportParams.RelationSelection selection = selectionsByName.get(name);
+            if (selection != null)
+            {
+                // 补参优先（KTD5）：覆盖的键以补参为准
+                if (selection.getRecordId() != null)
+                {
+                    NoteRecord selected = selectedRecordsByName.get(name);
+                    if (selected != null)
+                    {
+                        resolved.putIfAbsent(selected.getId(), selected);
+                    }
+                }
+                continue;
+            }
+            List<NoteRecord> matched = recordsByName.get(name);
+            if (matched != null && !matched.isEmpty())
+            {
+                resolved.putIfAbsent(matched.get(0).getId(), matched.get(0));
+            }
+            else
+            {
+                throw new ServiceException("关联列“" + columnName + "”的未命中名“" + name
+                        + "”缺少补参选择，请重新预检并完成补参");
+            }
+        }
+        return new ArrayList<>(resolved.values());
+    }
+
+    /**
+     * 基础列单元格三源合并（R21）：Excel 值 &gt; 列默认值 &gt; 用户补参；NULL/空 → 空串。
+     * 类型违规单元格不用 Excel 值也不用默认值（预检将其送入补参弹框，导入以补参为准）；
+     * 复选框显示值映射 true→'0'（勾选）/false→'1'（未勾选）（U2 偏离决定，三源统一映射）。
+     */
+    private static String resolveBasicValue(NoteColumn column, int rowIndex, String[] excelValues,
+            boolean[] violations, Map<String, String> columnValues)
+    {
+        String columnName = column.getName() == null ? "" : column.getName().trim();
+        if (excelValues != null && rowIndex < excelValues.length && excelValues[rowIndex] != null)
+        {
+            return mapCheckboxValue(column, excelValues[rowIndex]);
+        }
+        boolean violation = violations != null && rowIndex < violations.length && violations[rowIndex];
+        if (!violation)
+        {
+            String defaultValue = ColumnDefaultValueSupport.read(column);
+            if (defaultValue != null)
+            {
+                return mapCheckboxValue(column, defaultValue);
+            }
+        }
+        return mapCheckboxValue(column, columnValues.get(columnName));
+    }
+
+    /**
+     * 复选框(7)显示值映射为 item.value 消费值：true→'0'（勾选）、false→'1'（未勾选）；
+     * 其余类型原样返回；null → 空串（R21）。
+     */
+    private static String mapCheckboxValue(NoteColumn column, String value)
+    {
+        if (value == null)
+        {
+            return "";
+        }
+        if (column.getType() != null && column.getType() == TYPE_CHECKBOX)
+        {
+            String trimmed = value.trim();
+            if ("true".equals(trimmed))
+            {
+                return "0";
+            }
+            if ("false".equals(trimmed))
+            {
+                return "1";
+            }
+        }
+        return value;
+    }
+
+    /**
+     * 派生行 name：首个 type=1 列在本行 items 中的最终值（无匹配/无该列返回空串），
+     * 与 SQL 导入 deriveName / deriveRecordName 语义一致。
+     */
+    private static String deriveRowName(Long nameColumnId, List<NoteDwtableItem> items)
+    {
+        if (nameColumnId == null)
+        {
+            return "";
+        }
+        for (NoteDwtableItem item : items)
+        {
+            if (nameColumnId.equals(item.getColumnId()))
+            {
+                return item.getValue() == null ? "" : item.getValue();
+            }
+        }
+        return "";
+    }
+
+    private static String joinRecordIds(List<NoteRecord> records)
+    {
+        StringBuilder builder = new StringBuilder();
+        for (int i = 0; i < records.size(); i++)
+        {
+            if (i > 0)
+            {
+                builder.append(",");
+            }
+            builder.append(records.get(i).getId());
+        }
+        return builder.toString();
+    }
+
+    private static String joinRecordNames(List<NoteRecord> records)
+    {
+        StringBuilder builder = new StringBuilder();
+        for (int i = 0; i < records.size(); i++)
+        {
+            if (i > 0)
+            {
+                builder.append(",");
+            }
+            builder.append(records.get(i).getName() == null ? "" : records.get(i).getName());
+        }
+        return builder.toString();
+    }
+
+    /**
+     * 构建重算编排清单（KTD8）：
+     * <ol>
+     *   <li>目标表全部 lookup(26) 列（两步级联，含隐藏列——隐藏只影响显示不影响存储值）；</li>
+     *   <li>目标表中 columnA/B 直接引用本次导入（已映射）18/21 列的集合运算列；</li>
+     *   <li>每个对称写入涉及的（源 21 列 C，被关联表 B，配对列 P）：
+     *       B 表中锚定列（double_link_column_id）指向 C 的 lookup 列（读取被修改的配对 P items）
+     *       与 columnA/B 直接引用 P 的集合运算列。</li>
+     * </ol>
+     */
+    private void buildRecomputeTargets(ImportPlan plan, List<NoteColumn> columns,
+            Map<NoteColumn, Integer> headerIndexByColumn)
+    {
+        Set<Long> importedLinkColumnIds = new HashSet<>();
+        for (NoteColumn column : columns)
+        {
+            if (column == null || column.getType() == null || isHidden(column))
+            {
+                continue;
+            }
+            Long type = column.getType();
+            if ((type == TYPE_SINGLE_LINK || type == TYPE_DOUBLE_LINK)
+                    && headerIndexByColumn.containsKey(column))
+            {
+                importedLinkColumnIds.add(column.getId());
+            }
+        }
+        for (NoteColumn column : columns)
+        {
+            if (column == null || column.getType() == null)
+            {
+                continue;
+            }
+            if (column.getType() == TYPE_LOOKUP)
+            {
+                plan.targetLookupColumns.add(column);
+            }
+            else if (column.getType() == TYPE_SET_OPERATION
+                    && (referencesColumnId(column, importedLinkColumnIds)))
+            {
+                plan.targetSetColumns.add(column);
+            }
+        }
+
+        Map<Long, List<NoteColumn>> relatedColumnsByTableId = new HashMap<>();
+        Set<Long> processedSourceColumns = new HashSet<>();
+        for (RowPlan row : plan.rows)
+        {
+            for (SymmetricLink link : row.symmetricLinks)
+            {
+                Long sourceColumnId = link.sourceItem.getColumnId();
+                if (!processedSourceColumns.add(sourceColumnId))
+                {
+                    continue;
+                }
+                List<NoteColumn> relatedColumns = relatedColumnsByTableId
+                        .computeIfAbsent(link.relatedTableId, tableId -> {
+                            NoteColumn query = new NoteColumn();
+                            query.setDwtableId(tableId);
+                            return noteColumnMapper.selectNoteColumnList(query);
+                        });
+                SymmetricTarget target = new SymmetricTarget();
+                String sourceColumnIdStr = String.valueOf(sourceColumnId);
+                for (NoteColumn related : relatedColumns)
+                {
+                    if (related == null || related.getType() == null)
+                    {
+                        continue;
+                    }
+                    if (related.getType() == TYPE_LOOKUP)
+                    {
+                        // B 表锚定列指向源列 C：该 lookup 读取被对称写入修改的配对 P items
+                        String anchor = parsePropertySafe(related).getString("double_link_column_id");
+                        if (anchor != null && sourceColumnIdStr.equals(anchor.trim()))
+                        {
+                            target.relatedLookups.add(related);
+                        }
+                    }
+                    else if (related.getType() == TYPE_SET_OPERATION)
+                    {
+                        // B 表 columnA/B 直接引用配对列 P（读取配对 P items）
+                        if (link.backFieldId != null && referencesColumnId(related,
+                                Collections.singleton(link.backFieldId)))
+                        {
+                            target.relatedSetColumns.add(related);
+                        }
+                    }
+                }
+                plan.symmetricTargets.add(target);
+            }
+        }
+    }
+
+    /**
+     * 集合运算列的 columnAId/columnBId 是否引用指定列 id 集合中的任一列。
+     */
+    private static boolean referencesColumnId(NoteColumn setColumn, Set<Long> columnIds)
+    {
+        JSONObject prop = parsePropertySafe(setColumn);
+        return containsColumnId(prop.getString("columnAId"), columnIds)
+                || containsColumnId(prop.getString("columnBId"), columnIds);
+    }
+
+    private static boolean containsColumnId(String value, Set<Long> columnIds)
+    {
+        if (value == null || value.trim().isEmpty())
+        {
+            return false;
+        }
+        try
+        {
+            return columnIds.contains(Long.valueOf(value.trim()));
+        }
+        catch (NumberFormatException e)
+        {
+            return false;
+        }
+    }
+
+    /**
+     * 事务写入段（R22，经自注入代理进入）：逐行 NoteRecord insert（sort=maxSort+1 递增、
+     * name 已派生、自增 id 回填）→ items 累积 ≥500 flush → 选项追加（FOR UPDATE）→
+     * items 全量最终 flush（零缓冲不变量）→ 双链对称写入 → 重算编排 → 返回 recordCount。
+     * 任一步骤抛 {@link ServiceException} 整体回滚（含被关联表存量 item 修改与选项追加）。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public int executeImport(ImportPlan plan)
+    {
+        int recordCount = 0;
+        if (!plan.rows.isEmpty())
+        {
+            Long maxSort = noteRecordMapper.selectMaxSortByDwtableId(plan.dwtableId);
+            long sort = (maxSort == null ? 0L : maxSort.longValue()) + 1L;
+            List<NoteDwtableItem> batch = new ArrayList<>(BATCH_LIMIT);
+            for (RowPlan row : plan.rows)
+            {
+                NoteRecord record = new NoteRecord();
+                record.setDwtableId(plan.dwtableId);
+                record.setSort(Long.valueOf(sort++));
+                record.setName(row.name);
+                // viewId/property/linkRecordId/linkName 保持 null（对齐 SQL 导入）
+                noteRecordMapper.insertNoteRecord(record);
+                row.record = record;
+                for (NoteDwtableItem item : row.items)
+                {
+                    item.setRecordId(record.getId());
+                }
+                batch.addAll(row.items);
+                recordCount++;
+                if (batch.size() >= BATCH_LIMIT)
+                {
+                    noteDwtableItemMapper.insertNoteDwtableItems(batch);
+                    // 重新分配而非 clear：已传递给 mapper 的列表不再原地变更
+                    batch = new ArrayList<>(BATCH_LIMIT);
+                }
+            }
+            // 单选/多选未知选项追加（R19，FOR UPDATE 锁定读改写，每列上限 100）
+            appendNewOptions(plan);
+            // 零缓冲不变量：全部本表 item 落库有自增 id（对称写入的 linkItemId 须引用之）
+            if (!batch.isEmpty())
+            {
+                noteDwtableItemMapper.insertNoteDwtableItems(batch);
+            }
+            executeSymmetricWrite(plan);
+            executeRecompute(plan);
+        }
+        log.info("[EXCEL-IMPORT] 导入完成 noteId={}, dwtableId={}, userId={}, recordCount={}, "
+                        + "newOptionColumns={}, symmetricTargets={}",
+                plan.noteId, plan.dwtableId, plan.userId, recordCount,
+                plan.newOptionsByColumnId.size(), plan.symmetricTargets.size());
+        return recordCount;
+    }
+
+    /**
+     * 单选/多选未知选项追加（R19）：读列 property（FOR UPDATE 锁定）→ select 逗号字符串
+     * 去重追加新选项 → 直更 property（保留 select 之外的其他键，KTD6 保留不变量）；
+     * 每列每次导入新选项上限 {@value #NEW_OPTION_LIMIT}，超限抛 {@link ServiceException} 中止回滚。
+     */
+    private void appendNewOptions(ImportPlan plan)
+    {
+        for (Map.Entry<Long, LinkedHashSet<String>> entry : plan.newOptionsByColumnId.entrySet())
+        {
+            LinkedHashSet<String> candidates = entry.getValue();
+            if (candidates.isEmpty())
+            {
+                continue;
+            }
+            NoteColumn locked = noteColumnMapper.selectNoteColumnByIdForUpdate(entry.getKey());
+            if (locked == null)
+            {
+                throw driftException("选项列（id=" + entry.getKey() + "）已被删除");
+            }
+            JSONObject prop = parsePropertySafe(locked);
+            String select = prop.getString(ColumnDefaultValueSupport.SELECT_KEY);
+            Set<String> existing = new LinkedHashSet<>();
+            if (select != null && !select.trim().isEmpty())
+            {
+                for (String part : select.replace("，", ",").split(","))
+                {
+                    String option = part.trim();
+                    if (!option.isEmpty())
+                    {
+                        existing.add(option);
+                    }
+                }
+            }
+            List<String> toAppend = new ArrayList<>();
+            for (String candidate : candidates)
+            {
+                if (!existing.contains(candidate) && !toAppend.contains(candidate))
+                {
+                    toAppend.add(candidate);
+                }
+            }
+            if (toAppend.isEmpty())
+            {
+                continue;
+            }
+            if (toAppend.size() > NEW_OPTION_LIMIT)
+            {
+                throw new ServiceException("列“" + (locked.getName() == null ? "" : locked.getName())
+                        + "”本次导入将新增选项 " + toAppend.size() + " 个，超过上限 " + NEW_OPTION_LIMIT
+                        + "，请先整理选项后重试");
+            }
+            String merged = (select == null || select.trim().isEmpty())
+                    ? String.join(",", toAppend) : select + "," + String.join(",", toAppend);
+            prop.put(ColumnDefaultValueSupport.SELECT_KEY, merged);
+            locked.setProperty(prop.toJSONString());
+            noteColumnMapper.updateNoteColumn(locked);
+        }
+    }
+
+    /**
+     * 双链(21)对称写入（KTD3，独立实现不复用 updateNoteRecord）：
+     * <ul>
+     *   <li>按配对 item（recordId+columnId）聚合——同配对 item 的全部追加在内存合并后单次落库；</li>
+     *   <li>落库前 SELECT ... FOR UPDATE 锁定涉及行；锁内复核行存在性，不存在则 upsert 创建
+     *       （KTD3 修正②：UI 路径 null-NPE 缺陷不复刻）；</li>
+     *   <li>配对 item 四字段：linkRecordId 追加新记录 id、linkItemId 追加本表新 item id、
+     *       value 追加新记录 name（去重键=recordId，KTD3 修正①：同名新记录都追加各自 name，
+     *       保持 value 与 linkRecordId 等长）、linkColumnId=源列 id；</li>
+     *   <li>本表源 item 回写 linkRecordId（命中记录 id 列表，批量 insert 已带）/
+     *       linkItemId（配对 item id 列表，与 linkRecordId 顺序对齐）/linkColumnId（back_field_id）/
+     *       value（命中记录 name 列表，批量 insert 已带）；</li>
+     *   <li>序列化一律 String.join——绝不用 List.toString().replace。</li>
+     * </ul>
+     */
+    private void executeSymmetricWrite(ImportPlan plan)
+    {
+        if (plan.rows.isEmpty())
+        {
+            return;
+        }
+        // 聚合：配对 item 键（recordId + columnId）→ 追加明细（保持行/列/记录顺序，确定性加锁顺序）
+        Map<Long, Map<Long, PairedGroup>> groupsByRecordId = new LinkedHashMap<>();
+        for (RowPlan row : plan.rows)
+        {
+            for (SymmetricLink link : row.symmetricLinks)
+            {
+                for (NoteRecord target : link.records)
+                {
+                    groupsByRecordId
+                            .computeIfAbsent(target.getId(), k -> new LinkedHashMap<Long, PairedGroup>())
+                            .computeIfAbsent(link.backFieldId, k -> new PairedGroup(link.relatedTableId))
+                            .appends.add(new SymmetricAppend(row.record, link.sourceItem));
+                }
+            }
+        }
+        // 配对 item 结果：(recordId, columnId) → 落库后的配对 item（含自增 id），供源 item 回写 linkItemId
+        Map<Long, Map<Long, NoteDwtableItem>> pairedByRecordAndColumn = new HashMap<>();
+        for (Map.Entry<Long, Map<Long, PairedGroup>> byRecord : groupsByRecordId.entrySet())
+        {
+            for (Map.Entry<Long, PairedGroup> byColumn : byRecord.getValue().entrySet())
+            {
+                Long targetRecordId = byRecord.getKey();
+                Long pairedColumnId = byColumn.getKey();
+                PairedGroup group = byColumn.getValue();
+                for (SymmetricAppend append : group.appends)
+                {
+                    if (append.sourceItem.getId() == null)
+                    {
+                        // 零缓冲不变量防御：批量 insert 未回填自增 id 时宁可中止不可写坏数据
+                        throw new ServiceException("导入失败：单元格数据落库后未取得自增 id，无法完成关联写入");
+                    }
+                }
+                // KTD3：update 前 SELECT ... FOR UPDATE 锁定；锁内复核存在性，不存在则 upsert 创建
+                NoteDwtableItem query = new NoteDwtableItem();
+                query.setRecordId(targetRecordId);
+                query.setColumnId(pairedColumnId);
+                NoteDwtableItem paired = noteDwtableItemMapper.selectNoteDwtableItemByRecordAndColumnForUpdate(query);
+                boolean created = paired == null;
+                if (created)
+                {
+                    paired = new NoteDwtableItem();
+                    paired.setDwtId(group.relatedTableId);
+                    paired.setRecordId(targetRecordId);
+                    paired.setColumnId(pairedColumnId);
+                }
+                // 内存合并全部追加（同配对 item 单次落库，无覆盖丢失）
+                Set<String> linkRecordIds = splitCsvToSet(paired.getLinkRecordId());
+                List<String> linkItemIds = splitCsvToList(paired.getLinkItemId());
+                List<String> values = splitCsvToList(paired.getValue());
+                for (SymmetricAppend append : group.appends)
+                {
+                    String sourceRecordId = String.valueOf(append.sourceRecord.getId());
+                    // value 追加去重键=recordId（KTD3 修正①）：r 追加时才追加其 name
+                    if (linkRecordIds.add(sourceRecordId))
+                    {
+                        values.add(append.sourceRecord.getName() == null ? "" : append.sourceRecord.getName());
+                    }
+                    String sourceItemId = String.valueOf(append.sourceItem.getId());
+                    if (!linkItemIds.contains(sourceItemId))
+                    {
+                        linkItemIds.add(sourceItemId);
+                    }
+                    paired.setLinkColumnId(append.sourceItem.getColumnId());
+                }
+                paired.setLinkRecordId(String.join(",", linkRecordIds));
+                paired.setLinkItemId(String.join(",", linkItemIds));
+                paired.setValue(String.join(",", values));
+                if (created)
+                {
+                    noteDwtableItemMapper.insertNoteDwtableItem(paired);
+                }
+                else
+                {
+                    noteDwtableItemMapper.updateNoteDwtableItem(paired);
+                }
+                pairedByRecordAndColumn
+                        .computeIfAbsent(targetRecordId, k -> new HashMap<Long, NoteDwtableItem>())
+                        .put(pairedColumnId, paired);
+            }
+        }
+        // 本表源 item 回写 linkItemId（与 linkRecordId 顺序对齐，单次 update）
+        for (RowPlan row : plan.rows)
+        {
+            for (SymmetricLink link : row.symmetricLinks)
+            {
+                List<String> pairedItemIds = new ArrayList<>(link.records.size());
+                for (NoteRecord target : link.records)
+                {
+                    NoteDwtableItem paired = pairedByRecordAndColumn.get(target.getId()).get(link.backFieldId);
+                    pairedItemIds.add(String.valueOf(paired.getId()));
+                }
+                link.sourceItem.setLinkItemId(String.join(",", pairedItemIds));
+                noteDwtableItemMapper.updateNoteDwtableItem(link.sourceItem);
+            }
+        }
+    }
+
+    /**
+     * 重算编排（KTD8，先 flush 后调用，经 {@link INoteRecordService} 接口——Spring 代理
+     * 加入导入事务）：目标表全部 lookup 列两步级联 → 目标表直接引用导入 18/21 列的集合运算列 →
+     * 对称写入涉及的被关联表以配对列为源的 lookup 与集合运算列；按列 id 去重避免重复重算。
+     */
+    private void executeRecompute(ImportPlan plan)
+    {
+        Set<Long> recomputedLookups = new HashSet<>();
+        Set<Long> recomputedSetColumns = new HashSet<>();
+        for (NoteColumn lookup : plan.targetLookupColumns)
+        {
+            if (!recomputedLookups.add(lookup.getId()))
+            {
+                continue;
+            }
+            noteRecordService.recomputeLookupColumnValues(lookup);
+            noteRecordService.recomputeSetOperationsForLookup(lookup);
+        }
+        for (NoteColumn setColumn : plan.targetSetColumns)
+        {
+            if (!recomputedSetColumns.add(setColumn.getId()))
+            {
+                continue;
+            }
+            noteRecordService.recomputeSetOperationColumn(setColumn);
+        }
+        for (SymmetricTarget target : plan.symmetricTargets)
+        {
+            for (NoteColumn lookup : target.relatedLookups)
+            {
+                if (!recomputedLookups.add(lookup.getId()))
+                {
+                    continue;
+                }
+                noteRecordService.recomputeLookupColumnValues(lookup);
+                noteRecordService.recomputeSetOperationsForLookup(lookup);
+            }
+            for (NoteColumn setColumn : target.relatedSetColumns)
+            {
+                if (!recomputedSetColumns.add(setColumn.getId()))
+                {
+                    continue;
+                }
+                noteRecordService.recomputeSetOperationColumn(setColumn);
+            }
+        }
+    }
+
+    // ==================== U5 内部结构 ====================
+
+    /** 导入计划（非事务前置段产物，写入段消费） */
+    static final class ImportPlan
+    {
+        Long noteId;
+
+        Long dwtableId;
+
+        Long userId;
+
+        /** 逐行写入计划（与数据行等长同序） */
+        final List<RowPlan> rows = new ArrayList<>();
+
+        /** 列 id → 有序去重新选项（R19，事务段 FOR UPDATE 追加） */
+        Map<Long, LinkedHashSet<String>> newOptionsByColumnId = Collections.emptyMap();
+
+        /** 目标表全部 lookup(26) 列（KTD8 两步级联） */
+        final List<NoteColumn> targetLookupColumns = new ArrayList<>();
+
+        /** 目标表中 columnA/B 直接引用导入 18/21 列的集合运算列（KTD8） */
+        final List<NoteColumn> targetSetColumns = new ArrayList<>();
+
+        /** 对称写入涉及的（源 21 列 → 被关联表派生列）编排清单（KTD8） */
+        final List<SymmetricTarget> symmetricTargets = new ArrayList<>();
+    }
+
+    /** 单行写入计划 */
+    private static final class RowPlan
+    {
+        /** 本行 NoteRecord（写入段 insert 后回填，含自增 id 与 name） */
+        NoteRecord record;
+
+        /** 派生 name（首个 type=1 列最终值） */
+        String name;
+
+        /** 全部参与列的 item（批量 insert 用，写入段回填 recordId） */
+        final List<NoteDwtableItem> items = new ArrayList<>();
+
+        /** 21 列的对称写入明细 */
+        final List<SymmetricLink> symmetricLinks = new ArrayList<>();
+    }
+
+    /** 单个 21 列在一行上的对称写入明细 */
+    private static final class SymmetricLink
+    {
+        /** 源 item（(本行记录, 源 21 列)，批量 insert 后有自增 id；columnId=源列 C） */
+        NoteDwtableItem sourceItem;
+
+        /** 配对列 P（源列 back_field_id，被关联表 B 上） */
+        Long backFieldId;
+
+        /** 被关联表 B id（配对 item 不存在时 upsert 的 dwtId） */
+        Long relatedTableId;
+
+        /** 命中/补选的被关联记录（有序去重） */
+        List<NoteRecord> records;
+    }
+
+    /** 一次对配对 item 的追加（源记录 + 源 item） */
+    private static final class SymmetricAppend
+    {
+        final NoteRecord sourceRecord;
+
+        final NoteDwtableItem sourceItem;
+
+        SymmetricAppend(NoteRecord sourceRecord, NoteDwtableItem sourceItem)
+        {
+            this.sourceRecord = sourceRecord;
+            this.sourceItem = sourceItem;
+        }
+    }
+
+    /** 配对 item 聚合组（同一 (recordId, columnId) 的全部追加） */
+    private static final class PairedGroup
+    {
+        final Long relatedTableId;
+
+        final List<SymmetricAppend> appends = new ArrayList<>();
+
+        PairedGroup(Long relatedTableId)
+        {
+            this.relatedTableId = relatedTableId;
+        }
+    }
+
+    /** 对称写入涉及的被关联表派生列清单（KTD8 编排条目） */
+    private static final class SymmetricTarget
+    {
+        /** B 表中锚定列（double_link_column_id）指向源 21 列 C 的 lookup 列 */
+        final List<NoteColumn> relatedLookups = new ArrayList<>();
+
+        /** B 表中 columnA/B 直接引用配对列 P 的集合运算列 */
+        final List<NoteColumn> relatedSetColumns = new ArrayList<>();
+    }
+
+    /** 关联列的阶段二分析产物 */
+    private static final class LinkColumnAnalysis
+    {
+        /** 被关联表上下文（R23 已校验 + KTD4 预解析） */
+        LinkTableContext context;
+
+        /** 配对列（21 必填 / 18 可空） */
+        Long backFieldId;
+
+        /** 逐行名字序列（KTD4 整串优先拆分） */
+        final List<List<String>> namesPerRow = new ArrayList<>();
+    }
+
+    /** 补参 relationSelections 的解析产物（键=列名 trim） */
+    private static final class RelationResolution
+    {
+        /** 列名 → 名 → 用户选择（含显式 recordId=null） */
+        final Map<String, Map<String, ExcelImportParams.RelationSelection>> selectionsByName = new LinkedHashMap<>();
+
+        /** 列名 → 名 → 选中记录（仅 recordId 非空且查库存在） */
+        final Map<String, Map<String, NoteRecord>> selectedRecordsByName = new LinkedHashMap<>();
+    }
+
+    /**
+     * 逗号串拆为去重保序集合（linkRecordId 追加语义：contains 去重）。
+     */
+    private static Set<String> splitCsvToSet(String value)
+    {
+        Set<String> result = new LinkedHashSet<>();
+        if (value != null && !value.isEmpty())
+        {
+            for (String part : value.split(","))
+            {
+                result.add(part);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * 逗号串拆为有序列表（value/linkItemId 保序追加语义；空串 → 空列表）。
+     */
+    private static List<String> splitCsvToList(String value)
+    {
+        List<String> result = new ArrayList<>();
+        if (value != null && !value.isEmpty())
+        {
+            result.addAll(Arrays.asList(value.split(",")));
+        }
+        return result;
     }
 }
