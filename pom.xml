@@ -25,10 +25,11 @@
         <pagehelper.boot.version>1.4.6</pagehelper.boot.version>
         <fastjson.version>2.0.23</fastjson.version>
         <oshi.version>6.4.0</oshi.version>
-        <commons.io.version>2.11.0</commons.io.version>
+        <commons.io.version>2.18.0</commons.io.version>
         <commons.fileupload.version>1.4</commons.fileupload.version>
         <commons.collections.version>3.2.2</commons.collections.version>
-        <poi.version>4.1.2</poi.version>
+        <poi.version>5.4.0</poi.version>
+        <log4j2.version>2.24.3</log4j2.version>
         <velocity.version>2.3</velocity.version>
         <jwt.version>0.9.1</jwt.version>
     </properties>
@@ -106,6 +107,18 @@
                 <groupId>org.apache.poi</groupId>
                 <artifactId>poi-ooxml</artifactId>
                 <version>${poi.version}</version>
+            </dependency>
+
+            <!-- log4j2（POI 5.x 依赖 log4j-api，显式对齐版本并桥接到 SLF4J/logback） -->
+            <dependency>
+                <groupId>org.apache.logging.log4j</groupId>
+                <artifactId>log4j-api</artifactId>
+                <version>${log4j2.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.logging.log4j</groupId>
+                <artifactId>log4j-to-slf4j</artifactId>
+                <version>${log4j2.version}</version>
             </dependency>
 
             <!-- velocity代码生成使用模板 -->

@@ -90,6 +90,12 @@
             <artifactId>poi-ooxml</artifactId>
         </dependency>
 
+        <!-- POI 5.x 使用 log4j-api 记录日志，桥接到 SLF4J（项目日志实现为 logback） -->
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-to-slf4j</artifactId>
+        </dependency>
+
         <!-- yml解析器 -->
         <dependency>
             <groupId>org.yaml</groupId>
