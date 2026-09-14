@@ -24,7 +24,7 @@
       <input
         ref="importFileInput"
         type="file"
-        accept=".sql,.zip"
+        accept=".sql,.zip,.xlsx"
         style="display: none"
         @change="importState.onFileChosen"
       />
@@ -208,6 +208,17 @@
       </div>
     </a-modal>
 
+    <!-- Excel 导入预检弹框（补参模式/只读确认模式，U6） -->
+    <ImportPrecheckModal
+      v-if="excelImport.precheck"
+      v-model:open="excelImport.modalOpen"
+      :precheck="excelImport.precheck"
+      :file="excelImport.file"
+      :noteId="excelImport.noteId"
+      :dwtableId="excelImport.dwtableId"
+      @success="excelImport.onImportSuccess"
+    />
+
     <!-- 多行文本选词关联弹出框 -->
     <a-modal v-model:open="textLink.visible" title="文本关联" width="800px" @ok="textLink.confirmLink" :footer="null">
       <div class="text-link-content-wrapper">
@@ -265,11 +276,13 @@ import { useRoute, useRouter } from 'vue-router';
 import { useStore } from '../../stores/table';
 import { useFetch, useSortable } from '../../hooks';
 import { exportDwtable, type ExportFormat } from '@/api/export';
-import { importDwtable } from '@/api/import';
+import { importDwtable, precheckExcelImport, importExcelData } from '@/api/import';
+import type { ExcelImportPrecheckResult, ExcelImportParamsPayload } from '@/api/import';
 import Related from './related/index.vue';
 import Form from './form/index.vue';
 import { clone } from 'xe-utils';
 import Edit from './field/edit.vue';
+import ImportPrecheckModal from './ImportPrecheckModal.vue';
 import { FieldEnum } from "@/enum";
 import { safeParseJson, Bus } from "@/utils";
 import type { LocatePayload } from "@/utils";
@@ -287,7 +300,7 @@ export interface TableData {
 export default defineComponent({
   name: "np-base-table",
   props: ['height'],
-  components: { Toolbar, Related, Form, Edit, Editor },
+  components: { Toolbar, Related, Form, Edit, Editor, ImportPrecheckModal },
   setup(props, ctx) {
     const store: any = useStore();
     const route = useRoute();
@@ -622,8 +635,46 @@ export default defineComponent({
         }
       },
     });
-    // 多维表格导入:隐藏 file input + 导入状态(R2 accept .sql/.zip,无中间确认弹窗)
+    // 多维表格导入:隐藏 file input + 导入状态(R1 accept .sql/.zip/.xlsx,按扩展名分流:
+    // .sql/.zip 走既有 SQL 导入路径不动;.xlsx 走两阶段预检→补参→导入,U6)
     const importFileInput = ref<HTMLInputElement | null>(null);
+    // Excel 两阶段导入状态:预检结果 + 弹框开关 + 阶段二上下文(弹框组件消费)
+    const excelImport = reactive({
+      modalOpen: false,
+      precheck: null as ExcelImportPrecheckResult | null,
+      file: null as File | null,
+      noteId: null as string | number | null,
+      dwtableId: null as string | number | null,
+      // 弹框确认导入成功后:清空预检上下文并刷新表格(由 ImportPrecheckModal @success 触发)
+      onImportSuccess() {
+        excelImport.modalOpen = false;
+        excelImport.precheck = null;
+        excelImport.file = null;
+        table.get.list();
+      },
+    });
+    // 完全干净分支的直连导入(无弹框,R13):params 只含 fileFingerprint + 空 baseline/selections
+    const buildCleanParams = (precheck: ExcelImportPrecheckResult): ExcelImportParamsPayload => ({
+      fileFingerprint: precheck.fileFingerprint,
+      precheckBaseline: {
+        missingColumns: (precheck.missingParams || []).map((m) => m.columnName),
+        missNames: [],
+        ambiguity: (precheck.ambiguityItems || []).map((a) => ({
+          columnName: a.columnName,
+          name: a.name,
+          preselectedRecordId: a.preselectedRecordId ?? null,
+        })),
+      },
+      columnValues: {},
+      relationSelections: [],
+    });
+    // 是否仅有影响面信息(无缺参无歧义,R13 轻量确认分支的判据)
+    const hasImpactInfo = (p: ExcelImportPrecheckResult): boolean =>
+      (p.defaultValueFills?.length || 0) > 0
+      || (p.newOptions?.length || 0) > 0
+      || (p.symmetricWriteImpact?.length || 0) > 0
+      || (p.ignoredSheets?.length || 0) > 0
+      || (p.skippedHeaders?.length || 0) > 0;
     const importState = reactive({
       loading: false,
       pick() {
@@ -639,8 +690,9 @@ export default defineComponent({
         input.value = '';
         if (!file) return;
         const name = file.name.toLowerCase();
-        if (!name.endsWith('.sql') && !name.endsWith('.zip')) {
-          return message.error('不支持的文件类型，仅支持 .sql / .zip');
+        const isExcel = name.endsWith('.xlsx');
+        if (!isExcel && !name.endsWith('.sql') && !name.endsWith('.zip')) {
+          return message.error('不支持的文件类型，仅支持 .sql / .zip / .xlsx');
         }
         // 与后端 multipart max-file-size(10MB) 对齐的前端预检，避免超限后才收到全局异常
         if (file.size > 10 * 1024 * 1024) {
@@ -649,6 +701,9 @@ export default defineComponent({
         const noteId = tableNoteId.value;
         if (!noteId) {
           return message.error('未找到当前多维表格归属笔记');
+        }
+        if (isExcel) {
+          return importState.runExcelImport(noteId, file);
         }
         importState.loading = true;
         const hide = message.loading({ content: '正在导入，请稍候…', duration: 0 });
@@ -660,6 +715,41 @@ export default defineComponent({
         } catch (e: any) {
           hide();
           Modal.error({ title: '导入失败', content: e?.message || '导入失败，请稍后重试' });
+        } finally {
+          importState.loading = false;
+        }
+      },
+      // .xlsx 两阶段流程:预检 → 三分流(干净直连/补参弹框/轻量确认),R13
+      async runExcelImport(noteId: string | number, file: File) {
+        importState.loading = true;
+        const hide = message.loading({ content: '正在预检，请稍候…', duration: 0 });
+        try {
+          const precheck = await precheckExcelImport({
+            noteId,
+            dwtableId: datasheetID.value,
+            file,
+          });
+          if (!precheck.hasBlockingIssues && !hasImpactInfo(precheck)) {
+            // 完全干净:直接导入(params 只含指纹 + 空 baseline/selections,按契约发射)
+            const recordCount = await importExcelData(
+              { noteId, dwtableId: datasheetID.value, file },
+              buildCleanParams(precheck),
+            );
+            hide();
+            Modal.success({ title: '导入成功', content: `成功导入 ${recordCount} 条记录` });
+            table.get.list();
+          } else {
+            // 补参模式(缺参/歧义)或只读确认模式(仅影响面):一个组件两种模式
+            hide();
+            excelImport.precheck = precheck;
+            excelImport.file = file;
+            excelImport.noteId = noteId;
+            excelImport.dwtableId = datasheetID.value;
+            excelImport.modalOpen = true;
+          }
+        } catch (e: any) {
+          hide();
+          Modal.error({ title: e?.message?.includes('预检') ? '预检失败' : '导入失败', content: e?.message || '导入失败，请稍后重试' });
         } finally {
           importState.loading = false;
         }
@@ -1367,6 +1457,7 @@ export default defineComponent({
       notePicker,
       exportModal,
       importState,
+      excelImport,
       importFileInput,
       exportDisabled,
       openNotePicker,
