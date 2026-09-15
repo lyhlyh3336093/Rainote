@@ -80,15 +80,24 @@ class ExcelWorkbookReaderTest
     }
 
     /**
-     * spy 真实 MockMultipartFile，捕获 transferTo 落盘的临时文件路径（供清理断言），其余行为不变。
+     * spy 真实 MockMultipartFile，在 getInputStream 被调用时（createTempFile 已执行）
+     * 扫描临时目录捕获 excel-import- 前缀的最新临时文件路径（供清理断言），其余行为不变。
+     * 注：实现已从 transferTo 改为 Files.copy(getInputStream)——Windows 真实上传时
+     * transferTo 对已存在目标失败（手测发现的 bug），spy 口径随之调整。
      */
     private MultipartFile spyCapturingTempPath(byte[] bytes, AtomicReference<Path> tempPath) throws IOException
     {
         MockMultipartFile spyFile = spy(multipartFileOf("test.xlsx", bytes));
         doAnswer(invocation -> {
-            tempPath.set(((File) invocation.getArgument(0)).toPath());
-            return invocation.callRealMethod();
-        }).when(spyFile).transferTo(any(File.class));
+            Object stream = invocation.callRealMethod();
+            try (java.util.stream.Stream<Path> files = Files.list(java.nio.file.Paths.get(System.getProperty("java.io.tmpdir"))))
+            {
+                files.filter(p -> p.getFileName().toString().startsWith("excel-import-"))
+                        .max(java.util.Comparator.comparingLong(p -> p.toFile().lastModified()))
+                        .ifPresent(tempPath::set);
+            }
+            return stream;
+        }).when(spyFile).getInputStream();
         return spyFile;
     }
 
