@@ -19,6 +19,7 @@ import java.util.TreeMap;
 import com.ruoyi.common.exception.ServiceException;
 import com.ruoyi.system.domain.NoteColumn;
 import com.ruoyi.system.service.impl.ExcelWorkbookReader.ParsedSheet;
+import com.ruoyi.system.service.impl.ExcelWorkbookReader.RowData;
 
 /**
  * Excel 导入的 sheet 选定与表头→目标列映射工具（U3，R2/R5/R6/R11）。
@@ -38,7 +39,8 @@ import com.ruoyi.system.service.impl.ExcelWorkbookReader.ParsedSheet;
  *       数字(2)/日期(5)/复选框(7) 三类，空缺值不算违规，违规返回中文描述供预检聚合为缺参。</li>
  * </ul>
  * 消费纪律（双列错位警戒，导出侧 ae70682d 修复的同族问题）：遍历列定义消费行数据时，
- * 一律经 {@link ColumnMapping#cellText(List, int)} 按 headerIndex 取数，不按列序号。
+ * 一律经 {@link ColumnMapping#cellText(List, int)} / {@link ColumnMapping#cellText(RowData, int)}
+ * 按 headerIndex 取数，不按列序号。
  *
  * @author ruoyi
  */
@@ -60,13 +62,13 @@ public final class ExcelColumnMatcher
     static final int SHARD_SUFFIX_BREAK_LENGTH = 29;
 
     /** 隐藏列标记：isShow=1 表示隐藏（baseTable/related/index.vue filter(item -> !item.isShow)） */
-    private static final long IS_SHOW_HIDDEN = 1L;
+    public static final long IS_SHOW_HIDDEN = 1L;
 
     /** 单向关联 */
-    private static final long TYPE_SINGLE_LINK = 18L;
+    public static final long TYPE_SINGLE_LINK = 18L;
 
     /** 双向关联 */
-    private static final long TYPE_DOUBLE_LINK = 21L;
+    public static final long TYPE_DOUBLE_LINK = 21L;
 
     /**
      * 不导入值的列类型（R17）：20 公式 / 23 数学公式 / 24 集合运算 / 25 语义关联 / 26 lookup。
@@ -97,7 +99,10 @@ public final class ExcelColumnMatcher
      *       命中即选定，其余 sheet 进忽略清单；</li>
      *   <li>无同名 → 识别分片家族：sheet 名匹配 {@code sanitize(表名 + "_p" + 序号)}（序号 ≥1，
      *       连续与否均收集）的分片按序号升序合并为一张逻辑表——表头取序号最小的分片，
-     *       行数据按序号升序拼接；期望名生成时发生 31 字符截断（序号后缀被破坏）的序号不参与识别
+     *       行数据按序号升序拼接；合并前后置校验：各分片表头须与首分片完全一致（含列数与顺序，
+     *       不一致抛 {@link ServiceException} 含分片 sheet 名）、合并后总行数不得超
+     *       {@code ExcelWorkbookReader.MAX_ROWS}（超出抛 {@link ServiceException} 提示分批导入）；
+     *       期望名生成时发生 31 字符截断（序号后缀被破坏）的序号不参与识别
      *       （导出端该形态产物本身不可达，避免不同序号截断同名导致误识别）；</li>
      *   <li>两者皆无 → 抛 {@link ServiceException}（消息含目标表名与已有 sheet 名清单；
      *       表名净化后 ≥{@value #SHARD_SUFFIX_BREAK_LENGTH} 字符时提示缩短表名）。</li>
@@ -183,16 +188,30 @@ public final class ExcelColumnMatcher
         {
             // 按序号升序合并：表头取首分片，行数据按序拼接（序号不连续时按存在的序号升序）
             List<String> headers = null;
-            List<List<String>> mergedRows = new ArrayList<>();
+            String firstShardName = null;
+            List<RowData> mergedRows = new ArrayList<>();
             List<String> used = new ArrayList<>(shards.size());
             for (ParsedSheet shard : shards.values())
             {
                 if (headers == null)
                 {
                     headers = shard.getHeaders();
+                    firstShardName = shard.getSheetName();
+                }
+                else if (!headers.equals(shard.getHeaders()))
+                {
+                    // 各分片表头须与首分片完全一致（含列数与顺序），否则行数据按 headerIndex 取数会错位
+                    throw new ServiceException("分片工作表[" + shard.getSheetName() + "]的表头与首分片["
+                            + firstShardName + "]不一致（列数或列序不同），无法合并导入，请检查文件是否被修改");
                 }
                 mergedRows.addAll(shard.getRows());
                 used.add(shard.getSheetName());
+            }
+            // 分片合并总行数上限：per-sheet 50000 检查不覆盖合并后的乘积放大
+            if (mergedRows.size() > ExcelWorkbookReader.MAX_ROWS)
+            {
+                throw new ServiceException("分片工作表合并后共 " + mergedRows.size() + " 行数据，超过单表行数上限 "
+                        + ExcelWorkbookReader.MAX_ROWS + " 行，请分批导入");
             }
             Set<ParsedSheet> usedSheets = Collections.newSetFromMap(new IdentityHashMap<ParsedSheet, Boolean>());
             usedSheets.addAll(shards.values());
@@ -411,7 +430,8 @@ public final class ExcelColumnMatcher
      * <ul>
      *   <li>数字(2)：trim 后可 {@link BigDecimal} 解析（空串/null 视为缺值不算违规）；</li>
      *   <li>日期(5)：严格 {@code yyyy-MM-dd HH:mm:ss} 或 {@code yyyy-MM-dd} 两种格式，其他算违规；</li>
-     *   <li>复选框(7)：{@code "true"} / {@code "false"}（导出写出的显示值）；</li>
+     *   <li>复选框(7)：{@code "true"} / {@code "false"} 或 {@code "0"} / {@code "1"}
+     *       （后者为导出实际写出的存储值形态，round-trip 兼容）；</li>
      *   <li>其余类型不校验（单选/多选选项匹配归 U4 预检）。</li>
      * </ul>
      *
@@ -451,11 +471,12 @@ public final class ExcelColumnMatcher
                 }
                 return "日期格式须为 yyyy-MM-dd HH:mm:ss 或 yyyy-MM-dd";
             case 7:
-                if ("true".equals(value) || "false".equals(value))
+                // round-trip：同时接受 true/false 与导出实际写出的 '0'/'1' 存储值形态
+                if ("true".equals(value) || "false".equals(value) || "0".equals(value) || "1".equals(value))
                 {
                     return null;
                 }
-                return "复选框值须为 true 或 false";
+                return "复选框值须为 true/false 或 0/1";
             default:
                 return null;
         }
@@ -498,9 +519,9 @@ public final class ExcelColumnMatcher
     }
 
     /**
-     * 隐藏列判定：isShow=1 表示隐藏。
+     * 隐藏列判定：isShow=1 表示隐藏（导入链路统一判定，供 {@code NoteDwtableExcelImportServiceImpl} 复用）。
      */
-    private static boolean isHidden(NoteColumn column)
+    public static boolean isHidden(NoteColumn column)
     {
         return column.getIsShow() != null && column.getIsShow() == IS_SHOW_HIDDEN;
     }
@@ -623,8 +644,8 @@ public final class ExcelColumnMatcher
         /** 逻辑表表头（分片合并时取序号最小的分片） */
         private final List<String> headers;
 
-        /** 逻辑表数据行（分片合并时按序号升序拼接） */
-        private final List<List<String>> rows;
+        /** 逻辑表数据行（分片合并时按序号升序拼接，各行保留所属 sheet 自身物理行号） */
+        private final List<RowData> rows;
 
         /** 实际使用的 sheet 名（分片合并时为多个，按合并顺序） */
         private final List<String> selectedSheetNames;
@@ -632,7 +653,7 @@ public final class ExcelColumnMatcher
         /** 未使用的 sheet 名（按工作簿内顺序，供预检忽略提示） */
         private final List<String> ignoredSheetNames;
 
-        private SheetSelection(List<String> headers, List<List<String>> rows,
+        private SheetSelection(List<String> headers, List<RowData> rows,
                 List<String> selectedSheetNames, List<String> ignoredSheetNames)
         {
             this.headers = Collections.unmodifiableList(new ArrayList<>(headers));
@@ -646,7 +667,7 @@ public final class ExcelColumnMatcher
             return headers;
         }
 
-        public List<List<String>> getRows()
+        public List<RowData> getRows()
         {
             return rows;
         }
@@ -733,6 +754,14 @@ public final class ExcelColumnMatcher
             }
             String value = row.get(headerIndex);
             return value == null ? "" : value;
+        }
+
+        /**
+         * {@link RowData} 形态取数（委托 {@link #cellText(List, int)}，双列错位警戒同上）。
+         */
+        public String cellText(RowData row, int headerIndex)
+        {
+            return row == null ? "" : cellText(row.getCells(), headerIndex);
         }
     }
 

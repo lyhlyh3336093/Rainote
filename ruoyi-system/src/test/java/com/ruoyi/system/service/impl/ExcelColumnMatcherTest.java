@@ -19,6 +19,7 @@ import com.ruoyi.system.service.impl.ExcelColumnMatcher.ColumnMapping;
 import com.ruoyi.system.service.impl.ExcelColumnMatcher.HeaderEntry;
 import com.ruoyi.system.service.impl.ExcelColumnMatcher.SheetSelection;
 import com.ruoyi.system.service.impl.ExcelWorkbookReader.ParsedSheet;
+import com.ruoyi.system.service.impl.ExcelWorkbookReader.RowData;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -47,7 +48,25 @@ class ExcelColumnMatcherTest
 
     private static ParsedSheet sheet(String name, List<String> headers, List<List<String>> rows)
     {
-        return new ParsedSheet(name, headers, rows);
+        // 行号按"无空行紧缩"形态构造（第 i 个数据行 = 物理第 i+2 行），与空行过滤前口径一致
+        List<RowData> dataRows = new ArrayList<>();
+        for (int i = 0; i < rows.size(); i++)
+        {
+            dataRows.add(new RowData(i + 2, rows.get(i)));
+        }
+        return new ParsedSheet(name, headers, dataRows);
+    }
+
+    /** 构造 count 个单单元格数据行（分片合并上限测试用，共享同一 cells 实例省内存） */
+    private static List<RowData> shardRows(int count)
+    {
+        List<String> cells = Collections.singletonList("x");
+        List<RowData> rows = new ArrayList<>(count);
+        for (int i = 0; i < count; i++)
+        {
+            rows.add(new RowData(i + 2, cells));
+        }
+        return rows;
     }
 
     private static List<List<String>> rows(String[]... rowArrays)
@@ -144,9 +163,9 @@ class ExcelColumnMatcherTest
         // 表头取第一个分片（p1），行数据按序号升序拼接（p1 两行 + p2 一行）
         assertEquals(Arrays.asList("record_id", "名称"), selection.getHeaders());
         assertEquals(3, selection.getRows().size());
-        assertEquals(Arrays.asList("1", "a"), selection.getRows().get(0));
-        assertEquals(Arrays.asList("2", "b"), selection.getRows().get(1));
-        assertEquals(Arrays.asList("3", "c"), selection.getRows().get(2));
+        assertEquals(Arrays.asList("1", "a"), selection.getRows().get(0).getCells());
+        assertEquals(Arrays.asList("2", "b"), selection.getRows().get(1).getCells());
+        assertEquals(Arrays.asList("3", "c"), selection.getRows().get(2).getCells());
         assertEquals(Arrays.asList("T_p1", "T_p2"), selection.getSelectedSheetNames());
         assertEquals(Collections.singletonList("无关表"), selection.getIgnoredSheetNames());
     }
@@ -163,9 +182,40 @@ class ExcelColumnMatcherTest
 
         assertEquals(Arrays.asList("record_id", "名称"), selection.getHeaders());
         assertEquals(2, selection.getRows().size());
-        assertEquals(Arrays.asList("2", "b"), selection.getRows().get(0));
-        assertEquals(Arrays.asList("4", "d"), selection.getRows().get(1));
+        assertEquals(Arrays.asList("2", "b"), selection.getRows().get(0).getCells());
+        assertEquals(Arrays.asList("4", "d"), selection.getRows().get(1).getCells());
         assertEquals(Arrays.asList("T_p2", "T_p4"), selection.getSelectedSheetNames());
+    }
+
+    @Test
+    void selectShouldRejectShardMergeExceedingRowLimit()
+    {
+        // 两个分片各在 per-sheet 上限内（25000 + 25001），合并后 50001 > 50000 → 拒绝并提示分批导入
+        List<ParsedSheet> sheets = Arrays.asList(
+                new ParsedSheet("T_p1", Arrays.asList("record_id"), shardRows(25000)),
+                new ParsedSheet("T_p2", Arrays.asList("record_id"), shardRows(25001)));
+
+        ServiceException exception = assertThrows(ServiceException.class,
+                () -> ExcelColumnMatcher.selectSheet(sheets, "T"));
+
+        assertTrue(exception.getMessage().contains("分批导入"));
+        assertTrue(exception.getMessage().contains(String.valueOf(ExcelWorkbookReader.MAX_ROWS)));
+    }
+
+    @Test
+    void selectShouldRejectShardWithInconsistentHeaders()
+    {
+        // 第二分片表头与首分片不一致（列序被编辑）→ 拒绝（含分片 sheet 名），防行数据按 headerIndex 取数错位
+        List<ParsedSheet> sheets = Arrays.asList(
+                sheet("T_p1", Arrays.asList("record_id", "名称"), rows(new String[] { "1", "a" })),
+                sheet("T_p2", Arrays.asList("record_id", "状态"), rows(new String[] { "2", "b" })));
+
+        ServiceException exception = assertThrows(ServiceException.class,
+                () -> ExcelColumnMatcher.selectSheet(sheets, "T"));
+
+        assertTrue(exception.getMessage().contains("表头"));
+        assertTrue(exception.getMessage().contains("T_p2"));
+        assertTrue(exception.getMessage().contains("T_p1"));
     }
 
     @Test
@@ -243,8 +293,11 @@ class ExcelColumnMatcherTest
 
         assertEquals(Arrays.asList("record_id", "名称"), selection.getHeaders());
         assertEquals(2, selection.getRows().size());
-        assertEquals(Arrays.asList("1", "a"), selection.getRows().get(0));
-        assertEquals(Arrays.asList("2", "b"), selection.getRows().get(1));
+        assertEquals(Arrays.asList("1", "a"), selection.getRows().get(0).getCells());
+        assertEquals(Arrays.asList("2", "b"), selection.getRows().get(1).getCells());
+        // 分片合并时各行保留所属 sheet 自身物理行号（两分片各自首条数据行均为第 2 行）
+        assertEquals(2, selection.getRows().get(0).getRowNumber());
+        assertEquals(2, selection.getRows().get(1).getRowNumber());
     }
 
     // ==================== 列映射：精确匹配（R5） ====================
@@ -449,6 +502,9 @@ class ExcelColumnMatcherTest
 
         assertNull(ExcelColumnMatcher.validateCellText(checkboxColumn, "true"));
         assertNull(ExcelColumnMatcher.validateCellText(checkboxColumn, "false"));
+        // round-trip：导出实际写出的 '0'/'1' 存储值形态同样合法（导出→导入往返不判违规）
+        assertNull(ExcelColumnMatcher.validateCellText(checkboxColumn, "0"));
+        assertNull(ExcelColumnMatcher.validateCellText(checkboxColumn, "1"));
 
         assertNotNull(ExcelColumnMatcher.validateCellText(checkboxColumn, "是"));
         assertNotNull(ExcelColumnMatcher.validateCellText(checkboxColumn, "TRUE"));

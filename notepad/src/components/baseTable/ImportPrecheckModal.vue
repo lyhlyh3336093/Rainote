@@ -272,9 +272,19 @@ export default defineComponent({
       }
     };
 
+    /** 分组已构建自的预检引用（去重标记，避免 open watch 与 precheck watch 同批双重构建） */
+    let builtFrom: ExcelImportPrecheckResult | null | undefined;
+    const rebuildGroups = () => {
+      builtFrom = props.precheck;
+      buildGroups();
+    };
+    // #10: precheck 引用变化即重建分组（与 open 状态无关）——失败保留期间用户重新预检成功后，
+    // 弹框分组刷新为新文件内容（已填补参重置为空是预期：新文件新基线）
+    watch(() => props.precheck, rebuildGroups);
     watch(() => props.open, (open) => {
       state.visible = open;
-      if (open) buildGroups();
+      // 引用未变才由 open 重建（本次引用已由 precheck watch 构建过则跳过）
+      if (open && builtFrom !== props.precheck) rebuildGroups();
     });
     watch(() => state.visible, (v) => ctx.emit('update:open', v));
 
@@ -438,9 +448,10 @@ export default defineComponent({
 
     /**
      * 确认导入：组装补参 JSON → importExcelData。
-     * 弹框保持打开直至返回——成功销毁弹框并通知父组件刷新表格；
-     * 失败（含"数据已变化，请重新预检"）Modal.error 显示 msg，
-     * 弹框保留已填全部补参（用户可取消或修改后重试——重试时重新走当前弹框确认即可）。
+     * 弹框保持打开直至返回——成功销毁弹框并通知父组件刷新表格。
+     * 失败分两类（#12）：数据漂移（"数据已变化"fail-fast，基线已失效，保留弹框重试
+     * 必然再失败）→ 关闭弹框并引导用户重新选文件预检；其他失败 Modal.error 显示 msg，
+     * 弹框保留已填全部补参（用户可取消或修改后重试）。
      */
     const confirm = async () => {
       if (state.loading || !canConfirm.value) return;
@@ -454,7 +465,12 @@ export default defineComponent({
         Modal.success({ title: '导入成功', content: `成功导入 ${recordCount} 条记录` });
         ctx.emit('success', recordCount);
       } catch (e: any) {
-        Modal.error({ title: '导入失败', content: e?.message || '导入失败，请稍后重试' });
+        if (e?.message?.includes('数据已变化')) {
+          state.visible = false;
+          Modal.error({ title: '导入失败', content: '数据已变化，请重新选择文件进行预检' });
+        } else {
+          Modal.error({ title: '导入失败', content: e?.message || '导入失败，请稍后重试' });
+        }
       } finally {
         state.loading = false;
       }

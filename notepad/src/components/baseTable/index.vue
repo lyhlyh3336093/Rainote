@@ -720,37 +720,46 @@ export default defineComponent({
         }
       },
       // .xlsx 两阶段流程:预检 → 三分流(干净直连/补参弹框/轻量确认),R13
+      // #11: 预检/导入分阶段 catch,标题按阶段固定(不再依赖异常消息文本判定)
       async runExcelImport(noteId: string | number, file: File) {
         importState.loading = true;
         const hide = message.loading({ content: '正在预检，请稍候…', duration: 0 });
         try {
-          const precheck = await precheckExcelImport({
-            noteId,
-            dwtableId: datasheetID.value,
-            file,
-          });
-          if (!precheck.hasBlockingIssues && !hasImpactInfo(precheck)) {
-            // 完全干净:直接导入(params 只含指纹 + 空 baseline/selections,按契约发射)
-            const recordCount = await importExcelData(
-              { noteId, dwtableId: datasheetID.value, file },
-              buildCleanParams(precheck),
-            );
-            hide();
-            Modal.success({ title: '导入成功', content: `成功导入 ${recordCount} 条记录` });
-            table.get.list();
-          } else {
-            // 补参模式(缺参/歧义)或只读确认模式(仅影响面):一个组件两种模式
-            hide();
-            excelImport.precheck = precheck;
-            excelImport.file = file;
-            excelImport.noteId = noteId;
-            excelImport.dwtableId = datasheetID.value;
-            excelImport.modalOpen = true;
+          let precheck: ExcelImportPrecheckResult;
+          // 预检段:任何异常均为"预检失败"
+          try {
+            precheck = await precheckExcelImport({
+              noteId,
+              dwtableId: datasheetID.value,
+              file,
+            });
+          } catch (e: any) {
+            Modal.error({ title: '预检失败', content: e?.message || '预检失败，请稍后重试' });
+            return;
           }
-        } catch (e: any) {
-          hide();
-          Modal.error({ title: e?.message?.includes('预检') ? '预检失败' : '导入失败', content: e?.message || '导入失败，请稍后重试' });
+          // 导入段:仅干净分支直连(补参/确认分支的导入调用在弹框组件内)
+          try {
+            if (!precheck.hasBlockingIssues && !hasImpactInfo(precheck)) {
+              // 完全干净:直接导入(params 只含指纹 + 空 baseline/selections,按契约发射)
+              const recordCount = await importExcelData(
+                { noteId, dwtableId: datasheetID.value, file },
+                buildCleanParams(precheck),
+              );
+              Modal.success({ title: '导入成功', content: `成功导入 ${recordCount} 条记录` });
+              table.get.list();
+            } else {
+              // 补参模式(缺参/歧义)或只读确认模式(仅影响面):一个组件两种模式
+              excelImport.precheck = precheck;
+              excelImport.file = file;
+              excelImport.noteId = noteId;
+              excelImport.dwtableId = datasheetID.value;
+              excelImport.modalOpen = true;
+            }
+          } catch (e: any) {
+            Modal.error({ title: '导入失败', content: e?.message || '导入失败，请稍后重试' });
+          }
         } finally {
+          hide();
           importState.loading = false;
         }
       },

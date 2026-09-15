@@ -54,6 +54,7 @@ import com.ruoyi.system.service.impl.ExcelColumnMatcher.ColumnMapping;
 import com.ruoyi.system.service.impl.ExcelColumnMatcher.HeaderEntry;
 import com.ruoyi.system.service.impl.ExcelColumnMatcher.SheetSelection;
 import com.ruoyi.system.service.impl.ExcelWorkbookReader.ParsedSheet;
+import com.ruoyi.system.service.impl.ExcelWorkbookReader.RowData;
 
 /**
  * 多维表格 Excel 导入服务（U4 阶段一预检 + U5 阶段二导入写入）。
@@ -96,12 +97,6 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     /** 六类基础列（R7 默认值支持范围，亦为缺参分析范围） */
     private static final Set<Long> BASIC_TYPES = new HashSet<>(Arrays.asList(1L, 2L, 3L, 4L, 5L, 7L));
 
-    /** 单向关联 */
-    private static final long TYPE_SINGLE_LINK = 18L;
-
-    /** 双向关联 */
-    private static final long TYPE_DOUBLE_LINK = 21L;
-
     /** 单选 */
     private static final long TYPE_SINGLE_SELECT = 3L;
 
@@ -117,9 +112,6 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     /** 集合运算列 */
     private static final long TYPE_SET_OPERATION = 24L;
 
-    /** 隐藏列标记：isShow=1 表示隐藏 */
-    private static final long IS_SHOW_HIDDEN = 1L;
-
     /** 关联列选择器候选首批上限（按 sort 升序前 N 条，KTD7） */
     private static final int CANDIDATE_LIMIT = 100;
 
@@ -128,6 +120,9 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
 
     /** 每列每次导入新选项上限（R19，超限中止回滚） */
     private static final int NEW_OPTION_LIMIT = 100;
+
+    /** 导入参数单段条目数上限（columnValues / relationSelections 各自适用，防超大 params 放大） */
+    private static final int PARAM_ENTRIES_LIMIT = 10000;
 
     @Autowired
     private NoteDwtableMapper noteDwtableMapper;
@@ -202,7 +197,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
      * 遍历参与导入的列（非隐藏 且 类型 ∈ 六类基础 1/2/3/4/5/7 + 关联 18/21），逐列汇总预检清单。
      */
     private void analyzeColumns(ExcelImportPrecheckResult result, Long noteId, Long dwtableId, Long userId,
-            List<List<String>> rows, List<NoteColumn> columns, ColumnMapping mapping)
+            List<RowData> rows, List<NoteColumn> columns, ColumnMapping mapping)
     {
         int totalRows = rows.size();
 
@@ -218,12 +213,12 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
 
         for (NoteColumn column : columns)
         {
-            if (column == null || column.getType() == null || isHidden(column))
+            if (column == null || column.getType() == null || ExcelColumnMatcher.isHidden(column))
             {
                 continue;
             }
             Long type = column.getType();
-            boolean link = type == TYPE_SINGLE_LINK || type == TYPE_DOUBLE_LINK;
+            boolean link = type == ExcelColumnMatcher.TYPE_SINGLE_LINK || type == ExcelColumnMatcher.TYPE_DOUBLE_LINK;
             if (!link && !BASIC_TYPES.contains(type))
             {
                 continue;
@@ -261,7 +256,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             {
                 DefaultValueFill fill = new DefaultValueFill();
                 fill.setColumnId(column.getId());
-                fill.setColumnName(column.getName());
+                fill.setColumnName(dtoColumnName(column));
                 fill.setDefaultValue(defaultValue);
                 fill.setRowCount(totalRows);
                 result.getDefaultValueFills().add(fill);
@@ -270,7 +265,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         }
         MissingParam param = new MissingParam();
         param.setColumnId(column.getId());
-        param.setColumnName(column.getName());
+        param.setColumnName(dtoColumnName(column));
         param.setColumnType(type);
         param.setKind(link ? ExcelImportPrecheckResult.KIND_LINK_MISSING_COLUMN
                 : ExcelImportPrecheckResult.KIND_MISSING_COLUMN);
@@ -281,15 +276,18 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     /**
      * 基础列（1/2/3/4/5/7）逐行分析：缺值（默认值填充或缺参）、类型违规（缺参，附原因）、
      * 单选/多选未命中选项（新选项创建项）。
+     * <p>
+     * 同列缺值与类型违规合并为一条缺参（rowNumbers 取并集、kind 有违规时"类型违规"否则"缺值"、
+     * reason 保留违规描述），避免同列两条缺参导致前端双行输入与 columnValues 同键覆盖。
      */
     private static void analyzeBasicColumn(ExcelImportPrecheckResult result, NoteColumn column, Long type,
-            int headerIndex, ColumnMapping mapping, List<List<String>> rows)
+            int headerIndex, ColumnMapping mapping, List<RowData> rows)
     {
         String defaultValue = ColumnDefaultValueSupport.read(column);
         Set<String> options = (type == TYPE_SINGLE_SELECT || type == TYPE_MULTI_SELECT)
-                ? parseSelectOptions(column) : null;
+                ? ColumnDefaultValueSupport.parseSelectOptions(column) : null;
 
-        // 空单元格行号集（缺值分析）
+        // 空单元格行号集（缺值分析，物理行号与 Excel UI 一致）
         TreeSet<Integer> emptyRows = new TreeSet<>();
         // 类型违规行号集（R11：违规按缺参走补值链路）
         TreeSet<Integer> violationRows = new TreeSet<>();
@@ -299,17 +297,17 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
 
         for (int r = 0; r < rows.size(); r++)
         {
-            int rowNumber = r + 2;
-            String text = mapping.cellText(rows.get(r), headerIndex).trim();
+            RowData row = rows.get(r);
+            String text = mapping.cellText(row, headerIndex).trim();
             if (text.isEmpty())
             {
-                emptyRows.add(Integer.valueOf(rowNumber));
+                emptyRows.add(Integer.valueOf(row.getRowNumber()));
                 continue;
             }
             String violation = ExcelColumnMatcher.validateCellText(column, text);
             if (violation != null)
             {
-                violationRows.add(Integer.valueOf(rowNumber));
+                violationRows.add(Integer.valueOf(row.getRowNumber()));
                 if (violationReason == null)
                 {
                     violationReason = violation;
@@ -326,8 +324,8 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             }
             else if (type == TYPE_MULTI_SELECT)
             {
-                // 多选按英文逗号拆分逐个匹配（R19）
-                for (String part : text.split(","))
+                // 多选拆分逐个匹配（R19）：先全角逗号归一为半角（与选项集解析口径对称）
+                for (String part : text.replace("，", ",").split(","))
                 {
                     String candidate = part.trim();
                     if (!candidate.isEmpty() && options != null && !options.contains(candidate))
@@ -338,45 +336,49 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             }
         }
 
-        if (!emptyRows.isEmpty())
+        boolean missingEmptyRows = !emptyRows.isEmpty() && defaultValue == null;
+        if (!emptyRows.isEmpty() && defaultValue != null)
         {
-            if (defaultValue != null)
+            // 有默认值的列不进弹框：默认值填充项（行数=空单元格行数）
+            DefaultValueFill fill = new DefaultValueFill();
+            fill.setColumnId(column.getId());
+            fill.setColumnName(dtoColumnName(column));
+            fill.setDefaultValue(defaultValue);
+            fill.setRowCount(emptyRows.size());
+            result.getDefaultValueFills().add(fill);
+        }
+        if (missingEmptyRows || !violationRows.isEmpty())
+        {
+            // 同列缺值+类型违规合并为一条（kind 有违规时"类型违规"，rowNumbers 取并集）
+            MissingParam param = new MissingParam();
+            param.setColumnId(column.getId());
+            param.setColumnName(dtoColumnName(column));
+            param.setColumnType(type);
+            if (violationRows.isEmpty())
             {
-                // 有默认值的列不进弹框：默认值填充项（行数=空单元格行数）
-                DefaultValueFill fill = new DefaultValueFill();
-                fill.setColumnId(column.getId());
-                fill.setColumnName(column.getName());
-                fill.setDefaultValue(defaultValue);
-                fill.setRowCount(emptyRows.size());
-                result.getDefaultValueFills().add(fill);
+                param.setKind(ExcelImportPrecheckResult.KIND_MISSING_VALUE);
+                param.setRowNumbers(new ArrayList<>(emptyRows));
             }
             else
             {
-                MissingParam param = new MissingParam();
-                param.setColumnId(column.getId());
-                param.setColumnName(column.getName());
-                param.setColumnType(type);
-                param.setKind(ExcelImportPrecheckResult.KIND_MISSING_VALUE);
-                param.setRowNumbers(new ArrayList<>(emptyRows));
-                result.getMissingParams().add(param);
+                param.setKind(ExcelImportPrecheckResult.KIND_TYPE_VIOLATION);
+                TreeSet<Integer> unionRows = new TreeSet<>(violationRows);
+                if (missingEmptyRows)
+                {
+                    unionRows.addAll(emptyRows);
+                }
+                param.setRowNumbers(new ArrayList<>(unionRows));
+                param.setReason(missingEmptyRows
+                        ? violationReason + "；另有 " + emptyRows.size() + " 行缺值"
+                        : violationReason);
             }
-        }
-        if (!violationRows.isEmpty())
-        {
-            MissingParam param = new MissingParam();
-            param.setColumnId(column.getId());
-            param.setColumnName(column.getName());
-            param.setColumnType(type);
-            param.setKind(ExcelImportPrecheckResult.KIND_TYPE_VIOLATION);
-            param.setRowNumbers(new ArrayList<>(violationRows));
-            param.setReason(violationReason);
             result.getMissingParams().add(param);
         }
         for (Map.Entry<String, Integer> entry : newOptionCounts.entrySet())
         {
             NewOption option = new NewOption();
             option.setColumnId(column.getId());
-            option.setColumnName(column.getName());
+            option.setColumnName(dtoColumnName(column));
             option.setOptionText(entry.getKey());
             option.setOccurrences(entry.getValue().intValue());
             result.getNewOptions().add(option);
@@ -388,7 +390,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
      * 未命中名（distinct）收集行号集供 U6 逐值选择器；附选择器候选首批。
      */
     private void analyzeLinkColumn(ExcelImportPrecheckResult result, Long noteId, Long userId, NoteColumn column,
-            Long type, int headerIndex, ColumnMapping mapping, List<List<String>> rows,
+            Long type, int headerIndex, ColumnMapping mapping, List<RowData> rows,
             Map<Long, LinkTableContext> contextByTableId)
     {
         LinkTableContext context = linkTableContext(column, noteId, userId, contextByTableId);
@@ -403,8 +405,8 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
 
         for (int r = 0; r < rows.size(); r++)
         {
-            int rowNumber = r + 2;
-            String text = mapping.cellText(rows.get(r), headerIndex).trim();
+            RowData row = rows.get(r);
+            String text = mapping.cellText(row, headerIndex).trim();
             if (text.isEmpty())
             {
                 // R15：空单元格不建立关联，不算缺参不算未命中
@@ -421,7 +423,8 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                 }
                 else
                 {
-                    missRowsByName.computeIfAbsent(name, k -> new TreeSet<>()).add(Integer.valueOf(rowNumber));
+                    missRowsByName.computeIfAbsent(name, k -> new TreeSet<>())
+                            .add(Integer.valueOf(row.getRowNumber()));
                 }
             }
         }
@@ -430,7 +433,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         {
             AmbiguityItem item = new AmbiguityItem();
             item.setColumnId(column.getId());
-            item.setColumnName(column.getName());
+            item.setColumnName(dtoColumnName(column));
             item.setName(entry.getKey());
             item.setCandidateCount(entry.getValue().size());
             // 预选 sort 最靠前的同名记录（列表已按 sort 升序）
@@ -441,7 +444,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         {
             MissingParam param = new MissingParam();
             param.setColumnId(column.getId());
-            param.setColumnName(column.getName());
+            param.setColumnName(dtoColumnName(column));
             param.setColumnType(type);
             param.setKind(ExcelImportPrecheckResult.KIND_LINK_MISS);
             List<MissName> missNames = new ArrayList<>(missRowsByName.size());
@@ -456,7 +459,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             result.getMissingParams().add(param);
         }
         // 对称写入影响：仅 21 双向关联列（16/R11）
-        if (type == TYPE_DOUBLE_LINK && !matchedRecordIds.isEmpty())
+        if (type == ExcelColumnMatcher.TYPE_DOUBLE_LINK && !matchedRecordIds.isEmpty())
         {
             SymmetricWriteImpact impact = new SymmetricWriteImpact();
             impact.setTableName(context.getTable().getName());
@@ -537,12 +540,14 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                 .comparing((NoteRecord record) -> record.getSort() == null ? Long.MAX_VALUE : record.getSort())
                 .thenComparing(record -> record.getId() == null ? Long.MAX_VALUE : record.getId()));
         Map<String, List<NoteRecord>> recordsByName = new LinkedHashMap<>();
+        Map<Long, NoteRecord> recordsById = new HashMap<>();
         for (NoteRecord record : records)
         {
             String name = record.getName() == null ? "" : record.getName();
             recordsByName.computeIfAbsent(name, k -> new ArrayList<>()).add(record);
+            recordsById.put(record.getId(), record);
         }
-        LinkTableContext context = new LinkTableContext(related, records, recordsByName);
+        LinkTableContext context = new LinkTableContext(related, records, recordsByName, recordsById);
         cache.put(tableId, context);
         return context;
     }
@@ -561,7 +566,8 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         if (!prop.isEmpty())
         {
             tableId = prop.getLong("table_id");
-            if (tableId == null && column.getType() != null && column.getType() == TYPE_SINGLE_LINK)
+            if (tableId == null && column.getType() != null
+                    && column.getType() == ExcelColumnMatcher.TYPE_SINGLE_LINK)
             {
                 tableId = prop.getLong("select");
             }
@@ -598,40 +604,6 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             }
         }
         return names;
-    }
-
-    /**
-     * 解析单选/多选列的选项集（property select 逗号字符串，全角逗号先归一为半角）。
-     */
-    private static Set<String> parseSelectOptions(NoteColumn column)
-    {
-        Set<String> options = new HashSet<>();
-        if (column.getProperty() == null || column.getProperty().trim().isEmpty())
-        {
-            return options;
-        }
-        try
-        {
-            JSONObject prop = JSONObject.parseObject(column.getProperty());
-            Object select = prop == null ? null : prop.get("select");
-            if (select == null)
-            {
-                return options;
-            }
-            for (String part : String.valueOf(select).replace("，", ",").split(","))
-            {
-                String option = part.trim();
-                if (!option.isEmpty())
-                {
-                    options.add(option);
-                }
-            }
-        }
-        catch (Exception ignored)
-        {
-            // 非法 property 视为无选项集（全部单元格文本都进新选项创建项）
-        }
-        return options;
     }
 
     // ==================== 辅助 ====================
@@ -693,31 +665,21 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     }
 
     /**
-     * 隐藏列判定：isShow=1 表示隐藏。
+     * 预检 DTO 输出列名统一 trim（与阶段二 buildImportPlan 的漂移比对键、补参 columnValues
+     * 取值键全链路一致——空格列名下基线回传不漂移、补参键不错位）。
      */
-    private static boolean isHidden(NoteColumn column)
+    private static String dtoColumnName(NoteColumn column)
     {
-        return column.getIsShow() != null && column.getIsShow() == IS_SHOW_HIDDEN;
+        return column.getName() == null ? "" : column.getName().trim();
     }
 
     /**
-     * 宽松解析 property JSON：null/空/非法时返回空 JSONObject（不抛异常）。
+     * 宽松解析 property JSON：null/空/非法时返回空 JSONObject（不抛异常）；
+     * 委托 {@link ColumnDefaultValueSupport#parseSafe}（property 解析唯一实现）。
      */
     private static JSONObject parsePropertySafe(NoteColumn column)
     {
-        if (column == null || column.getProperty() == null || column.getProperty().trim().isEmpty())
-        {
-            return new JSONObject();
-        }
-        try
-        {
-            JSONObject parsed = JSONObject.parseObject(column.getProperty());
-            return parsed == null ? new JSONObject() : parsed;
-        }
-        catch (Exception e)
-        {
-            return new JSONObject();
-        }
+        return column == null ? new JSONObject() : ColumnDefaultValueSupport.parseSafe(column.getProperty());
     }
 
     /**
@@ -727,7 +689,8 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     private static Long parseBackFieldId(NoteColumn column)
     {
         Long backFieldId = parsePropertySafe(column).getLong("back_field_id");
-        if (backFieldId == null && column.getType() != null && column.getType() == TYPE_DOUBLE_LINK)
+        if (backFieldId == null && column.getType() != null
+                && column.getType() == ExcelColumnMatcher.TYPE_DOUBLE_LINK)
         {
             throw new ServiceException("关联列“" + (column.getName() == null ? "" : column.getName())
                     + "”的配置缺少配对列（back_field_id），无法导入");
@@ -737,7 +700,8 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
 
     /**
      * 被关联表上下文（KTD4 预解析产物，同表多列共享）：
-     * 表信息 + sort 升序全量记录 + name → 有序记录列表（同名多条保留全部）。
+     * 表信息 + sort 升序全量记录 + name → 有序记录列表（同名多条保留全部）
+     * + id → 记录（recordId 存在性校验 O(1)）。
      */
     private static final class LinkTableContext
     {
@@ -747,12 +711,15 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
 
         private final Map<String, List<NoteRecord>> recordsByName;
 
+        private final Map<Long, NoteRecord> recordsById;
+
         private LinkTableContext(NoteDwtable table, List<NoteRecord> sortedRecords,
-                Map<String, List<NoteRecord>> recordsByName)
+                Map<String, List<NoteRecord>> recordsByName, Map<Long, NoteRecord> recordsById)
         {
             this.table = table;
             this.sortedRecords = sortedRecords;
             this.recordsByName = recordsByName;
+            this.recordsById = recordsById;
         }
 
         private NoteDwtable getTable()
@@ -768,6 +735,11 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         private Map<String, List<NoteRecord>> getRecordsByName()
         {
             return recordsByName;
+        }
+
+        private Map<Long, NoteRecord> getRecordsById()
+        {
+            return recordsById;
         }
     }
 
@@ -829,6 +801,17 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         {
             params.setRelationSelections(new ArrayList<ExcelImportParams.RelationSelection>());
         }
+        // 单段条目数上限：params 可达 10MB，防超大 columnValues/relationSelections 造成下游 CPU 放大
+        if (params.getColumnValues().size() > PARAM_ENTRIES_LIMIT)
+        {
+            throw new ServiceException("导入参数条目数超限（columnValues 超过 " + PARAM_ENTRIES_LIMIT
+                    + " 条），请重新预检");
+        }
+        if (params.getRelationSelections().size() > PARAM_ENTRIES_LIMIT)
+        {
+            throw new ServiceException("导入参数条目数超限（relationSelections 超过 " + PARAM_ENTRIES_LIMIT
+                    + " 条），请重新预检");
+        }
         return params;
     }
 
@@ -864,7 +847,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         query.setDwtableId(dwtableId);
         List<NoteColumn> columns = noteColumnMapper.selectNoteColumnList(query);
         ColumnMapping mapping = ExcelColumnMatcher.mapColumns(selection.getHeaders(), columns);
-        List<List<String>> rows = selection.getRows();
+        List<RowData> rows = selection.getRows();
         int rowCount = rows.size();
 
         // 参与列分类（与预检 analyzeColumns 同口径：非隐藏 且 ∈ 六类基础 + 18/21）
@@ -881,17 +864,18 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             {
                 columnByName.putIfAbsent(column.getName().trim(), column);
             }
-            // name 派生源列：首个 type=1 列（含隐藏列，与 deriveRecordName 语义一致）
+            if (ExcelColumnMatcher.isHidden(column))
+            {
+                continue;
+            }
+            // name 派生源列：首个非隐藏 type=1 列（隐藏列不生成 item，选它派生恒空）
             if (nameColumnId == null && column.getType() == 1L)
             {
                 nameColumnId = column.getId();
             }
-            if (isHidden(column))
-            {
-                continue;
-            }
             Long type = column.getType();
-            if (BASIC_TYPES.contains(type) || type == TYPE_SINGLE_LINK || type == TYPE_DOUBLE_LINK)
+            if (BASIC_TYPES.contains(type) || type == ExcelColumnMatcher.TYPE_SINGLE_LINK
+                    || type == ExcelColumnMatcher.TYPE_DOUBLE_LINK)
             {
                 participants.add(column);
             }
@@ -917,7 +901,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         {
             String columnName = column.getName() == null ? "" : column.getName().trim();
             Long type = column.getType();
-            boolean link = type == TYPE_SINGLE_LINK || type == TYPE_DOUBLE_LINK;
+            boolean link = type == ExcelColumnMatcher.TYPE_SINGLE_LINK || type == ExcelColumnMatcher.TYPE_DOUBLE_LINK;
             Integer headerIndex = headerIndexByColumn.get(column);
             if (headerIndex == null)
             {
@@ -973,7 +957,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             {
                 String defaultValue = ColumnDefaultValueSupport.read(column);
                 Set<String> options = (type == TYPE_SINGLE_SELECT || type == TYPE_MULTI_SELECT)
-                        ? parseSelectOptions(column) : null;
+                        ? ColumnDefaultValueSupport.parseSelectOptions(column) : null;
                 String[] excelValues = new String[rowCount];
                 boolean[] violations = new boolean[rowCount];
                 boolean hasMissing = false;
@@ -984,14 +968,14 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                     if (!text.isEmpty() && ExcelColumnMatcher.validateCellText(column, text) == null)
                     {
                         excelValues[r] = text;
-                        // R19 新选项：单选整格、多选逗号拆分逐个匹配
+                        // R19 新选项：单选整格、多选拆分逐个匹配（全角逗号先归一，与预检/选项集口径对称）
                         if (type == TYPE_SINGLE_SELECT && options != null && !options.contains(text))
                         {
                             newOptions.add(text);
                         }
                         else if (type == TYPE_MULTI_SELECT && options != null)
                         {
-                            for (String part : text.split(","))
+                            for (String part : text.replace("，", ",").split(","))
                             {
                                 String candidate = part.trim();
                                 if (!candidate.isEmpty() && !options.contains(candidate))
@@ -1033,6 +1017,12 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                 headerIndexByColumn, contextByTableId, noteId, userId);
 
         // ===== 终解析：三源合并 + 补参应用，构建逐行写入计划 =====
+        // 参与列默认值预解析（循环外一次解析 property JSON，避免逐空单元格重复解析）
+        Map<Long, String> defaultValuesByColumnId = new HashMap<>();
+        for (NoteColumn column : participants)
+        {
+            defaultValuesByColumnId.put(column.getId(), ColumnDefaultValueSupport.read(column));
+        }
         ImportPlan plan = new ImportPlan();
         plan.noteId = noteId;
         plan.dwtableId = dwtableId;
@@ -1044,7 +1034,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             for (NoteColumn column : participants)
             {
                 Long type = column.getType();
-                boolean link = type == TYPE_SINGLE_LINK || type == TYPE_DOUBLE_LINK;
+                boolean link = type == ExcelColumnMatcher.TYPE_SINGLE_LINK || type == ExcelColumnMatcher.TYPE_DOUBLE_LINK;
                 NoteDwtableItem item = new NoteDwtableItem();
                 item.setDwtId(dwtableId);
                 item.setColumnId(column.getId());
@@ -1061,7 +1051,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                         item.setLinkRecordId(joinRecordIds(resolved));
                         item.setValue(joinRecordNames(resolved));
                         item.setLinkColumnId(analysis.backFieldId);
-                        if (type == TYPE_DOUBLE_LINK)
+                        if (type == ExcelColumnMatcher.TYPE_DOUBLE_LINK)
                         {
                             SymmetricLink symmetric = new SymmetricLink();
                             symmetric.sourceItem = item;
@@ -1081,7 +1071,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                 {
                     item.setValue(resolveBasicValue(column, r,
                             excelValuesByColumn.get(column), violationsByColumn.get(column),
-                            params.getColumnValues()));
+                            params.getColumnValues(), defaultValuesByColumnId));
                 }
                 rowPlan.items.add(item);
             }
@@ -1241,7 +1231,8 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             String columnName = selection.getColumnName().trim();
             NoteColumn column = columnByName.get(columnName);
             if (column == null || column.getType() == null
-                    || (column.getType() != TYPE_SINGLE_LINK && column.getType() != TYPE_DOUBLE_LINK))
+                    || (column.getType() != ExcelColumnMatcher.TYPE_SINGLE_LINK
+                            && column.getType() != ExcelColumnMatcher.TYPE_DOUBLE_LINK))
             {
                 throw new ServiceException("补参选择的关联列“" + columnName + "”不存在或不是关联列，请重新预检");
             }
@@ -1254,17 +1245,9 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                     .put(selection.getName(), selection);
             if (selection.getRecordId() != null)
             {
-                // R26：recordId 须属于该列被关联表且存在（查库——KTD4 预解析记录集）
+                // R26：recordId 须属于该列被关联表且存在（查库——KTD4 预解析记录集，id 索引 O(1)）
                 LinkTableContext context = linkTableContext(column, noteId, userId, contextByTableId);
-                NoteRecord record = null;
-                for (NoteRecord candidate : context.getSortedRecords())
-                {
-                    if (selection.getRecordId().equals(candidate.getId()))
-                    {
-                        record = candidate;
-                        break;
-                    }
-                }
+                NoteRecord record = context.getRecordsById().get(selection.getRecordId());
                 if (record == null)
                 {
                     throw driftException("关联列“" + columnName + "”补参选择的记录（id="
@@ -1336,9 +1319,10 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
      * 基础列单元格三源合并（R21）：Excel 值 &gt; 列默认值 &gt; 用户补参；NULL/空 → 空串。
      * 类型违规单元格不用 Excel 值也不用默认值（预检将其送入补参弹框，导入以补参为准）；
      * 复选框显示值映射 true→'0'（勾选）/false→'1'（未勾选）（U2 偏离决定，三源统一映射）。
+     * 默认值经 {@code defaultValuesByColumnId} 预解析传入（避免逐单元格重复解析 property JSON）。
      */
     private static String resolveBasicValue(NoteColumn column, int rowIndex, String[] excelValues,
-            boolean[] violations, Map<String, String> columnValues)
+            boolean[] violations, Map<String, String> columnValues, Map<Long, String> defaultValuesByColumnId)
     {
         String columnName = column.getName() == null ? "" : column.getName().trim();
         if (excelValues != null && rowIndex < excelValues.length && excelValues[rowIndex] != null)
@@ -1348,7 +1332,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         boolean violation = violations != null && rowIndex < violations.length && violations[rowIndex];
         if (!violation)
         {
-            String defaultValue = ColumnDefaultValueSupport.read(column);
+            String defaultValue = defaultValuesByColumnId.get(column.getId());
             if (defaultValue != null)
             {
                 return mapCheckboxValue(column, defaultValue);
@@ -1446,12 +1430,12 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         Set<Long> importedLinkColumnIds = new HashSet<>();
         for (NoteColumn column : columns)
         {
-            if (column == null || column.getType() == null || isHidden(column))
+            if (column == null || column.getType() == null || ExcelColumnMatcher.isHidden(column))
             {
                 continue;
             }
             Long type = column.getType();
-            if ((type == TYPE_SINGLE_LINK || type == TYPE_DOUBLE_LINK)
+            if ((type == ExcelColumnMatcher.TYPE_SINGLE_LINK || type == ExcelColumnMatcher.TYPE_DOUBLE_LINK)
                     && headerIndexByColumn.containsKey(column))
             {
                 importedLinkColumnIds.add(column.getId());
@@ -1624,18 +1608,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             }
             JSONObject prop = parsePropertySafe(locked);
             String select = prop.getString(ColumnDefaultValueSupport.SELECT_KEY);
-            Set<String> existing = new LinkedHashSet<>();
-            if (select != null && !select.trim().isEmpty())
-            {
-                for (String part : select.replace("，", ",").split(","))
-                {
-                    String option = part.trim();
-                    if (!option.isEmpty())
-                    {
-                        existing.add(option);
-                    }
-                }
-            }
+            Set<String> existing = ColumnDefaultValueSupport.parseSelectOptions(locked);
             List<String> toAppend = new ArrayList<>();
             for (String candidate : candidates)
             {

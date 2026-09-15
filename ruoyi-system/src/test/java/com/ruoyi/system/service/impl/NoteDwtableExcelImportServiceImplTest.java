@@ -460,6 +460,70 @@ class NoteDwtableExcelImportServiceImplTest
         assertTrue(result.isHasBlockingIssues());
     }
 
+    // ===== 同列缺值+类型违规合并为一条缺参（rowNumbers 并集、kind=类型违规、reason 保留违规描述） =====
+
+    @Test
+    void precheck_sameColumnEmptyAndViolation_mergedSingleMissingParam()
+    {
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
+                column(101L, "名称", 1L, null, 0L),
+                column(102L, "数量", 2L, null, 0L)));
+
+        // 数字列：第 3 行空、第 4 行 "abc" 违规
+        byte[] bytes = singleSheetBytes(new String[] {"名称", "数量"}, Arrays.asList(
+                new String[] {"a", "12"},
+                new String[] {"b", ""},
+                new String[] {"c", "abc"}));
+
+        ExcelImportPrecheckResult result =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
+
+        assertEquals(1, result.getMissingParams().size());
+        MissingParam param = result.getMissingParams().get(0);
+        assertEquals("数量", param.getColumnName());
+        assertEquals(ExcelImportPrecheckResult.KIND_TYPE_VIOLATION, param.getKind());
+        assertEquals(Arrays.asList(3, 4), param.getRowNumbers());
+        assertTrue(param.getReason().contains("数字格式非法"));
+        assertTrue(result.isHasBlockingIssues());
+    }
+
+    // ===== 空行过滤 + 物理行号：样式空行/物理空行跳过，行号与 Excel UI 一致 =====
+
+    @Test
+    void precheck_skipsEmptyRows_reportsPhysicalRowNumbers()
+    {
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
+                column(101L, "名称", 1L, null, 0L),
+                column(102L, "数量", 2L, null, 0L)));
+
+        // 第 2 行有效；第 3 行样式空行（有行有空白单元格）；第 4 行物理空行（未创建）；第 5 行违规
+        byte[] bytes = workbookBytes(workbook -> {
+            XSSFSheet sheet = workbook.createSheet("目标表");
+            Row header = sheet.createRow(0);
+            header.createCell(0).setCellValue("名称");
+            header.createCell(1).setCellValue("数量");
+            Row row2 = sheet.createRow(1);
+            row2.createCell(0).setCellValue("a");
+            row2.createCell(1).setCellValue("1");
+            Row row3 = sheet.createRow(2);
+            row3.createCell(0).setBlank();
+            row3.createCell(1).setCellValue("");
+            Row row5 = sheet.createRow(4);
+            row5.createCell(0).setCellValue("c");
+            row5.createCell(1).setCellValue("abc");
+        });
+
+        ExcelImportPrecheckResult result =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
+
+        // 空行被跳过：无缺值项；违规行号为物理行号 5（与 Excel UI 一致）
+        assertEquals(1, result.getMissingParams().size());
+        MissingParam param = result.getMissingParams().get(0);
+        assertEquals("数量", param.getColumnName());
+        assertEquals(ExcelImportPrecheckResult.KIND_TYPE_VIOLATION, param.getKind());
+        assertEquals(Collections.singletonList(5), param.getRowNumbers());
+    }
+
     // ===== 多选未命中选项 → 新选项创建项 =====
 
     @Test
@@ -1189,10 +1253,11 @@ class NoteDwtableExcelImportServiceImplTest
         verify(noteColumnMapper, never()).updateNoteColumn(any(NoteColumn.class));
     }
 
-    // ===== 回滚（AE8）：第 50 行失败 → 目标表零写入 + B 表存量 item 零修改 + 选项零追加 =====
+    // ===== 回滚（AE8，失败发生在 flush 前）：第 50 行 × 2 列 = 100 单元格 < 500，
+    // 批量 flush 尚未发生 → 目标表零写入 + B 表存量 item 零修改 + 选项零追加 =====
 
     @Test
-    void import_rowFailure_zeroWritesAfterRollback()
+    void import_rowFailureBeforeFlush_zeroWritesAfterRollback()
     {
         when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
                 column(101L, "名称", 1L, null, 0L),
@@ -1498,5 +1563,269 @@ class NoteDwtableExcelImportServiceImplTest
         verify(noteRecordService, times(2)).recomputeLookupColumnValues(any(NoteColumn.class));
         verify(noteRecordService, times(2)).recomputeSetOperationsForLookup(any(NoteColumn.class));
         verify(noteRecordService, times(2)).recomputeSetOperationColumn(any(NoteColumn.class));
+    }
+
+    // ==================================================================
+    // 审查修复批：列名 trim 两阶段链路 / 隐藏 name 列 / 参数条目上限 / flush 后失败 /
+    // 防御分支 / 多选全角逗号
+    // ==================================================================
+
+    // ===== #4：列名带首尾空格的两阶段链路（预检 DTO trim 输出 → 基线回传不漂移、补参生效） =====
+
+    @Test
+    void precheckAndImport_columnNameWithSpaces_trimmedEndToEnd()
+    {
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
+                column(101L, "名称", 1L, null, 0L),
+                column(103L, " 状态 ", 1L, null, 0L)));
+
+        // 第 2 行" 状态 "列空（同行名称列有值，行本身非全空行）
+        byte[] bytes = singleSheetBytes(new String[] {"名称", "状态"}, Arrays.asList(
+                new String[] {"a", "x"},
+                new String[] {"b", ""}));
+
+        // 预检：缺值列名输出为 trim 后的"状态"（与阶段二漂移比对键、补参取值键口径一致）
+        ExcelImportPrecheckResult result =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
+        assertEquals(1, result.getMissingParams().size());
+        assertEquals("状态", result.getMissingParams().get(0).getColumnName());
+
+        // 导入：基线/补参键用 trim 后列名 → 无漂移，补参对空单元格生效
+        int count = runImport(bytes, paramsJson(bytes, "[\"状态\"]", null, null, "{\"状态\":\"补值\"}", null));
+
+        assertEquals(2, count);
+        verify(noteDwtableItemMapper, times(1)).insertNoteDwtableItems(itemsCaptor.capture());
+        List<String> values = new ArrayList<>();
+        for (NoteDwtableItem item : itemsCaptor.getValue())
+        {
+            values.add(item.getValue());
+        }
+        // 行序 × 列序（名称, 状态）：行2 的" 状态 "列 = 补参"补值"
+        assertEquals(Arrays.asList("a", "x", "b", "补值"), values);
+    }
+
+    // ===== #6：隐藏最左 type=1 列 → name 派生取首个可见 type=1 列 =====
+
+    @Test
+    void import_hiddenFirstNameColumn_nameDerivedFromFirstVisibleType1()
+    {
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
+                column(150L, "隐藏名", 1L, null, 1L),
+                column(101L, "名称", 1L, null, 0L)));
+
+        byte[] bytes = singleSheetBytes(new String[] {"名称"},
+                Collections.singletonList(new String[] {"a"}));
+
+        runImport(bytes, paramsJson(bytes, null, null, null, null, null));
+
+        verify(noteRecordMapper, times(1)).insertNoteRecord(recordCaptor.capture());
+        assertEquals("a", recordCaptor.getValue().getName());
+    }
+
+    // ===== #9：导入参数条目数超限（columnValues / relationSelections 各 10000）拒绝 =====
+
+    @Test
+    void import_paramsOverLimit_rejected()
+    {
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Collections.singletonList(
+                column(101L, "名称", 1L, null, 0L)));
+        byte[] bytes = singleSheetBytes(new String[] {"名称"},
+                Collections.singletonList(new String[] {"a"}));
+
+        // columnValues 10001 条 > 10000
+        JSONObject overLimitColumnValues = paramsRootOf(bytes);
+        JSONObject columnValues = new JSONObject();
+        for (int i = 0; i <= 10000; i++)
+        {
+            columnValues.put("列" + i, "v");
+        }
+        overLimitColumnValues.put("columnValues", columnValues);
+        ServiceException ex = assertThrows(ServiceException.class,
+                () -> runImport(bytes, overLimitColumnValues.toJSONString()));
+        assertTrue(ex.getMessage().contains("导入参数条目数超限"));
+        assertTrue(ex.getMessage().contains("columnValues"));
+
+        // relationSelections 10001 条 > 10000
+        JSONObject overLimitSelections = paramsRootOf(bytes);
+        JSONArray selections = new JSONArray();
+        for (int i = 0; i <= 10000; i++)
+        {
+            JSONObject selection = new JSONObject();
+            selection.put("columnName", "关联");
+            selection.put("name", "n" + i);
+            selections.add(selection);
+        }
+        overLimitSelections.put("relationSelections", selections);
+        ex = assertThrows(ServiceException.class,
+                () -> runImport(bytes, overLimitSelections.toJSONString()));
+        assertTrue(ex.getMessage().contains("导入参数条目数超限"));
+        assertTrue(ex.getMessage().contains("relationSelections"));
+
+        verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
+    }
+
+    /** 构造带合法指纹与空基线的 params 根对象（超限测试用） */
+    private JSONObject paramsRootOf(byte[] bytes)
+    {
+        JSONObject root = new JSONObject();
+        JSONObject fingerprint = new JSONObject();
+        fingerprint.put("size", (long) bytes.length);
+        fingerprint.put("md5", md5Hex(bytes));
+        root.put("fileFingerprint", fingerprint);
+        JSONObject baseline = new JSONObject();
+        baseline.put("missingColumns", new JSONArray());
+        baseline.put("missNames", new JSONArray());
+        baseline.put("ambiguity", new JSONArray());
+        root.put("precheckBaseline", baseline);
+        root.put("columnValues", new JSONObject());
+        root.put("relationSelections", new JSONArray());
+        return root;
+    }
+
+    // ===== #15：≥501 单元格中途失败（首批已 flush 后）→ 异常传播且失败点后零后续写入 =====
+
+    @Test
+    void import_rowFailureAfterFlush_zeroSubsequentMapperWrites()
+    {
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
+                column(101L, "名称", 1L, null, 0L),
+                column(102L, "数量", 2L, null, 0L),
+                column(107L, "备注", 1L, null, 0L)));
+
+        // 200 行 × 3 列 = 600 单元格：第 167 行末首批 501 单元格 flush，第 200 行注入失败
+        AtomicLong insertCalls = new AtomicLong();
+        when(noteRecordMapper.insertNoteRecord(any(NoteRecord.class))).thenAnswer(inv -> {
+            if (insertCalls.incrementAndGet() == 200L)
+            {
+                throw new ServiceException("第 200 行写入失败");
+            }
+            NoteRecord record = inv.getArgument(0);
+            record.setId(recordIdSequence.getAndIncrement());
+            return 1;
+        });
+
+        List<String[]> rows = new ArrayList<>();
+        for (int i = 0; i < 200; i++)
+        {
+            rows.add(new String[] {"r" + i, "1", "x"});
+        }
+        byte[] bytes = singleSheetBytes(new String[] {"名称", "数量", "备注"}, rows);
+
+        ServiceException ex = assertThrows(ServiceException.class,
+                () -> runImport(bytes, paramsJson(bytes, null, null, null, null, null)));
+        assertEquals("第 200 行写入失败", ex.getMessage());
+
+        // 失败点前：恰好一次首批 flush（501 单元格）；失败点后：零后续 mapper 写调用
+        verify(noteRecordMapper, times(200)).insertNoteRecord(any(NoteRecord.class));
+        verify(noteDwtableItemMapper, times(1)).insertNoteDwtableItems(itemsCaptor.capture());
+        assertEquals(501, itemsCaptor.getValue().size());
+        verify(noteDwtableItemMapper, never()).updateNoteDwtableItem(any(NoteDwtableItem.class));
+        verify(noteDwtableItemMapper, never()).insertNoteDwtableItem(any(NoteDwtableItem.class));
+        verify(noteColumnMapper, never()).updateNoteColumn(any(NoteColumn.class));
+        verify(noteRecordService, never()).recomputeLookupColumnValues(any(NoteColumn.class));
+        verify(noteRecordService, never()).recomputeSetOperationColumn(any(NoteColumn.class));
+    }
+
+    // ===== #16：checkDrift 新增同名记录分支（基线歧义为空、阶段二两条同名 → 拒绝） =====
+
+    @Test
+    void import_drift_newSameNameRecord_rejected()
+    {
+        mockDoubleLinkColumns();
+        mockRelatedTable(relatedTable("被关联表", NOTE_ID));
+        // 预检后新增同名"张三"记录：阶段二出现两条同名 → 基线（歧义为空）外的歧义
+        mockRelatedRecords(Arrays.asList(record(201L, "张三", 1L), record(202L, "张三", 2L)));
+
+        byte[] bytes = singleSheetBytes(new String[] {"名称", "关联_文本"},
+                Collections.singletonList(new String[] {"a", "张三"}));
+
+        ServiceException ex = assertThrows(ServiceException.class,
+                () -> runImport(bytes, paramsJson(bytes, null, null, null, null, null)));
+        assertTrue(ex.getMessage().contains("数据已变化，请重新预检"));
+        assertTrue(ex.getMessage().contains("新的同名记录"));
+        verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
+    }
+
+    // ===== #16：columnValues 含不存在列名 → 拒绝 =====
+
+    @Test
+    void import_supplement_unknownColumnName_rejected()
+    {
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
+                column(101L, "名称", 1L, null, 0L),
+                column(102L, "数量", 2L, null, 0L)));
+
+        byte[] bytes = singleSheetBytes(new String[] {"名称", "数量"},
+                Collections.singletonList(new String[] {"a", "1"}));
+
+        ServiceException ex = assertThrows(ServiceException.class,
+                () -> runImport(bytes, paramsJson(bytes, null, null, null, "{\"不存在列\":\"x\"}", null)));
+        assertTrue(ex.getMessage().contains("在目标数据表中不存在"));
+        verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
+    }
+
+    // ===== #16：columnValues 键为 21 关联列 → "不是基础列"拒绝 =====
+
+    @Test
+    void import_supplement_nonBasicColumn_rejected()
+    {
+        mockDoubleLinkColumns();
+        mockRelatedTable(relatedTable("被关联表", NOTE_ID));
+        mockRelatedRecords(Collections.singletonList(record(100L, "张三", 1L)));
+
+        byte[] bytes = singleSheetBytes(new String[] {"名称", "关联_文本"},
+                Collections.singletonList(new String[] {"a", "张三"}));
+
+        ServiceException ex = assertThrows(ServiceException.class,
+                () -> runImport(bytes, paramsJson(bytes, null, null, null, "{\"关联\":\"x\"}", null)));
+        assertTrue(ex.getMessage().contains("不是基础列"));
+        verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
+    }
+
+    // ===== #16：relationSelections 列未映射（缺列关联列）→ "未参与本次导入"拒绝 =====
+
+    @Test
+    void import_supplement_relationColumnNotImported_rejected()
+    {
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
+                column(101L, "名称", 1L, null, 0L),
+                column(104L, "关联", 21L, "{\"table_id\":80}", 0L)));
+        mockRelatedTable(relatedTable("被关联表", NOTE_ID));
+        mockRelatedRecords(Collections.singletonList(record(100L, "张三", 1L)));
+
+        // 关联列不在 Excel 表头中（关联缺列）→ 不在 headerIndexByColumn
+        byte[] bytes = singleSheetBytes(new String[] {"名称"},
+                Collections.singletonList(new String[] {"a"}));
+
+        ServiceException ex = assertThrows(ServiceException.class,
+                () -> runImport(bytes, paramsJson(bytes, "[\"关联\"]", null, null, null,
+                        "[{\"columnName\":\"关联\",\"name\":\"张三\",\"recordId\":100}]")));
+        assertTrue(ex.getMessage().contains("未参与本次导入"));
+        verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
+    }
+
+    // ===== #19：多选单元格全角逗号归一拆分（预检拆分命中 + 阶段二选项追加） =====
+
+    @Test
+    void precheckAndImport_multiSelectFullWidthComma_splitPerOption()
+    {
+        NoteColumn multiSelect = column(108L, "标签", 4L, "{\"select\":\"高,中\"}", 0L);
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class)))
+                .thenReturn(Collections.singletonList(multiSelect));
+        when(noteColumnMapper.selectNoteColumnByIdForUpdate(108L)).thenReturn(multiSelect);
+
+        // "高，紧急"（全角逗号）：归一后拆分 → "高"命中选项、"紧急"进新选项（不整串污染）
+        byte[] bytes = singleSheetBytes(new String[] {"标签"},
+                Collections.singletonList(new String[] {"高，紧急"}));
+
+        ExcelImportPrecheckResult result =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
+        assertTrue(result.getMissingParams().isEmpty());
+        assertEquals(1, result.getNewOptions().size());
+        assertEquals("紧急", result.getNewOptions().get(0).getOptionText());
+
+        runImport(bytes, paramsJson(bytes, null, null, null, null, null));
+        verify(noteColumnMapper, times(1)).updateNoteColumn(columnCaptor.capture());
+        assertEquals("高,中,紧急", parseSelectOf(columnCaptor.getValue()));
     }
 }

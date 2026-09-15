@@ -30,7 +30,10 @@ import com.ruoyi.common.exception.ServiceException;
  * <li>zip 解压资源边界三参数显式声明（R4）：minInflateRatio 0.01、maxEntrySize 64MB、maxTextSize 10MB；</li>
  * <li>MultipartFile 落盘为系统临时目录下不可预测名的临时文件（originalFilename 绝不参与路径拼接，
  * 防目录穿越），{@code WorkbookFactory.create} 只读模式打开，try-finally 删除临时文件（含异常路径）；</li>
- * <li>行/列数上限检查（R3/R4）：单 sheet 行数超 {@link #MAX_ROWS}、单行列数超 {@link #MAX_COLS} 拒绝；</li>
+ * <li>行/列数上限检查（R3/R4）：单 sheet 行数超 {@link #MAX_ROWS}、单行列数超 {@link #MAX_COLS}、
+ *     单 sheet 单元格总数超 {@link #MAX_TOTAL_CELLS}（DOM 全量加载的内存上界，含表头行）拒绝；</li>
+ * <li>全空数据行（有行无值：样式空行 / Del 清除内容行）跳过，保留行的行号为 Excel 1-based
+ *     物理行号（与 Excel UI 一致，供预检缺参行号提示）；</li>
  * <li>单元格值统一经 {@link DataFormatter} 取显示文本（KTD9，与导出显示值对称）。</li>
  * </ul>
  * <p>
@@ -52,9 +55,14 @@ public final class ExcelWorkbookReader
     /** 单行单元格列数上限（含表头行，R4） */
     public static final int MAX_COLS = 256;
 
+    /** 单工作表单元格总数上限（含表头行）：DOM 全量加载的内存上界 */
+    public static final long MAX_TOTAL_CELLS = 1_000_000L;
+
     static
     {
-        // zip 解压资源边界（R4）：显式声明（minInflateRatio 0.01 为 POI 默认值），防 zip bomb 与解压放大
+        // zip 解压资源边界（R4）：显式声明（minInflateRatio 0.01 为 POI 默认值），防 zip bomb 与解压放大。
+        // 注意：ZipSecureFile 的阈值为 JVM 全局静态配置，本类一经加载即对同 JVM 全部 POI 使用方生效
+        //（含 ruoyi-common 的 ExcelUtil 等既有路径），不仅是本导入链路
         ZipSecureFile.setMinInflateRatio(0.01);
         ZipSecureFile.setMaxEntrySize(64L * 1024 * 1024);
         ZipSecureFile.setMaxTextSize(10_000_000L);
@@ -87,6 +95,21 @@ public final class ExcelWorkbookReader
      */
     static List<ParsedSheet> parse(MultipartFile file, int maxRows, int maxCols)
     {
+        return parse(file, maxRows, maxCols, MAX_TOTAL_CELLS);
+    }
+
+    /**
+     * 带行列与单元格总数上限参数的解析入口（测试友好重载，注入小阈值验证上限逻辑）。
+     *
+     * @param file 上传的 Excel 文件
+     * @param maxRows 单 sheet 行数上限（含表头行）
+     * @param maxCols 单行列数上限（含表头行）
+     * @param maxTotalCells 单 sheet 单元格总数上限（含表头行）
+     * @return 同 {@link #parse(MultipartFile)}
+     * @throws ServiceException 同 {@link #parse(MultipartFile)}
+     */
+    static List<ParsedSheet> parse(MultipartFile file, int maxRows, int maxCols, long maxTotalCells)
+    {
         if (file == null)
         {
             throw new ServiceException("导入文件不能为空");
@@ -110,7 +133,7 @@ public final class ExcelWorkbookReader
                 sheets = new ArrayList<>(workbook.getNumberOfSheets());
                 for (int i = 0; i < workbook.getNumberOfSheets(); i++)
                 {
-                    sheets.add(parseSheet(workbook.getSheetAt(i), formatter, maxRows, maxCols));
+                    sheets.add(parseSheet(workbook.getSheetAt(i), formatter, maxRows, maxCols, maxTotalCells));
                 }
             }
             return sheets;
@@ -144,14 +167,16 @@ public final class ExcelWorkbookReader
     }
 
     /**
-     * 解析单个 sheet：首行为表头，其余行为数据行（物理空行跳过）。
+     * 解析单个 sheet：首行为表头，其余行为数据行；全空数据行（row==null 或有行无值）
+     * 跳过；保留行携带 Excel 1-based 物理行号；逐行累计单元格总数（含表头行），超限拒绝。
      */
-    private static ParsedSheet parseSheet(Sheet sheet, DataFormatter formatter, int maxRows, int maxCols)
+    private static ParsedSheet parseSheet(Sheet sheet, DataFormatter formatter, int maxRows, int maxCols,
+            long maxTotalCells)
     {
         String sheetName = sheet.getSheetName();
         if (sheet.getPhysicalNumberOfRows() == 0)
         {
-            return new ParsedSheet(sheetName, Collections.<String>emptyList(), Collections.<List<String>>emptyList());
+            return new ParsedSheet(sheetName, Collections.<String>emptyList(), Collections.<RowData>emptyList());
         }
 
         int totalRows = sheet.getLastRowNum() + 1;
@@ -161,16 +186,51 @@ public final class ExcelWorkbookReader
         }
 
         List<String> headers = formatRow(sheet.getRow(0), formatter, sheetName, 1, maxCols);
-        List<List<String>> rows = new ArrayList<>(Math.max(0, totalRows - 1));
+        long totalCells = headers.size();
+        if (totalCells > maxTotalCells)
+        {
+            throw new ServiceException("工作表[" + sheetName + "]单元格总数已达 " + totalCells
+                    + "，超过单元格总数上限 " + maxTotalCells);
+        }
+        List<RowData> rows = new ArrayList<>(Math.max(0, totalRows - 1));
         for (int r = 1; r <= sheet.getLastRowNum(); r++)
         {
             Row row = sheet.getRow(r);
-            if (row != null)
+            if (row == null)
             {
-                rows.add(formatRow(row, formatter, sheetName, r + 1, maxCols));
+                // 物理空行（该行从未写入）：无单元格可解析，跳过
+                continue;
             }
+            List<String> cells = formatRow(row, formatter, sheetName, r + 1, maxCols);
+            totalCells += cells.size();
+            if (totalCells > maxTotalCells)
+            {
+                throw new ServiceException("工作表[" + sheetName + "]单元格总数已达 " + totalCells
+                        + "，超过单元格总数上限 " + maxTotalCells);
+            }
+            if (isAllEmpty(cells))
+            {
+                // 有行无值（样式空行 / Del 清除内容行）：跳过，不产出全空记录
+                continue;
+            }
+            rows.add(new RowData(r + 1, cells));
         }
         return new ParsedSheet(sheetName, headers, rows);
+    }
+
+    /**
+     * 判定一行单元格显示文本是否全空（null/空白 trim 后均算空）。
+     */
+    private static boolean isAllEmpty(List<String> cells)
+    {
+        for (String cell : cells)
+        {
+            if (cell != null && !cell.trim().isEmpty())
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -215,10 +275,10 @@ public final class ExcelWorkbookReader
         /** 首行表头（显示文本），空 sheet 为空列表 */
         private final List<String> headers;
 
-        /** 数据行（第 2 行起，物理空行已跳过），每行为显示文本列表 */
-        private final List<List<String>> rows;
+        /** 数据行（第 2 行起，全空行已跳过），每行含 Excel 1-based 物理行号与显示文本列表 */
+        private final List<RowData> rows;
 
-        ParsedSheet(String sheetName, List<String> headers, List<List<String>> rows)
+        ParsedSheet(String sheetName, List<String> headers, List<RowData> rows)
         {
             this.sheetName = sheetName;
             this.headers = Collections.unmodifiableList(headers);
@@ -235,9 +295,39 @@ public final class ExcelWorkbookReader
             return headers;
         }
 
-        public List<List<String>> getRows()
+        public List<RowData> getRows()
         {
             return rows;
+        }
+    }
+
+    /**
+     * 单个数据行：Excel 1-based 物理行号（与 Excel UI 行号一致）+ 单元格显示文本列表。
+     * <p>
+     * 分片合并时各行保留其所属 sheet 自身的物理行号（不重排）。
+     */
+    public static final class RowData
+    {
+        /** Excel 1-based 物理行号（表头为第 1 行，首个数据行为第 2 行） */
+        private final int rowNumber;
+
+        /** 单元格显示文本列表（下标与表头列对齐，行短于表头数时为截断列表） */
+        private final List<String> cells;
+
+        RowData(int rowNumber, List<String> cells)
+        {
+            this.rowNumber = rowNumber;
+            this.cells = Collections.unmodifiableList(new ArrayList<>(cells));
+        }
+
+        public int getRowNumber()
+        {
+            return rowNumber;
+        }
+
+        public List<String> getCells()
+        {
+            return cells;
         }
     }
 }

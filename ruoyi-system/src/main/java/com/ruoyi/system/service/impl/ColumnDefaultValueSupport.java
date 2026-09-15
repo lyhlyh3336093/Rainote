@@ -272,8 +272,10 @@ public final class ColumnDefaultValueSupport
 
     /**
      * 解析单选/多选列的选项集（property select 逗号字符串，全角逗号归一为半角）。
+     * <p>
+     * Excel 导入链路的唯一实现（预检/导入两阶段共用，勿在 service 内平行拷贝）。
      */
-    private static Set<String> parseSelectOptions(NoteColumn column)
+    public static Set<String> parseSelectOptions(NoteColumn column)
     {
         JSONObject prop = parseSafe(column.getProperty());
         Set<String> options = new HashSet<>();
@@ -327,8 +329,10 @@ public final class ColumnDefaultValueSupport
 
     /**
      * 宽松解析 property JSON：null/空/非法时返回空 JSONObject（不抛异常）。
+     * <p>
+     * property 解析的唯一实现（{@code NoteDwtableExcelImportServiceImpl#parsePropertySafe} 委托此处）。
      */
-    private static JSONObject parseSafe(String propertyJson)
+    public static JSONObject parseSafe(String propertyJson)
     {
         if (propertyJson == null || propertyJson.trim().isEmpty())
         {

@@ -134,11 +134,12 @@ class ExcelWorkbookReaderTest
         assertEquals("学生表", first.getSheetName());
         assertEquals(Arrays.asList("姓名", "年龄"), first.getHeaders());
         assertEquals(1, first.getRows().size());
-        assertEquals(Arrays.asList("张三", "20"), first.getRows().get(0));
+        assertEquals(Arrays.asList("张三", "20"), first.getRows().get(0).getCells());
+        assertEquals(2, first.getRows().get(0).getRowNumber());
         ParsedSheet second = sheets.get(1);
         assertEquals("成绩表", second.getSheetName());
         assertEquals(Arrays.asList("科目", "分数"), second.getHeaders());
-        assertEquals(Arrays.asList("语文", "99.5"), second.getRows().get(0));
+        assertEquals(Arrays.asList("语文", "99.5"), second.getRows().get(0).getCells());
     }
 
     @Test
@@ -154,7 +155,7 @@ class ExcelWorkbookReaderTest
         List<ParsedSheet> sheets = ExcelWorkbookReader.parse(multipartFileOf("headers.xlsx", bytes));
 
         assertEquals(Arrays.asList("列一", "123"), sheets.get(0).getHeaders());
-        assertEquals(Arrays.asList("值"), sheets.get(0).getRows().get(0));
+        assertEquals(Arrays.asList("值"), sheets.get(0).getRows().get(0).getCells());
     }
 
     @Test
@@ -218,6 +219,61 @@ class ExcelWorkbookReaderTest
         assertNotNull(exception.getCause());
         assertTrue(causeChainContains(exception, "Zip bomb"),
                 "压缩比超限 zip 应被 ZipSecureFile 检测拒绝");
+    }
+
+    @Test
+    void parseShouldSkipAllEmptyRowsAndKeepPhysicalRowNumbers()
+    {
+        // 第 3 行：样式空行（有行有空白单元格）；第 4 行：物理空行（从未创建）；第 5 行：有效数据
+        byte[] bytes = workbookBytes(workbook -> {
+            XSSFSheet sheet = workbook.createSheet("空行表");
+            org.apache.poi.ss.usermodel.Row header = sheet.createRow(0);
+            header.createCell(0).setCellValue("名称");
+            header.createCell(1).setCellValue("数量");
+            org.apache.poi.ss.usermodel.Row row2 = sheet.createRow(1);
+            row2.createCell(0).setCellValue("a");
+            row2.createCell(1).setCellValue("1");
+            org.apache.poi.ss.usermodel.Row row3 = sheet.createRow(2);
+            row3.createCell(0).setBlank();
+            row3.createCell(1).setCellValue("");
+            org.apache.poi.ss.usermodel.Row row5 = sheet.createRow(4);
+            row5.createCell(0).setCellValue("c");
+            row5.createCell(1).setCellValue("abc");
+        });
+
+        List<ParsedSheet> sheets = ExcelWorkbookReader.parse(multipartFileOf("empty-rows.xlsx", bytes));
+
+        ParsedSheet sheet = sheets.get(0);
+        // 全空行（row==null 与有行无值两种形态）均跳过
+        assertEquals(2, sheet.getRows().size());
+        // 保留行为 Excel 1-based 物理行号（与 Excel UI 一致）：第 2 行与第 5 行
+        assertEquals(2, sheet.getRows().get(0).getRowNumber());
+        assertEquals(5, sheet.getRows().get(1).getRowNumber());
+        assertEquals(Arrays.asList("c", "abc"), sheet.getRows().get(1).getCells());
+    }
+
+    @Test
+    void parseShouldRejectTotalCellLimitExceeded()
+    {
+        // 表头 2 + 数据行 3 = 5 个单元格；注入小阈值 4 → 逐行累计超限拒绝
+        byte[] bytes = workbookBytes(workbook -> {
+            XSSFSheet sheet = workbook.createSheet("密表");
+            org.apache.poi.ss.usermodel.Row header = sheet.createRow(0);
+            header.createCell(0).setCellValue("列一");
+            header.createCell(1).setCellValue("列二");
+            org.apache.poi.ss.usermodel.Row row2 = sheet.createRow(1);
+            row2.createCell(0).setCellValue("a");
+            row2.createCell(1).setCellValue("b");
+            org.apache.poi.ss.usermodel.Row row3 = sheet.createRow(2);
+            row3.createCell(0).setCellValue("c");
+        });
+
+        ServiceException exception = assertThrows(ServiceException.class,
+                () -> ExcelWorkbookReader.parse(multipartFileOf("cells.xlsx", bytes),
+                        ExcelWorkbookReader.MAX_ROWS, ExcelWorkbookReader.MAX_COLS, 4L));
+
+        assertTrue(exception.getMessage().contains("单元格总数"));
+        assertTrue(exception.getMessage().contains("密表"));
     }
 
     /** 遍历异常 cause 链（限深防循环），判断是否某层消息含关键字 */
