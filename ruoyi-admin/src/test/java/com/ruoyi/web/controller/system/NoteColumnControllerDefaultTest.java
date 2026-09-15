@@ -15,6 +15,7 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import com.ruoyi.common.core.domain.model.LoginUser;
 import com.ruoyi.common.exception.ServiceException;
 import com.ruoyi.common.utils.myHashMap;
+import com.ruoyi.system.agent.security.AgentOwnershipChecker;
 import com.ruoyi.system.domain.NoteColumn;
 import com.ruoyi.system.domain.vo.NoteColumnVo;
 import com.ruoyi.system.service.INoteColumnService;
@@ -35,7 +36,8 @@ import static org.mockito.Mockito.when;
  * <p>
  * 覆盖：仅 property.default 变更走 updateColumnDefault 直更入口；
  * name/isShow 等其他字段变更或未携带 default 键走 updateNoteColumn 原路径；
- * 直更路径异常（非法默认值/归属校验失败）以 ServiceException 传播。
+ * 直更路径异常（非法默认值/归属校验失败）以 ServiceException 传播；
+ * 端点入口统一归属校验（审查修复）：非归属用户无论走哪条分支均被拒。
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -47,6 +49,9 @@ class NoteColumnControllerDefaultTest
 
     @Mock
     private INoteColumnService noteColumnService;
+
+    @Mock
+    private AgentOwnershipChecker agentOwnershipChecker;
 
     @InjectMocks
     private NoteColumnController controller;
@@ -210,5 +215,45 @@ class NoteColumnControllerDefaultTest
         ServiceException ex = assertThrows(ServiceException.class,
                 () -> controller.edit(voWithDefault("状态", property)));
         assertEquals("无权操作他人数据", ex.getMessage());
+    }
+
+    // ===== 入口统一归属校验（审查修复）：非归属用户无论走哪条分支均被拒 =====
+
+    @Test
+    void edit_nonOwnerDefaultOnlyChange_rejectedAtEntrypoint()
+    {
+        when(noteColumnService.selectNoteColumnById(COLUMN_ID))
+                .thenReturn(originColumn("{\"select\":\"进行中\"}"));
+        doThrow(new ServiceException("无权操作他人数据"))
+                .when(agentOwnershipChecker).checkColumnOwnership(COLUMN_ID, USER_ID);
+        myHashMap<String, Object> property = new myHashMap<>();
+        property.put("select", "进行中");
+        property.put("default", "进行中");
+
+        ServiceException ex = assertThrows(ServiceException.class,
+                () -> controller.edit(voWithDefault("状态", property)));
+        assertEquals("无权操作他人数据", ex.getMessage());
+        // 路由判定之前的入口校验拒绝：两条写路径均未被触达
+        verify(noteColumnService, never()).updateColumnDefault(any(Long.class), any(), any(Long.class));
+        verify(noteColumnService, never()).updateNoteColumn(any(NoteColumnVo.class));
+    }
+
+    @Test
+    void edit_nonOwnerWithOtherFieldChange_rejectedAtEntrypoint()
+    {
+        when(noteColumnService.selectNoteColumnById(COLUMN_ID))
+                .thenReturn(originColumn("{\"select\":\"进行中\"}"));
+        doThrow(new ServiceException("无权操作他人数据"))
+                .when(agentOwnershipChecker).checkColumnOwnership(COLUMN_ID, USER_ID);
+        myHashMap<String, Object> property = new myHashMap<>();
+        property.put("select", "进行中");
+        property.put("default", "进行中");
+
+        // 含 name 变更（原 updateNoteColumn 路径，pre-existing 无归属校验面）
+        ServiceException ex = assertThrows(ServiceException.class,
+                () -> controller.edit(voWithDefault("新列名", property)));
+        assertEquals("无权操作他人数据", ex.getMessage());
+        verify(noteColumnService, never()).updateColumnDefault(any(Long.class), any(), any(Long.class));
+        verify(noteColumnService, never()).updateNoteColumn(any(NoteColumnVo.class));
     }
 }

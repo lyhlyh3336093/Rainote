@@ -12,6 +12,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
@@ -853,12 +854,28 @@ class NoteDwtableExcelImportServiceImplTest
         return paired;
     }
 
-    /** 目标表标准列：名称(1) + 关联(21, table_id=80, back_field_id=502) */
+    /** 目标表标准列：名称(1) + 关联(21, table_id=80, back_field_id=502)；被关联表含配对列 502 */
     private void mockDoubleLinkColumns()
     {
-        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
-                column(101L, "名称", 1L, null, 0L),
-                column(104L, "关联", 21L, "{\"table_id\":80,\"back_field_id\":502}", 0L)));
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenAnswer(inv -> {
+            NoteColumn query = inv.getArgument(0);
+            if (RELATED_TABLE_ID.equals(query.getDwtableId()))
+            {
+                // #13：事务段配对列存在性校验依赖被关联表列清单（区分表查询分流）
+                return Collections.singletonList(relatedColumn(502L, "关联的双向链接"));
+            }
+            return Arrays.asList(
+                    column(101L, "名称", 1L, null, 0L),
+                    column(104L, "关联", 21L, "{\"table_id\":80,\"back_field_id\":502}", 0L));
+        });
+    }
+
+    /** 被关联表（tableId=80）列 */
+    private NoteColumn relatedColumn(Long id, String name)
+    {
+        NoteColumn related = column(id, name, 21L, null, 0L);
+        related.setDwtableId(RELATED_TABLE_ID);
+        return related;
     }
 
     // ===== 三源合并（AE3 导入部分）+ 复选框映射 + sort/name 派生 =====
@@ -1114,10 +1131,18 @@ class NoteDwtableExcelImportServiceImplTest
     @Test
     void import_multipleSourceColumns_aggregatedSingleUpdate()
     {
-        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
-                column(101L, "名称", 1L, null, 0L),
-                column(104L, "关联A", 21L, "{\"table_id\":80,\"back_field_id\":502}", 0L),
-                column(105L, "关联B", 21L, "{\"table_id\":80,\"back_field_id\":502}", 0L)));
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenAnswer(inv -> {
+            NoteColumn query = inv.getArgument(0);
+            if (RELATED_TABLE_ID.equals(query.getDwtableId()))
+            {
+                // #13：被关联表列清单含配对列 502（事务段配对列存在性校验）
+                return Collections.singletonList(relatedColumn(502L, "关联的双向链接"));
+            }
+            return Arrays.asList(
+                    column(101L, "名称", 1L, null, 0L),
+                    column(104L, "关联A", 21L, "{\"table_id\":80,\"back_field_id\":502}", 0L),
+                    column(105L, "关联B", 21L, "{\"table_id\":80,\"back_field_id\":502}", 0L));
+        });
         mockRelatedTable(relatedTable("被关联表", NOTE_ID));
         mockRelatedRecords(Collections.singletonList(record(100L, "B记录", 1L)));
         when(noteDwtableItemMapper.selectNoteDwtableItemByRecordAndColumnForUpdate(any(NoteDwtableItem.class)))
@@ -1259,9 +1284,17 @@ class NoteDwtableExcelImportServiceImplTest
     @Test
     void import_rowFailureBeforeFlush_zeroWritesAfterRollback()
     {
-        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
-                column(101L, "名称", 1L, null, 0L),
-                column(104L, "关联", 21L, "{\"table_id\":80,\"back_field_id\":502}", 0L)));
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenAnswer(inv -> {
+            NoteColumn query = inv.getArgument(0);
+            if (RELATED_TABLE_ID.equals(query.getDwtableId()))
+            {
+                // #13：被关联表列清单含配对列 502（事务段配对列存在性校验）
+                return Collections.singletonList(relatedColumn(502L, "关联的双向链接"));
+            }
+            return Arrays.asList(
+                    column(101L, "名称", 1L, null, 0L),
+                    column(104L, "关联", 21L, "{\"table_id\":80,\"back_field_id\":502}", 0L));
+        });
         mockRelatedTable(relatedTable("被关联表", NOTE_ID));
         mockRelatedRecords(Collections.singletonList(record(100L, "B记录", 1L)));
 
@@ -1827,5 +1860,83 @@ class NoteDwtableExcelImportServiceImplTest
         runImport(bytes, paramsJson(bytes, null, null, null, null, null));
         verify(noteColumnMapper, times(1)).updateNoteColumn(columnCaptor.capture());
         assertEquals("高,中,紧急", parseSelectOf(columnCaptor.getValue()));
+    }
+
+    // ==================================================================
+    // 审查修复批二（#13）：两阶段间隙列删除漂移漏网
+    // ==================================================================
+
+    // ===== #13：目标表参与列在事务段被删（前置段快照含、重查不含）→ 拒绝零写入 =====
+
+    @Test
+    void import_drift_participantColumnDeletedInTransaction_rejected()
+    {
+        // 前置段首次列查询返回"名称+数量"，事务段入口重查不含"数量"（模拟预检/前置段后被删）
+        AtomicInteger targetColumnQueries = new AtomicInteger();
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenAnswer(inv -> {
+            NoteColumn query = inv.getArgument(0);
+            if (DWTABLE_ID.equals(query.getDwtableId()) && targetColumnQueries.incrementAndGet() > 1)
+            {
+                return Collections.singletonList(column(101L, "名称", 1L, null, 0L));
+            }
+            return Arrays.asList(
+                    column(101L, "名称", 1L, null, 0L),
+                    column(102L, "数量", 2L, null, 0L));
+        });
+
+        byte[] bytes = singleSheetBytes(new String[] {"名称", "数量"}, Arrays.asList(
+                new String[] {"a", "1"},
+                new String[] {"b", "2"}));
+
+        ServiceException ex = assertThrows(ServiceException.class,
+                () -> runImport(bytes, paramsJson(bytes, null, null, null, null, null)));
+        assertTrue(ex.getMessage().contains("数据已变化，请重新预检"));
+        assertTrue(ex.getMessage().contains("数量"));
+        assertTrue(ex.getMessage().contains("已被删除"));
+
+        // fail-fast 于任何写入之前：拒绝零写入
+        verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
+        verify(noteDwtableItemMapper, never()).insertNoteDwtableItems(anyList());
+        verify(noteDwtableItemMapper, never()).updateNoteDwtableItem(any(NoteDwtableItem.class));
+        verify(noteDwtableItemMapper, never()).insertNoteDwtableItem(any(NoteDwtableItem.class));
+    }
+
+    // ===== #13：backFieldId 配对列不在被关联表列清单（property 残留引用）→ 拒绝零写入 =====
+
+    @Test
+    void import_drift_backFieldColumnDeleted_rejected()
+    {
+        // 源列 property.back_field_id=502 残留（列删除不清理 back_field_id），
+        // 被关联表现存列清单不含 502 → 对称写入前显式校验拒绝
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenAnswer(inv -> {
+            NoteColumn query = inv.getArgument(0);
+            if (RELATED_TABLE_ID.equals(query.getDwtableId()))
+            {
+                return Collections.singletonList(relatedColumn(501L, "其他列"));
+            }
+            return Arrays.asList(
+                    column(101L, "名称", 1L, null, 0L),
+                    column(104L, "关联", 21L, "{\"table_id\":80,\"back_field_id\":502}", 0L));
+        });
+        mockRelatedTable(relatedTable("被关联表", NOTE_ID));
+        mockRelatedRecords(Collections.singletonList(record(100L, "B记录", 1L)));
+
+        byte[] bytes = singleSheetBytes(new String[] {"名称", "关联_文本"},
+                Collections.singletonList(new String[] {"a", "B记录"}));
+
+        ServiceException ex = assertThrows(ServiceException.class,
+                () -> runImport(bytes, paramsJson(bytes, null, null, null, null, null)));
+        assertTrue(ex.getMessage().contains("数据已变化，请重新预检"));
+        assertTrue(ex.getMessage().contains("关联"));
+        assertTrue(ex.getMessage().contains("502"));
+        assertTrue(ex.getMessage().contains("配对列"));
+
+        // fail-fast 于任何写入之前（事务段入口，配对 upsert/orphan item 零发生）
+        verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
+        verify(noteDwtableItemMapper, never()).insertNoteDwtableItems(anyList());
+        verify(noteDwtableItemMapper, never()).updateNoteDwtableItem(any(NoteDwtableItem.class));
+        verify(noteDwtableItemMapper, never()).insertNoteDwtableItem(any(NoteDwtableItem.class));
+        verify(noteDwtableItemMapper, never())
+                .selectNoteDwtableItemByRecordAndColumnForUpdate(any(NoteDwtableItem.class));
     }
 }

@@ -39,6 +39,14 @@
           <a-button size="small" :disabled="state.loading" @click="toggleCollapse(col)">
             {{ col.collapsed ? `展开全部（剩余 ${unhandledCount(col)} 组未处理）` : '折叠未处理项' }}
           </a-button>
+          <a-input
+            v-model:value="col.filterKeyword"
+            size="small"
+            allowClear
+            placeholder="按未命中名过滤"
+            class="precheck-filter"
+            :disabled="state.loading"
+          />
           <a-button size="small" danger :disabled="state.loading" @click="markAllBlank(col)">
             全部留空
           </a-button>
@@ -58,6 +66,10 @@
             :disabled="state.loading"
             option-filter-prop="label"
           />
+        </div>
+        <!-- #14：超出渲染上限的未处理分组计数行（不可展开，经过滤框或"全部留空"处理） -->
+        <div v-if="remainingUnhandledCount(col) > 0" class="precheck-hint" style="margin-bottom: 8px">
+          其余 {{ remainingUnhandledCount(col) }} 组未处理
         </div>
       </template>
 
@@ -113,6 +125,14 @@ import type {
 /** 分组折叠阈值：某列未命中名分组数超过该值时默认折叠，仅展开未处理项（R12 分组规模策略） */
 const COLLAPSE_THRESHOLD = 20;
 
+/**
+ * 折叠分支未处理分组渲染上限（#14）：弹框刚打开时全部分组均未处理，上万 distinct
+ * 未命中名时无上限会渲染数万 a-select 卡死 UI；50 行兼顾首屏渲染开销与滚动定位可用性，
+ * 超出部分以"其余 N 组未处理"计数行提示（不可展开），经上方关键字过滤触达
+ * 或"全部留空"批量处理。
+ */
+const UNHANDLED_RENDER_LIMIT = 50;
+
 /** 基础列/违规列缺参输入分组 */
 interface BasicGroup {
   columnName: string;
@@ -146,6 +166,8 @@ interface RelationColumn {
   columnName: string;
   groups: RelationGroup[];
   collapsed: boolean;
+  /** 未命中名关键字过滤（#14：渲染上限下触达被截断分组） */
+  filterKeyword: string;
 }
 
 /**
@@ -253,6 +275,7 @@ export default defineComponent({
             columnName: m.columnName,
             groups,
             collapsed: groups.length > COLLAPSE_THRESHOLD,
+            filterKeyword: '',
           });
         }
       }
@@ -337,11 +360,21 @@ export default defineComponent({
     const unhandledCount = (col: RelationColumn): number =>
       col.groups.filter((g) => g.selectedId == null && !g.markedBlank).length;
 
-    /** 折叠时只显示未处理项；展开时显示全部 */
+    /** 折叠时只显示未处理项（#14：加渲染上限）；展开时显示全部（用户主动展开不受限） */
     const visibleGroups = (col: RelationColumn): RelationGroup[] => {
       if (!col.collapsed) return col.groups;
-      return col.groups.filter((g) => g.selectedId == null && !g.markedBlank);
+      const unhandled = col.groups.filter((g) => g.selectedId == null && !g.markedBlank);
+      const keyword = (col.filterKeyword || '').trim();
+      if (keyword) {
+        // 关键字过滤：匹配组正常显示（同样受上限保护，防单字符命中数千组再次放大渲染量）
+        return unhandled.filter((g) => g.name.includes(keyword)).slice(0, UNHANDLED_RENDER_LIMIT);
+      }
+      return unhandled.slice(0, UNHANDLED_RENDER_LIMIT);
     };
+
+    /** 折叠分支超出渲染上限的未处理分组数（"其余 N 组未处理"计数行，不可展开） */
+    const remainingUnhandledCount = (col: RelationColumn): number =>
+      col.collapsed ? unhandledCount(col) - visibleGroups(col).length : 0;
 
     const toggleCollapse = (col: RelationColumn) => {
       col.collapsed = !col.collapsed;
@@ -484,6 +517,7 @@ export default defineComponent({
       COLLAPSE_THRESHOLD,
       unhandledCount,
       visibleGroups,
+      remainingUnhandledCount,
       toggleCollapse,
       markAllBlank,
       impactSummary,
@@ -541,6 +575,10 @@ export default defineComponent({
   display: flex;
   gap: 8px;
   margin-bottom: 8px;
+}
+
+.precheck-filter {
+  width: 180px;
 }
 
 .precheck-impact {

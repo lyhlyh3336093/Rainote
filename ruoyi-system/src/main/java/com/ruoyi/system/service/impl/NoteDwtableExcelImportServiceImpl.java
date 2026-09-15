@@ -1027,6 +1027,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         plan.noteId = noteId;
         plan.dwtableId = dwtableId;
         plan.userId = userId;
+        plan.participants.addAll(participants);
         plan.newOptionsByColumnId = newOptionsByColumnId;
         for (int r = 0; r < rowCount; r++)
         {
@@ -1534,8 +1535,10 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     }
 
     /**
-     * 事务写入段（R22，经自注入代理进入）：逐行 NoteRecord insert（sort=maxSort+1 递增、
-     * name 已派生、自增 id 回填）→ items 累积 ≥500 flush → 选项追加（FOR UPDATE）→
+     * 事务写入段（R22，经自注入代理进入）：#13 漂移触发集补"列被删"方向——入口按事务段
+     * 时点重查目标表参与列与被关联表配对列存在性（fail-fast 于任何写入之前）→
+     * 逐行 NoteRecord insert（sort=maxSort+1 递增、name 已派生、自增 id 回填）→
+     * items 累积 ≥500 flush → 选项追加（FOR UPDATE）→
      * items 全量最终 flush（零缓冲不变量）→ 双链对称写入 → 重算编排 → 返回 recordCount。
      * 任一步骤抛 {@link ServiceException} 整体回滚（含被关联表存量 item 修改与选项追加）。
      */
@@ -1545,6 +1548,8 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         int recordCount = 0;
         if (!plan.rows.isEmpty())
         {
+            verifyParticipantsExist(plan);
+            verifyBackFieldsExist(plan);
             Long maxSort = noteRecordMapper.selectMaxSortByDwtableId(plan.dwtableId);
             long sort = (maxSort == null ? 0L : maxSort.longValue()) + 1L;
             List<NoteDwtableItem> batch = new ArrayList<>(BATCH_LIMIT);
@@ -1585,6 +1590,87 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                 plan.noteId, plan.dwtableId, plan.userId, recordCount,
                 plan.newOptionsByColumnId.size(), plan.symmetricTargets.size());
         return recordCount;
+    }
+
+    /**
+     * #13 漂移校验（目标表参与列方向）：事务段入口重查目标表列清单，校验前置段快照的
+     * 全部参与列仍存在——防前置段列快照与事务段之间参与列被并发删除（TOCTOU 窄窗口）
+     * 导致批量 insert 写入指向已删列的孤儿 item。缺失抛 driftException（含列名）。
+     */
+    private void verifyParticipantsExist(ImportPlan plan)
+    {
+        NoteColumn query = new NoteColumn();
+        query.setDwtableId(plan.dwtableId);
+        Set<Long> currentColumnIds = new HashSet<>();
+        for (NoteColumn current : noteColumnMapper.selectNoteColumnList(query))
+        {
+            if (current != null && current.getId() != null)
+            {
+                currentColumnIds.add(current.getId());
+            }
+        }
+        for (NoteColumn participant : plan.participants)
+        {
+            if (!currentColumnIds.contains(participant.getId()))
+            {
+                throw driftException("列“" + (participant.getName() == null ? "" : participant.getName())
+                        + "”已被删除");
+            }
+        }
+    }
+
+    /**
+     * #13 漂移校验（被关联表配对列方向）：双链对称写入前按 (relatedTableId, backFieldId)
+     * 全集（直接遍历 plan.rows 的 symmetricLinks，不随 buildRecomputeTargets 的
+     * processedSourceColumns 去重漏配对）校验每个配对列仍存在于被关联表——
+     * 列删除不清理源列 property 的 back_field_id 残留引用（parseBackFieldId 读到旧值不报错），
+     * 必须显式校验配对列存在性，否则 upsert 会写入指向已删列的孤儿配对 item。
+     */
+    private void verifyBackFieldsExist(ImportPlan plan)
+    {
+        Map<Long, String> sourceNamesByColumnId = new HashMap<>();
+        for (NoteColumn participant : plan.participants)
+        {
+            sourceNamesByColumnId.put(participant.getId(),
+                    participant.getName() == null ? "" : participant.getName());
+        }
+        Map<Long, Set<Long>> backFieldIdsByTableId = new LinkedHashMap<>();
+        Map<Long, String> sourceNameByBackFieldId = new HashMap<>();
+        for (RowPlan row : plan.rows)
+        {
+            for (SymmetricLink link : row.symmetricLinks)
+            {
+                if (link.backFieldId != null)
+                {
+                    backFieldIdsByTableId
+                            .computeIfAbsent(link.relatedTableId, k -> new LinkedHashSet<>())
+                            .add(link.backFieldId);
+                    sourceNameByBackFieldId.putIfAbsent(link.backFieldId,
+                            sourceNamesByColumnId.get(link.sourceItem.getColumnId()));
+                }
+            }
+        }
+        for (Map.Entry<Long, Set<Long>> entry : backFieldIdsByTableId.entrySet())
+        {
+            NoteColumn query = new NoteColumn();
+            query.setDwtableId(entry.getKey());
+            Set<Long> relatedColumnIds = new HashSet<>();
+            for (NoteColumn related : noteColumnMapper.selectNoteColumnList(query))
+            {
+                if (related != null && related.getId() != null)
+                {
+                    relatedColumnIds.add(related.getId());
+                }
+            }
+            for (Long backFieldId : entry.getValue())
+            {
+                if (!relatedColumnIds.contains(backFieldId))
+                {
+                    throw driftException("关联列“" + sourceNameByBackFieldId.get(backFieldId)
+                            + "”的配对列（id=" + backFieldId + "）已被删除");
+                }
+            }
+        }
     }
 
     /**
@@ -1814,6 +1900,9 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
 
         /** 逐行写入计划（与数据行等长同序） */
         final List<RowPlan> rows = new ArrayList<>();
+
+        /** 全部参与列（#13 事务段入口列存在性校验用，含错误消息所需列名） */
+        final List<NoteColumn> participants = new ArrayList<>();
 
         /** 列 id → 有序去重新选项（R19，事务段 FOR UPDATE 追加） */
         Map<Long, LinkedHashSet<String>> newOptionsByColumnId = Collections.emptyMap();
