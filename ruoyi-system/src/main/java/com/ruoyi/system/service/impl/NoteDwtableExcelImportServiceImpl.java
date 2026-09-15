@@ -165,6 +165,9 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         {
             throw new ServiceException("预检失败：多维表与笔记不匹配");
         }
+        // 先算指纹（getBytes），再解析（getInputStream）——Tomcat multipart 对
+        // getInputStream 后再 getBytes 在某些配置下失败（真实 HTTP 才触发，单测 mock 无法覆盖）
+        ExcelImportPrecheckResult.FileFingerprint fp = fingerprint(file);
         List<ParsedSheet> sheets = ExcelWorkbookReader.parse(file);
         SheetSelection selection = ExcelColumnMatcher.selectSheet(sheets, dwtable.getName());
 
@@ -174,7 +177,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         ColumnMapping mapping = ExcelColumnMatcher.mapColumns(selection.getHeaders(), columns);
 
         ExcelImportPrecheckResult result = new ExcelImportPrecheckResult();
-        result.setFileFingerprint(fingerprint(file));
+        result.setFileFingerprint(fp);
         result.setIgnoredSheets(new ArrayList<>(selection.getIgnoredSheetNames()));
         appendSkippedHeaders(result, mapping, noteId, dwtableId);
         analyzeColumns(result, noteId, dwtableId, userId, selection.getRows(), columns, mapping);

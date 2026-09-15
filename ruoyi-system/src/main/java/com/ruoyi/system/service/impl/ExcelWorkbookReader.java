@@ -123,8 +123,13 @@ public final class ExcelWorkbookReader
         try
         {
             // 系统临时目录 + 不可预测文件名，originalFilename 不参与路径拼接
+            // 注：不用 MultipartFile.transferTo()——createTempFile 已创建目标文件，transferTo 在
+            // Windows 上对已存在目标会失败（真实 HTTP 上传才触发，单测 mock 无法覆盖）
             tempFile = Files.createTempFile("excel-import-", ".xlsx");
-            file.transferTo(tempFile.toFile());
+            try (java.io.InputStream in = file.getInputStream())
+            {
+                Files.copy(in, tempFile, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
 
             List<ParsedSheet> sheets;
             try (Workbook workbook = WorkbookFactory.create(tempFile.toFile(), null, true))
