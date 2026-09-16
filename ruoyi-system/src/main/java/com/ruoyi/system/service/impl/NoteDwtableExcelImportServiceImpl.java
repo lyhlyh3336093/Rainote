@@ -1,6 +1,12 @@
 package com.ruoyi.system.service.impl;
 
+import java.io.ByteArrayInputStream;
+import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
@@ -25,12 +31,16 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
 import com.alibaba.fastjson2.JSONObject;
+import com.ruoyi.common.config.RuoYiConfig;
 import com.ruoyi.common.exception.ServiceException;
+import com.ruoyi.system.agent.annotation.AgentOperation;
+import com.ruoyi.system.agent.annotation.AgentParam;
 import com.ruoyi.system.agent.security.AgentOwnershipChecker;
 import com.ruoyi.system.domain.NoteColumn;
 import com.ruoyi.system.domain.NoteDwtable;
 import com.ruoyi.system.domain.NoteDwtableItem;
 import com.ruoyi.system.domain.NoteRecord;
+import com.ruoyi.system.domain.dto.ExcelImportAgentResult;
 import com.ruoyi.system.domain.dto.ExcelImportParams;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.AmbiguityItem;
@@ -155,6 +165,295 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     void setSelf(NoteDwtableExcelImportServiceImpl self)
     {
         this.self = self;
+    }
+
+    // ==================== Agent 操作（dwtable.importExcel，对称 dwtable.importSql） ====================
+
+    /**
+     * Agent 操作入口：导入 Excel（xlsx）文件到指定多维表格（与界面导入等价的追加语义），
+     * 返回成功/失败双态结果（{@link ExcelImportAgentResult}）。
+     * <p>
+     * agent 为单次计划模型（执行结果不回传 LLM 重试），与界面两阶段交互的差异处理：
+     * <ul>
+     *   <li>文件来源：LLM 无法提供二进制内容，{@code filePath} 须为 {@code /common/upload}
+     *       上传返回的 {@code fileName}（{@code /profile/upload/...} 路径），服务端从磁盘读取
+     *       （路径解析限定 profile/upload 根内，防穿越；大小超 {@link ExcelWorkbookReader#MAX_FILE_SIZE} 拒绝）；</li>
+     *   <li>缺参语义：先复用预检管线（同请求内预检即导入，指纹天然一致），基础列缺参
+     *       （缺值/缺列/类型违规）仅当 {@code columnValues} 覆盖全部时才执行导入，
+     *       否则<b>零写入</b>返回结构化缺参清单——LLM 将清单呈现给用户，用户在对话中
+     *       提供补值后由 LLM 生成带 {@code columnValues} 的第二次调用；</li>
+     *   <li>关联列缺参（关联缺列/关联未命中）无法文本补值（须选择被关联表记录 id），
+     *       一律进失败清单，提示用户改走界面导入；</li>
+     *   <li>歧义（同名多条）：按 sort 靠前预选建立关联（与界面预检默认一致），不阻断，
+     *       成功结果中报告歧义处理清单；</li>
+     *   <li>列默认值/新选项/对称写入等静默变更在成功结果中报告（与界面预检清单对齐）。</li>
+     * </ul>
+     * 事务：本方法不加 {@code @Transactional}（对齐 HTTP 控制器直调 {@code importExcelData}，
+     * 非事务前置段 + 写入段经自注入代理进入事务）；归属校验 + noteId 匹配断言自带（KTD6 对称）。
+     *
+     * @param noteId       目标笔记 id（LLM 提供）
+     * @param dwtableId    目标多维表格 id（LLM 提供）
+     * @param filePath     上传文件路径（LLM 提供，/common/upload 返回的 fileName）
+     * @param columnValues 缺参列补值，键=列名、值=统一补值（LLM 提供，可选）
+     * @param userId       框架注入的当前用户 id（不暴露给 LLM）
+     * @return 成功/失败双态结果（失败=未执行任何写入）
+     */
+    @AgentOperation(name = "dwtable.importExcel", destructive = true,
+            description = "导入 Excel（xlsx）文件到指定多维表格（与界面导入等价的追加语义），返回成功/失败双态结果。"
+                    + "文件须先经 /common/upload 上传，filePath 传其返回的 fileName（/profile/upload/... 路径）。"
+                    + "有基础列缺参时仅当 columnValues 全部覆盖才执行导入，否则零写入并返回缺参清单"
+                    + "（将清单告知用户，用户补充补值后带 columnValues 再次调用）。"
+                    + "关联列缺参无法文本补值，须改走界面导入。")
+    public ExcelImportAgentResult importExcel(
+            @AgentParam(value = "noteId", type = "long", required = true, description = "目标笔记 id")
+            Long noteId,
+            @AgentParam(value = "dwtableId", type = "long", required = true, description = "目标多维表格 id")
+            Long dwtableId,
+            @AgentParam(value = "filePath", type = "string", required = true,
+                    description = "服务器上传文件路径（/common/upload 返回的 fileName，形如 /profile/upload/2026/09/16/数据.xlsx）")
+            String filePath,
+            @AgentParam(value = "columnValues", type = "object", required = false,
+                    description = "缺参列补值：键=列名，值=统一补值（可为空串=显式补空），覆盖基础列缺参（缺值/缺列/类型违规）")
+            Map<String, Object> columnValues,
+            Long userId)
+    {
+        // KTD6 对称：agent 路径自带归属校验（admin 通行）+ noteId 匹配断言
+        agentOwnershipChecker.checkDwtableOwnership(dwtableId, userId);
+        MultipartFile file = readUploadedFile(filePath);
+        // 同请求内预检即导入：文件指纹天然一致，无需两阶段回传
+        ExcelImportPrecheckResult precheck = precheck(noteId, dwtableId, file, userId);
+
+        Map<String, String> fills = normalizeColumnValues(columnValues);
+        List<MissingParam> uncovered = new ArrayList<>();
+        for (MissingParam param : precheck.getMissingParams())
+        {
+            if (param == null)
+            {
+                continue;
+            }
+            boolean link = ExcelImportPrecheckResult.KIND_LINK_MISSING_COLUMN.equals(param.getKind())
+                    || ExcelImportPrecheckResult.KIND_LINK_MISS.equals(param.getKind());
+            if (link || !fills.containsKey(param.getColumnName()))
+            {
+                uncovered.add(param);
+            }
+        }
+        if (!uncovered.isEmpty())
+        {
+            ExcelImportAgentResult result = new ExcelImportAgentResult();
+            result.setSuccess(false);
+            result.setMissingParams(uncovered);
+            result.setMessage("导入未执行（零写入）：有 " + uncovered.size() + " 项缺参未覆盖。"
+                    + "基础列缺参可通过 columnValues 提供补值后再次调用；"
+                    + "关联列缺参（关联缺列/关联未命中）无法文本补值，请改走界面导入。");
+            log.info("[EXCEL-AGENT] 缺参未覆盖拒绝导入 noteId={}, dwtableId={}, userId={}, uncovered={}",
+                    noteId, dwtableId, userId, uncovered.size());
+            return result;
+        }
+
+        ExcelImportParams params = buildAgentParams(precheck, fills);
+        int count = importExcelData(noteId, dwtableId, file, JSONObject.toJSONString(params), userId);
+
+        ExcelImportAgentResult result = new ExcelImportAgentResult();
+        result.setSuccess(true);
+        result.setImportedCount(Integer.valueOf(count));
+        result.setDefaultValueFills(precheck.getDefaultValueFills());
+        result.setNewOptions(precheck.getNewOptions());
+        result.setSymmetricWriteImpact(precheck.getSymmetricWriteImpact());
+        result.setAmbiguityApplied(precheck.getAmbiguityItems());
+        result.setMessage("成功导入 " + count + " 条记录"
+                + (precheck.getNewOptions().isEmpty() ? "" : "，创建新选项 " + precheck.getNewOptions().size() + " 个")
+                + (precheck.getAmbiguityItems().isEmpty() ? "" : "，歧义记录已按 sort 靠前预选建立关联 " + precheck.getAmbiguityItems().size() + " 项")
+                + (precheck.getSymmetricWriteImpact().isEmpty() ? "" : "，双链对称写入影响 " + precheck.getSymmetricWriteImpact().size() + " 处"));
+        log.info("[EXCEL-AGENT] 导入完成 noteId={}, dwtableId={}, userId={}, recordCount={}",
+                noteId, dwtableId, userId, count);
+        return result;
+    }
+
+    /**
+     * 读取服务器上传文件为 {@link MultipartFile}：限定 {@code /profile/upload/} 前缀，
+     * 解析到 profile/upload 根目录内（normalize 后 startsWith 校验，防目录穿越），
+     * 大小超 {@link ExcelWorkbookReader#MAX_FILE_SIZE} 先拒绝（防大文件读入内存）。
+     */
+    private static MultipartFile readUploadedFile(String filePath)
+    {
+        if (filePath == null || filePath.trim().isEmpty())
+        {
+            throw new ServiceException("导入失败：filePath 不能为空（须为 /common/upload 返回的 fileName）");
+        }
+        String normalized = filePath.trim().replace('\\', '/');
+        if (!normalized.startsWith("/profile/upload/"))
+        {
+            throw new ServiceException("导入失败：filePath 须为 /profile/upload/ 开头的上传文件路径");
+        }
+        Path root = Paths.get(RuoYiConfig.getProfile(), "upload").toAbsolutePath().normalize();
+        Path target = root.resolve(normalized.substring("/profile/upload/".length())).toAbsolutePath().normalize();
+        if (!target.startsWith(root))
+        {
+            throw new ServiceException("导入失败：filePath 包含非法路径（目录穿越），已拒绝");
+        }
+        if (!Files.isRegularFile(target))
+        {
+            throw new ServiceException("导入失败：上传文件不存在（" + normalized + "），请确认已通过 /common/upload 上传");
+        }
+        try
+        {
+            if (Files.size(target) > ExcelWorkbookReader.MAX_FILE_SIZE)
+            {
+                throw new ServiceException("导入失败：文件大小超过上限 10MB");
+            }
+            return new ByteArrayMultipartFile(target.getFileName().toString(), Files.readAllBytes(target));
+        }
+        catch (IOException e)
+        {
+            throw new ServiceException("导入失败：读取上传文件失败，请重试");
+        }
+    }
+
+    /**
+     * 归一化 LLM 提供的 columnValues（{@code Map<String,Object>} → {@code Map<String,String>}）：
+     * 键 trim（与列名/补参校验口径一致）、值 toString（LLM 可能生成数字/布尔字面量），
+     * null 值归一为空串（显式补空）；条目数超 {@link #PARAM_ENTRIES_LIMIT} 先拒绝。
+     */
+    private static Map<String, String> normalizeColumnValues(Map<String, Object> columnValues)
+    {
+        Map<String, String> fills = new LinkedHashMap<>();
+        if (columnValues == null)
+        {
+            return fills;
+        }
+        for (Map.Entry<String, Object> entry : columnValues.entrySet())
+        {
+            String key = entry.getKey() == null ? "" : entry.getKey().trim();
+            if (key.isEmpty())
+            {
+                continue;
+            }
+            Object value = entry.getValue();
+            fills.put(key, value == null ? "" : String.valueOf(value));
+        }
+        if (fills.size() > PARAM_ENTRIES_LIMIT)
+        {
+            throw new ServiceException("导入失败：columnValues 条目数超限（" + PARAM_ENTRIES_LIMIT + "）");
+        }
+        return fills;
+    }
+
+    /**
+     * 组装 agent 路径的阶段二参数：文件指纹（同请求预检结果直传）+ 预检基线
+     * （缺参列名/未命中名/歧义预选，供漂移检查比对）+ LLM 补参。
+     * 关联补参恒为空：agent 无法选择被关联表记录（未命中即失败态，歧义按预选）。
+     */
+    private static ExcelImportParams buildAgentParams(ExcelImportPrecheckResult precheck, Map<String, String> fills)
+    {
+        ExcelImportParams params = new ExcelImportParams();
+        params.setFileFingerprint(precheck.getFileFingerprint());
+        ExcelImportParams.PrecheckBaseline baseline = params.getPrecheckBaseline();
+        Set<String> missingColumns = new LinkedHashSet<>();
+        for (MissingParam param : precheck.getMissingParams())
+        {
+            if (param == null || param.getColumnName() == null)
+            {
+                continue;
+            }
+            missingColumns.add(param.getColumnName());
+            if (param.getMissNames() != null)
+            {
+                for (MissName miss : param.getMissNames())
+                {
+                    if (miss == null || miss.getName() == null)
+                    {
+                        continue;
+                    }
+                    ExcelImportParams.BaselineName name = new ExcelImportParams.BaselineName();
+                    name.setColumnName(param.getColumnName());
+                    name.setName(miss.getName());
+                    baseline.getMissNames().add(name);
+                }
+            }
+        }
+        baseline.setMissingColumns(new ArrayList<>(missingColumns));
+        for (AmbiguityItem item : precheck.getAmbiguityItems())
+        {
+            if (item == null || item.getColumnName() == null || item.getName() == null)
+            {
+                continue;
+            }
+            ExcelImportParams.BaselineAmbiguity ambiguity = new ExcelImportParams.BaselineAmbiguity();
+            ambiguity.setColumnName(item.getColumnName());
+            ambiguity.setName(item.getName());
+            ambiguity.setPreselectedRecordId(item.getPreselectedRecordId());
+            baseline.getAmbiguity().add(ambiguity);
+        }
+        params.setColumnValues(fills);
+        return params;
+    }
+
+    /**
+     * 字节数组 → {@link MultipartFile} 适配器（agent 磁盘读文件后进入既有管线）。
+     * {@code getBytes}/{@code getInputStream} 可重复读（预检指纹 + 阶段二指纹比对/解析共读多次）。
+     */
+    private static final class ByteArrayMultipartFile implements MultipartFile
+    {
+        private final String filename;
+        private final byte[] content;
+
+        ByteArrayMultipartFile(String filename, byte[] content)
+        {
+            this.filename = filename;
+            this.content = content;
+        }
+
+        @Override
+        public String getName()
+        {
+            return "file";
+        }
+
+        @Override
+        public String getOriginalFilename()
+        {
+            return filename;
+        }
+
+        @Override
+        public String getContentType()
+        {
+            return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+        }
+
+        @Override
+        public boolean isEmpty()
+        {
+            return content.length == 0;
+        }
+
+        @Override
+        public long getSize()
+        {
+            return content.length;
+        }
+
+        @Override
+        public byte[] getBytes()
+        {
+            return content.clone();
+        }
+
+        @Override
+        public InputStream getInputStream()
+        {
+            return new ByteArrayInputStream(content);
+        }
+
+        @Override
+        public void transferTo(File dest) throws IOException
+        {
+            try (InputStream in = getInputStream())
+            {
+                Files.copy(in, dest.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+        }
     }
 
     @Override
