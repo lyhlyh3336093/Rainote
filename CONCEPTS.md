@@ -37,5 +37,14 @@ A link record representing a semantic association between a note and a multi-dim
 ### back_field_id
 A property in type=21 columns that references the paired column in the other table. If column 3262 has `back_field_id=3263`, then column 3263 has `back_field_id=3262`. This pairing is essential for indirect trigger matching in set operations.
 
+### Column Default Value (列默认值)
+A per-column configurable default stored in the column's settings, supported only by six base column types (1 text, 2 number, 3 single-select, 4 multi-select, 5 date, 7 checkbox). Relation columns (18/21), derived columns, and system columns do not support it. It applies to import filling and UI new-record prefill only — never backfills existing records. In the Excel import chain it is the first-priority source for missing parameters; when absent, the precheck dialog asks the user.
+
+### Import Precheck (导入预检)
+The first stage of two-stage Excel import: parse the workbook, map columns, run relation text matching, and aggregate all missing parameters — without writing to the database. Only after the user confirms the supplement dialog does stage two execute the single-transaction import.
+
+### Relation Text Matching (关联文本匹配)
+The mechanism by which Excel import resolves relation column (18/21) values: the cell's record-name text (comma-separated, from the export-time "列名_文本" column or plain external data) is matched against `NoteRecord.name` of the target linked table's existing records. Ambiguity (same-name records) resolves to the lowest-sort record; a miss is treated as a missing parameter routed to the record-picker dialog; an empty cell simply means no relation. The "列名_ID" column from round-trip exports is ignored.
+
 ### NoteDwtableItem
 A cell in the data table, identified by recordId + columnId. For type=21 columns, stores `value`, `linkRecordId`, and `linkColumnId`. For type=26 columns, these link fields are NULL — the data lives in the referenced double link column's item.
