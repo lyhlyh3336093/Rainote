@@ -51,7 +51,7 @@
       showStatus: true,
       showIcon: false,
     }" :mouse-config="{ selected: true }" :cell-config="rowConfig" :tree-config="treeConfig" :height="height"
-      keep-source show-overflow @edit-closed="table.edit" :loading="table1.loading" border auto-resize
+      keep-source show-overflow @edit-closed="table.edit" @cell-click="onCellClick" :loading="table1.loading" border auto-resize
       :scroll-x="{ enabled: true, gt: 0 }">
       <vxe-column type="checkbox" width="50" align="center">
         <template #header="{ checked, indeterminate }">
@@ -410,10 +410,10 @@ export default defineComponent({
             const property = safeParseJson(column?.property);
             targetId = property?.table_id;
           } else if (type === FieldEnum.lookUp) {
-            // lookUp：从 double_link_column_id 找到对应列，再取其 property.table_id
-            const column = columns.value.find((item: any) => item.id === props.double_link_column_id);
-            const property = safeParseJson(column?.property);
-            targetId = property?.table_id;
+            // lookUp：property 直接包含目标表 id（table_id），无需二次查找。
+            // double_link_column_id 指向目标表的双向链接列，不在当前表 columns 内，
+            // 原先在当前表 columns 里 find 会永远 miss。
+            targetId = props?.table_id;
           } else if (type === FieldEnum.双向关联) {
             // 双向关联：取 props.table_id
             targetId = props?.table_id;
@@ -1443,6 +1443,22 @@ export default defineComponent({
     })
 
 
+    // 单击 lookup(26) / 双向链接(21) 单元格任意位置时，复用 #edit 模板内 @click 的分发路径
+    // 打开既有的"已关联 {目标表名}"弹框（不新建弹框、不改内容）。
+    // 其他列类型不做任何处理，交由 vxe-table 默认行为（双击进入编辑态路径不受影响）。
+    const onCellClick = ({ row, column }: any) => {
+      const index = table1.value.columnsId.indexOf(column.field);
+      if (index === -1) return; // 非数据列（如首列 checkbox）
+      const type = table1.value.columnsType[index];
+      if (type !== FieldEnum.lookUp && type !== FieldEnum.双向关联) return;
+      table.cell.click(
+        type,
+        columns.value[index].property,
+        { index, id: row.id, column: column.field },
+        row[column.field]
+      );
+    };
+
     provide('table', xTable);
     provide('tableState', table);
     provide('store', {
@@ -1494,6 +1510,7 @@ export default defineComponent({
       onSemanticWordClick,
       getSemanticCellState,
       retrySemanticCell,
+      onCellClick,
     }
   }
 })
