@@ -214,6 +214,7 @@ public class NoteRecordController extends BaseController
     /**
      * 删除记录
      */
+    @PreAuthorize("@ss.hasPermi('system:record:remove')")
     @Log(title = "笔记", businessType = BusinessType.DELETE)
     @RequestMapping(value = "/remove/{ids}",method = org.springframework.web.bind.annotation.RequestMethod.GET)
     public AjaxResult remove(@PathVariable String ids)

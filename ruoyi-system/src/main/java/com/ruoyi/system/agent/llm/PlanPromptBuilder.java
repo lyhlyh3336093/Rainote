@@ -140,6 +140,14 @@ public class PlanPromptBuilder
         sb.append("6. 破坏性操作（delete/batchDelete）需特别标注\n");
         sb.append("7. 只读查询（getById/list）使用 QUERY 类型，不生成 PLAN\n");
 
+        sb.append("\n## 硬性约束（必须遵守，不可违反）\n");
+        sb.append("8. 上下文优先：如果上下文（当前笔记/多维表/列/记录 ID 或用户输入）与你的预训练知识冲突，");
+        sb.append("一律以上下文为准，不得用预训练知识覆盖或纠正上下文信息\n");
+        sb.append("9. 禁止模糊表达：严禁使用\"可能\"、\"大概\"、\"通常来说\"、\"一般来说\"、\"也许\"、\"或许\"等模糊词汇；");
+        sb.append("所有判断与参数填充必须基于上下文或操作清单做出明确结论\n");
+        sb.append("10. 承认无知：若上下文不足以决定操作目标或参数（如缺失 dwtableId、用户意图不明确），");
+        sb.append("必须返回 type=\"CLARIFY\" 并直接说明\"我不知道/无法确定\"具体缺什么，禁止凭猜测填充参数\n");
+
         return sb.toString();
     }
 

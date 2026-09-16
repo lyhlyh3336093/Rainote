@@ -205,6 +205,12 @@ public class TokenService
 
     /**
      * 获取请求token
+     * <p>
+     * 标准路径：从 Authorization header 读取。
+     * SSE 鉴权兜底：浏览器原生 EventSource 无法设置自定义 header，
+     * 当 header 中无 token 且请求为 SSE 流式端点（/agent/plan/{id}/stream）时，
+     * 回退到 query 参数 ?token=xxx（U6 双轨方案）。
+     * 其他路径仍仅认 header，严禁扩大 query 参数鉴权范围。
      *
      * @param request
      * @return token
@@ -216,7 +222,28 @@ public class TokenService
         {
             token = token.replace(Constants.TOKEN_PREFIX, "");
         }
+
+        // SSE 鉴权兜底：header 无 token 时，仅对 /agent/plan/{id}/stream 支持 query 参数
+        if (StringUtils.isEmpty(token) && isSseStreamRequest(request))
+        {
+            token = request.getParameter("token");
+            if (StringUtils.isNotEmpty(token) && token.startsWith(Constants.TOKEN_PREFIX))
+            {
+                token = token.replace(Constants.TOKEN_PREFIX, "");
+            }
+        }
+
         return token;
+    }
+
+    /**
+     * 检查是否为 SSE 流式请求（/agent/plan/{id}/stream）。
+     * 仅此端点允许 query 参数 token 鉴权兜底。
+     */
+    private boolean isSseStreamRequest(HttpServletRequest request)
+    {
+        String uri = request.getRequestURI();
+        return uri != null && uri.matches(".*/agent/plan/\\d+/stream");
     }
 
     private String getTokenKey(String uuid)

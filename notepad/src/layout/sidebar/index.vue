@@ -24,6 +24,7 @@
     <div class="flex justify-center items-center gap-2 my-1">
       <a-button @click="isAiChatVisible = true" type="primary">AI助手</a-button>
       <a-button @click="isChatVisible = true">进入聊天室</a-button>
+      <a-button @click="toggleAgentPanel" type="primary" ghost>Agent</a-button>
     </div>
     <!-- <div class="sidebar-trigger" @click="toggleSidebar">
       <component :is="isCollapsed ? 'MenuUnfoldOutlined' : 'MenuFoldOutlined'" />
@@ -59,6 +60,7 @@
 import { storeToRefs } from "pinia";
 import { useStore } from "../../stores/menu";
 import { useAiChatStore } from "../../stores/aiChat";
+import { useAgentStore } from "../../stores/agent";
 import { onBeforeMount, ref, computed, provide } from "vue";
 import { useRouter } from "vue-router";
 import MenuItem from "./menu-item.vue";
@@ -72,6 +74,7 @@ const router = useRouter();
 const isChatVisible = ref(false);
 const isAiChatVisible = ref(false);
 const aiChatStore = useAiChatStore();
+const agentStore = useAgentStore();
 const isCollapsed = ref(false);
 const searchQuery = ref("");
 const store = useStore();
@@ -107,6 +110,11 @@ const toggleSidebar = () => {
 // R5b/Group D2 — 关闭AI助手弹框时取消正在进行的 SSE 流
 const handleAiChatClose = () => {
   aiChatStore.abortStream();
+};
+
+/** 切换 Agent 面板开关（R1 入口） */
+const toggleAgentPanel = () => {
+  agentStore.togglePanel();
 };
 
 const handleSearch = (value) => {

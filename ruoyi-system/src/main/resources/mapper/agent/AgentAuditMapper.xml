@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ruoyi.system.agent.mapper.AgentAuditMapper">
+
+    <!-- ===== AgentAuditLog 结果映射 ===== -->
+    <resultMap type="AgentAuditLog" id="AgentAuditLogResult">
+        <result property="id"           column="id"           />
+        <result property="userId"       column="user_id"      />
+        <result property="sessionId"    column="session_id"   />
+        <result property="userInput"    column="user_input"   />
+        <result property="planJson"     column="plan_json"    />
+        <result property="status"       column="status"       />
+        <result property="degraded"     column="degraded"     />
+        <result property="createdAt"    column="created_at"   />
+        <result property="completedAt"  column="completed_at" />
+    </resultMap>
+
+    <!-- ===== AgentAuditStepLog 结果映射 ===== -->
+    <resultMap type="AgentAuditStepLog" id="AgentAuditStepLogResult">
+        <result property="id"              column="id"               />
+        <result property="auditLogId"      column="audit_log_id"     />
+        <result property="stepIndex"       column="step_index"       />
+        <result property="stepId"          column="step_id"          />
+        <result property="operationName"   column="operation_name"   />
+        <result property="paramsJson"      column="params_json"      />
+        <result property="status"          column="status"           />
+        <result property="errorMessage"    column="error_message"    />
+        <result property="stepRequestId"   column="step_request_id"  />
+        <result property="executedAt"      column="executed_at"      />
+    </resultMap>
+
+    <!-- ===== SQL 片段 ===== -->
+    <sql id="auditLogColumns">
+        id, user_id, session_id, user_input, plan_json, status, degraded, created_at, completed_at
+    </sql>
+
+    <sql id="stepLogColumns">
+        id, audit_log_id, step_index, step_id, operation_name, params_json, status, error_message, step_request_id, executed_at
+    </sql>
+
+    <!-- ===== 主审计记录 ===== -->
+
+    <insert id="insertAuditLog" parameterType="AgentAuditLog" useGeneratedKeys="true" keyProperty="id">
+        insert into agent_audit_log
+        (user_id, session_id, user_input, plan_json, status, degraded, created_at)
+        values
+        (#{userId}, #{sessionId}, #{userInput}, #{planJson}, #{status}, #{degraded}, #{createdAt})
+    </insert>
+
+    <update id="updateAuditLogStatus" parameterType="AgentAuditLog">
+        update agent_audit_log
+        <set>
+            <if test="status != null">status = #{status},</if>
+            <if test="degraded != null">degraded = #{degraded},</if>
+            <if test="completedAt != null">completed_at = #{completedAt},</if>
+        </set>
+        where id = #{id}
+    </update>
+
+    <select id="selectAuditLogById" parameterType="Long" resultMap="AgentAuditLogResult">
+        select <include refid="auditLogColumns"/>
+        from agent_audit_log
+        where id = #{id}
+    </select>
+
+    <!-- 路径 A 恢复：查询未完成审计记录（retentionDays 天内） -->
+    <select id="selectIncompleteAuditLog" resultMap="AgentAuditLogResult">
+        select <include refid="auditLogColumns"/>
+        from agent_audit_log
+        where user_id = #{userId}
+          and status = 'executing'
+          and created_at >= DATE_SUB(NOW(), INTERVAL #{retentionDays} DAY)
+        order by created_at desc
+    </select>
+
+    <!-- R23：最近 50 条审计记录（retentionDays 天内） -->
+    <select id="selectRecentHistory" resultMap="AgentAuditLogResult">
+        select <include refid="auditLogColumns"/>
+        from agent_audit_log
+        where user_id = #{userId}
+          and created_at >= DATE_SUB(NOW(), INTERVAL #{retentionDays} DAY)
+        order by created_at desc
+        limit 50
+    </select>
+
+    <!-- ===== 步骤审计记录 ===== -->
+
+    <insert id="insertStepLog" parameterType="AgentAuditStepLog" useGeneratedKeys="true" keyProperty="id">
+        insert into agent_audit_step_log
+        (audit_log_id, step_index, step_id, operation_name, params_json, status, step_request_id, executed_at)
+        values
+        (#{auditLogId}, #{stepIndex}, #{stepId}, #{operationName}, #{paramsJson}, #{status}, #{stepRequestId}, #{executedAt})
+    </insert>
+
+    <update id="updateStepLogStatus" parameterType="AgentAuditStepLog">
+        update agent_audit_step_log
+        <set>
+            <if test="status != null">status = #{status},</if>
+            <if test="errorMessage != null">error_message = #{errorMessage},</if>
+        </set>
+        where id = #{id}
+    </update>
+
+    <select id="selectStepLogsByAuditLogId" parameterType="Long" resultMap="AgentAuditStepLogResult">
+        select <include refid="stepLogColumns"/>
+        from agent_audit_step_log
+        where audit_log_id = #{auditLogId}
+        order by step_index asc
+    </select>
+
+    <!-- 批量查询步骤记录（优化 N+1 查询），调用方需确保 auditLogIds 非空 -->
+    <select id="selectStepLogsByAuditLogIds" parameterType="Long" resultMap="AgentAuditStepLogResult">
+        select <include refid="stepLogColumns"/>
+        from agent_audit_step_log
+        where audit_log_id in
+        <foreach collection="list" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+        order by audit_log_id, step_index
+    </select>
+
+    <select id="selectStepLogByStepRequestId" parameterType="String" resultMap="AgentAuditStepLogResult">
+        select <include refid="stepLogColumns"/>
+        from agent_audit_step_log
+        where step_request_id = #{stepRequestId}
+        limit 1
+    </select>
+
+</mapper>

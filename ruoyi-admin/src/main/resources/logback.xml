@@ -90,4 +90,19 @@
     <logger name="sys-user" level="info">
         <appender-ref ref="sys-user"/>
     </logger>
-</configuration> 
+
+	<!-- PII 导出审计日志（KTD11）：含 PII 列的导出操作审计，独立于 sys_oper_log -->
+	<appender name="pii_export_audit" class="ch.qos.logback.core.rolling.RollingFileAppender">
+		<file>${log.path}/pii-export-audit.log</file>
+		<rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+			<fileNamePattern>${log.path}/pii-export-audit.%d{yyyy-MM-dd}.log</fileNamePattern>
+			<maxHistory>90</maxHistory>
+		</rollingPolicy>
+		<encoder>
+			<pattern>%msg%n</pattern>
+		</encoder>
+	</appender>
+	<logger name="piiExportAudit" level="info" additivity="false">
+		<appender-ref ref="pii_export_audit"/>
+	</logger>
+</configuration>

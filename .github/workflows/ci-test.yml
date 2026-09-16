@@ -1,0 +1,87 @@
+# CI 单元测试流水线
+# 触发条件：后端代码变更推送 / PR / 手动触发
+# 产出：HTML 测试报告 artifact + GitHub UI 内嵌结果展示
+name: CI Test
+
+on:
+  push:
+    branches: [feat/rainote-agent, main, master]
+    paths:
+      - 'ruoyi-system/src/**'
+      - 'ruoyi-common/src/**'
+      - 'ruoyi-framework/src/**'
+      - 'ruoyi-admin/src/**'
+      - 'pom.xml'
+      - '.github/workflows/ci-test.yml'
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  checks: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 8
+        uses: actions/setup-java@v4
+        with:
+          java-version: '8'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Run unit tests
+        # 同时运行 ruoyi-system 与 ruoyi-admin 的测试（-am 构建依赖模块）
+        run: mvn test -pl ruoyi-system,ruoyi-admin -am -DfailIfNoTests=false -B
+
+      - name: Generate HTML test report (Maven)
+        if: always()
+        # -DskipTests 避免重复执行测试；报告直接从上一步的 surefire-reports/*.xml 生成
+        run: mvn surefire-report:report -pl ruoyi-system,ruoyi-admin -B -DskipTests
+
+      - name: Generate standalone HTML report (ruoyi-system)
+        if: always()
+        # Maven Fluido Skin 依赖外部 CSS/JS，file:// 打开为空白页；
+        # 此脚本从 XML 生成自包含 HTML（内联 CSS，无外部依赖），可直接用浏览器打开
+        working-directory: ruoyi-system
+        run: python generate-test-report.py
+
+      - name: Generate standalone HTML report (ruoyi-admin)
+        if: always()
+        # 复用 ruoyi-system 的脚本，指定 ruoyi-admin 的报告路径
+        run: python ruoyi-system/generate-test-report.py ruoyi-admin/target/surefire-reports ruoyi-admin/target/reports/surefire-standalone.html
+
+      - name: Publish test results to GitHub UI
+        uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: 单元测试结果
+          # glob 路径同时匹配 ruoyi-system 与 ruoyi-admin 的测试结果
+          path: '**/target/surefire-reports/TEST-*.xml'
+          reporter: java-junit
+
+      - name: Upload standalone HTML report (ruoyi-system)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-report-html-system
+          path: ruoyi-system/target/reports/surefire-standalone.html
+
+      - name: Upload standalone HTML report (ruoyi-admin)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-report-html-admin
+          path: ruoyi-admin/target/reports/surefire-standalone.html
+
+      - name: Upload XML results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-xml-results
+          path: '**/target/surefire-reports/TEST-*.xml'

@@ -9,6 +9,7 @@ import java.util.Set;
 
 import com.alibaba.fastjson2.JSONObject;
 import com.ruoyi.common.exception.ServiceException;
+import com.ruoyi.common.utils.SecurityUtils;
 import com.ruoyi.common.utils.myHashMap;
 import com.ruoyi.system.agent.security.AgentOwnershipChecker;
 import com.ruoyi.system.domain.NoteBlock;
@@ -31,6 +32,8 @@ import com.ruoyi.system.domain.NoteColumn;
 import com.ruoyi.system.service.INoteColumnService;
 import com.ruoyi.system.service.INoteNotelinkService;
 import com.ruoyi.system.service.INoteRecordService;
+import com.ruoyi.system.agent.annotation.AgentOperation;
+import com.ruoyi.system.agent.annotation.AgentParam;
 import com.ruoyi.system.service.NoteBlockContentService;
 
 /**
@@ -77,8 +80,9 @@ public class NoteColumnServiceImpl implements INoteColumnService
      * @param id 列信息主键
      * @return 列信息
      */
+    @AgentOperation(name = "column.getById", description = "按ID查询列")
     @Override
-    public NoteColumn selectNoteColumnById(Long id)
+    public NoteColumn selectNoteColumnById(@AgentParam(value = "id", type = "long", description = "列ID") Long id)
     {
         return noteColumnMapper.selectNoteColumnById(id);
     }
@@ -89,8 +93,9 @@ public class NoteColumnServiceImpl implements INoteColumnService
      * @param noteColumn 列信息
      * @return 列信息
      */
+    @AgentOperation(name = "column.list", description = "查询列列表")
     @Override
-    public List<NoteColumn> selectNoteColumnList(NoteColumn noteColumn)
+    public List<NoteColumn> selectNoteColumnList(@AgentParam(value = "filter", type = "object", objectType = "NoteColumn", allowedFields = {"name", "dwtableId", "type"}, description = "筛选条件") NoteColumn noteColumn)
     {
         return noteColumnMapper.selectNoteColumnList(noteColumn);
     }
@@ -107,8 +112,9 @@ public class NoteColumnServiceImpl implements INoteColumnService
      * @param noteColumnvo 列信息
      * @return 结果
      */
+    @AgentOperation(name = "column.create", description = "创建列")
     @Override
-    public int insertNoteColumn(NoteColumnVo noteColumnvo)
+    public int insertNoteColumn(@AgentParam(value = "column", type = "object", objectType = "NoteColumnVo", allowedFields = {"name", "type", "dwtableId", "property", "isShow", "sort"}, description = "列配置") NoteColumnVo noteColumnvo)
     {
 
         NoteColumn noteColumn = new NoteColumn();
@@ -215,13 +221,16 @@ public class NoteColumnServiceImpl implements INoteColumnService
 
     /**
      * 修改列信息
-     * 
+     *
      * @param noteColumnvo 列信息
      * @return 结果
      */
+    @AgentOperation(name = "column.update", description = "更新列")
     @Override
-    public int updateNoteColumn(NoteColumnVo noteColumnvo)
+    public int updateNoteColumn(@AgentParam(value = "column", type = "object", objectType = "NoteColumnVo", allowedFields = {"id", "name", "type", "dwtableId", "property", "isShow", "sort"}, description = "列配置") NoteColumnVo noteColumnvo)
     {
+        // 归属校验：通过 columnId → dwtableId → noteId → note.auth 链校验
+        agentOwnershipChecker.checkColumnOwnership(noteColumnvo.getId(), SecurityUtils.getUserId());
 
         //先获取原列信息，判断是不是双向链接，如果是，在修改的时候需要将之前双向连接的关联内容取消关联
         NoteColumn originColumn = noteColumnMapper.selectNoteColumnById(noteColumnvo.getId());
@@ -425,9 +434,16 @@ public class NoteColumnServiceImpl implements INoteColumnService
      * @param ids 需要删除的列信息主键
      * @return 结果
      */
+    @AgentOperation(name = "column.batchDelete", destructive = true, permissionKey = "system:column:remove", description = "批量删除列")
     @Override
-    public int deleteNoteColumnByIds(String[] ids)
+    public int deleteNoteColumnByIds(@AgentParam(value = "ids", type = "list", description = "列ID列表") String[] ids)
     {
+        // 归属校验：批量删除前逐个校验归属
+        Long currentUserId = SecurityUtils.getUserId();
+        for (String id : ids)
+        {
+            agentOwnershipChecker.checkColumnOwnership(Long.parseLong(id), currentUserId);
+        }
         //在删除列信息之前我们要判断是否是双向链接的列或者是双向链接关联的列，如果是，需要去另一方进行删除
         List<NoteColumn> columnList = noteColumnMapper.selectNoteColumnByIds(ids);
         // 收集受影响的 dwtableId（去重），用于删除后按表重算 name
@@ -464,9 +480,12 @@ public class NoteColumnServiceImpl implements INoteColumnService
      * @param id 列信息主键
      * @return 结果
      */
+    @AgentOperation(name = "column.delete", destructive = true, permissionKey = "system:column:remove", description = "删除单个列")
     @Override
-    public int deleteNoteColumnById(Long id)
+    public int deleteNoteColumnById(@AgentParam(value = "id", type = "long", description = "列ID") Long id)
     {
+        // 归属校验：防止越权删除他人列
+        agentOwnershipChecker.checkColumnOwnership(id, SecurityUtils.getUserId());
         //删除列信息的时候，同时去检查是否有item信息，找到并删除
         // 删除前先取受影响 dwtableId，用于删除后按表重算 name
         NoteColumn column = noteColumnMapper.selectNoteColumnById(id);

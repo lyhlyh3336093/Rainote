@@ -54,6 +54,8 @@ project-analysis-report.md
 ruoyi-ui/src/views/aaa.vue
 test-data.sql
 ruoyi-admin/src/main/resources/META-INF/MANIFEST.MF
+# 本地敏感配置（含 API key 明文，勿提交）
+ruoyi-admin/src/main/resources/application-local.yml
 
 ######################################################################
 # Standalone sub-project (has its own .gitignore / node_modules)

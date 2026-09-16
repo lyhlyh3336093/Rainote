@@ -1,0 +1,12 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg18  # 或 pg15, pg14 等
+    container_name: my-pgvector
+    environment:
+      POSTGRES_DB: rainote_test   # 替换为你的数据库名
+      POSTGRES_USER: postgres   # 替换为你的用户名
+      POSTGRES_PASSWORD: 910610 # 替换为你的密码
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data

@@ -17,7 +17,13 @@ import com.ruoyi.system.mapper.NoteRecordMapper;
 import com.ruoyi.system.service.INoteNotelinkService;
 import com.ruoyi.system.service.INoteRecordService;
 import com.ruoyi.system.service.NoteBlockContentService;
+import com.ruoyi.system.agent.security.AgentOwnershipChecker;
+import com.ruoyi.common.core.domain.model.LoginUser;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
@@ -73,8 +79,27 @@ public class NoteColumnServiceImplTest
     @Mock
     private NoteBlockMapper noteBlockMapper;
 
+    @Mock
+    private AgentOwnershipChecker ownershipChecker;
+
     @InjectMocks
     private NoteColumnServiceImpl noteColumnService;
+
+    @BeforeEach
+    void setUpSecurityContext()
+    {
+        // U5 归属校验通过 SecurityUtils.getUserId() 获取当前用户，需设置 SecurityContext
+        LoginUser loginUser = new LoginUser();
+        loginUser.setUserId(1L);
+        SecurityContextHolder.getContext().setAuthentication(
+                new UsernamePasswordAuthenticationToken(loginUser, null));
+    }
+
+    @AfterEach
+    void clearSecurityContext()
+    {
+        SecurityContextHolder.clearContext();
+    }
 
     /**
      * 模拟MyBatis的useGeneratedKeys行为：insert时给NoteColumn设置自增id

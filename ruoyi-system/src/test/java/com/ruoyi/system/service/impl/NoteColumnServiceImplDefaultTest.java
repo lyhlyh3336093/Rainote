@@ -1,5 +1,7 @@
 package com.ruoyi.system.service.impl;
 
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -9,7 +11,10 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
 
+import com.ruoyi.common.core.domain.model.LoginUser;
 import com.ruoyi.common.exception.ServiceException;
 import com.ruoyi.common.utils.myHashMap;
 import com.ruoyi.system.agent.security.AgentOwnershipChecker;
@@ -60,6 +65,23 @@ class NoteColumnServiceImplDefaultTest
 
     @InjectMocks
     private NoteColumnServiceImpl service;
+
+    @BeforeEach
+    void setUp()
+    {
+        // updateNoteColumn 原路径内置归属校验（SecurityUtils.getUserId()），
+        // 测试环境无登录上下文，须模拟 SecurityContext（对齐 NoteNoteServiceImplOwnershipTest.loginAs 模式）
+        LoginUser loginUser = new LoginUser();
+        loginUser.setUserId(USER_ID);
+        SecurityContextHolder.getContext().setAuthentication(
+                new UsernamePasswordAuthenticationToken(loginUser, null, java.util.Collections.emptyList()));
+    }
+
+    @AfterEach
+    void tearDown()
+    {
+        SecurityContextHolder.clearContext();
+    }
 
     private NoteColumn originColumn(Long type, String property)
     {

@@ -4,8 +4,13 @@ import com.alibaba.fastjson2.JSONObject;
 import com.ruoyi.system.domain.NoteColumn;
 import com.ruoyi.system.domain.NoteDwtable;
 import com.ruoyi.system.mapper.*;
+import com.ruoyi.system.agent.security.AgentOwnershipChecker;
+import com.ruoyi.common.core.domain.model.LoginUser;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
@@ -47,8 +52,27 @@ public class NoteDwtableServiceImplTest
     @Mock
     private NoteDwtableItemMapper noteDwtableItemMapper;
 
+    @Mock
+    private AgentOwnershipChecker ownershipChecker;
+
     @InjectMocks
     private NoteDwtableServiceImpl noteDwtableService;
+
+    @BeforeEach
+    void setUpSecurityContext()
+    {
+        // U5 归属校验通过 SecurityUtils.getUserId() 获取当前用户，需设置 SecurityContext
+        LoginUser loginUser = new LoginUser();
+        loginUser.setUserId(1L);
+        SecurityContextHolder.getContext().setAuthentication(
+                new UsernamePasswordAuthenticationToken(loginUser, null));
+    }
+
+    @AfterEach
+    void clearSecurityContext()
+    {
+        SecurityContextHolder.clearContext();
+    }
 
     private static final Long TEST_DWTABLE_ID = 9999L;
 

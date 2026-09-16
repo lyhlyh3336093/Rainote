@@ -4,6 +4,11 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 import com.alibaba.fastjson2.JSONObject;
+import com.ruoyi.common.exception.ServiceException;
+import com.ruoyi.common.utils.SecurityUtils;
+import com.ruoyi.system.agent.annotation.AgentOperation;
+import com.ruoyi.system.agent.annotation.AgentParam;
+import com.ruoyi.system.agent.security.AgentOwnershipChecker;
 import com.ruoyi.system.domain.*;
 import com.ruoyi.system.domain.vo.NoteRecordVo;
 import com.ruoyi.system.mapper.*;
@@ -46,42 +51,58 @@ public class NoteRecordServiceImpl implements INoteRecordService
     @Autowired
     private NoteDwtableMapper noteDwtableMapper;
 
+    @Autowired
+    private AgentOwnershipChecker ownershipChecker;
+
     /**
      * 查询记录
-     * 
+     *
      * @param id 记录主键
      * @return 记录
      */
     @Override
-    public NoteRecord selectNoteRecordById(Long id)
+    @AgentOperation(name = "record.getById", description = "按ID查询记录")
+    public NoteRecord selectNoteRecordById(@AgentParam(value = "id", type = "long", description = "记录ID") Long id)
     {
         return noteRecordMapper.selectNoteRecordById(id);
     }
 
     /**
      * 查询记录列表
-     * 
+     *
      * @param noteRecord 记录
      * @return 记录
      */
     @Override
-    public List<NoteRecord> selectNoteRecordList(NoteRecordVo noteRecord)
+    @AgentOperation(name = "record.list", description = "查询记录列表")
+    public List<NoteRecord> selectNoteRecordList(@AgentParam(value = "filter", type = "object", objectType = "NoteRecordVo", allowedFields = {"name", "dwtableId", "viewId", "property", "linkRecordId", "sort", "linkName"}, description = "筛选条件") NoteRecordVo noteRecord)
     {
         return noteRecordMapper.selectNoteRecordList(noteRecord);
     }
 
     /**
      * 新增记录
-     * 
+     *
      * @param noteRecord 记录
      * @return 结果
      */
     @Override
     @Transactional
-    public int insertNoteRecord(NoteRecord noteRecord,List<Map<String, Object>> items)
+    @AgentOperation(name = "record.create", description = "创建记录")
+    public int insertNoteRecord(@AgentParam(value = "record", type = "object", objectType = "NoteRecord", allowedFields = {"name", "property", "linkRecordId", "sort", "dwtableId", "viewId", "linkName"}, description = "记录数据") NoteRecord noteRecord,
+                                @AgentParam(value = "items", type = "list", description = "记录条目列表") List<Map<String, Object>> items)
     {
         if(noteRecord.getDwtableId()==null){
+            // dwtableId 缺失时尝试从 viewId 反查，但 viewId 也为 null 时抛明确错误而非 NPE
+            if (noteRecord.getViewId() == null)
+            {
+                throw new ServiceException("创建记录缺少 dwtableId 和 viewId，无法确定所属数据表");
+            }
             NoteView noteView = noteViewMapper.selectNoteViewById(noteRecord.getViewId());
+            if (noteView == null)
+            {
+                throw new ServiceException("视图不存在：viewId=" + noteRecord.getViewId());
+            }
             NoteDwtable noteDwtable = noteDwtableMapper.selectNoteDwtableById(noteView.getDwtableId());
             noteRecord.setDwtableId(noteDwtable.getId());
         }
@@ -119,13 +140,17 @@ public class NoteRecordServiceImpl implements INoteRecordService
 
     /**
      * 修改记录
-     * 
+     *
      * @param noteRecord 记录
      * @return 结果
      */
     @Override
     @Transactional
-    public int updateNoteRecord(NoteRecord noteRecord,List<Map<String, Object>> items) {
+    @AgentOperation(name = "record.update", description = "更新记录")
+    public int updateNoteRecord(@AgentParam(value = "record", type = "object", objectType = "NoteRecord", allowedFields = {"id", "name", "property", "linkRecordId", "sort", "dwtableId", "viewId", "linkName"}, description = "记录数据") NoteRecord noteRecord,
+                                @AgentParam(value = "items", type = "list", description = "记录条目列表") List<Map<String, Object>> items) {
+        // 归属校验：通过 recordId → dwtableId → noteId → note.auth 链校验
+        ownershipChecker.checkRecordOwnership(noteRecord.getId(), SecurityUtils.getUserId());
         NoteDwtableItem queryParam = new NoteDwtableItem();
         queryParam.setRecordId(noteRecord.getId());
         List<NoteDwtableItem> recordItems = noteDwtableItemMapper.selectNoteDwtableItemList(queryParam);
@@ -767,25 +792,35 @@ public class NoteRecordServiceImpl implements INoteRecordService
 
     /**
      * 批量删除记录
-     * 
+     *
      * @param ids 需要删除的记录主键
      * @return 结果
      */
     @Override
-    public int deleteNoteRecordByIds(String[] ids)
+    @AgentOperation(name = "record.batchDelete", destructive = true, permissionKey = "system:record:remove", description = "批量删除记录")
+    public int deleteNoteRecordByIds(@AgentParam(value = "ids", type = "list", description = "记录ID列表") String[] ids)
     {
+        // 归属校验：批量删除前逐个校验归属
+        Long currentUserId = SecurityUtils.getUserId();
+        for (String id : ids)
+        {
+            ownershipChecker.checkRecordOwnership(Long.parseLong(id), currentUserId);
+        }
         return noteRecordMapper.deleteNoteRecordByIds(ids);
     }
 
     /**
      * 删除记录信息
-     * 
+     *
      * @param id 记录主键
      * @return 结果
      */
     @Override
-    public int deleteNoteRecordById(Long id)
+    @AgentOperation(name = "record.delete", destructive = true, permissionKey = "system:record:remove", description = "删除单个记录")
+    public int deleteNoteRecordById(@AgentParam(value = "id", type = "long", description = "记录ID") Long id)
     {
+        // 归属校验：防止越权删除他人记录
+        ownershipChecker.checkRecordOwnership(id, SecurityUtils.getUserId());
         //删除记录是级联操作，需要先删除记录里面的数据信息
         // noteDwtableItemMapper.deleteNoteDwtableItemByRecordId(id);
         //查出行下面所有item,删掉这些item,并查找出所有linkRecordId包含id的item

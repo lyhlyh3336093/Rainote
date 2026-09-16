@@ -56,8 +56,9 @@ spring:
   messages:
     # 国际化资源文件路径
     basename: i18n/messages
-  profiles: 
+  profiles:
     active: druid
+    include: local
   # 文件上传
   servlet:
      multipart:
@@ -109,8 +110,8 @@ token:
 
 # GLM AI聊天配置
 glm:
-    # API密钥（生产环境通过环境变量GLM_API_KEY覆盖）
-    api-key: ${GLM_API_KEY:sk-cp-mS2zP2YJDJnZF-1m_HS69NNeqTf2773n5FvN2Je3UqE}
+    # API密钥（占位符，明文存放在 application-local.yml，该文件已 gitignore）
+    api-key: ${GLM_API_KEY:}
     # 模型名称
     model: glm-4
     # API地址

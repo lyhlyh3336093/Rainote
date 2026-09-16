@@ -6,7 +6,10 @@ import java.io.InputStream;
 import java.util.*;
 
 import com.ruoyi.common.core.domain.entity.SysUser;
+import com.ruoyi.common.exception.ServiceException;
+import com.ruoyi.common.utils.SecurityUtils;
 import com.ruoyi.common.utils.file.ExcelImportUtils;
+import com.ruoyi.system.agent.security.AgentOwnershipChecker;
 import com.ruoyi.system.domain.NoteBlock;
 import com.ruoyi.system.domain.NoteDwtable;
 import com.ruoyi.system.domain.NoteMeta;
@@ -22,6 +25,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import com.ruoyi.system.domain.NoteNote;
 import com.ruoyi.system.service.INoteNoteService;
+import com.ruoyi.system.agent.annotation.AgentOperation;
+import com.ruoyi.system.agent.annotation.AgentParam;
 
 import org.apache.poi.ss.usermodel.*;
 
@@ -75,14 +80,18 @@ public class NoteNoteServiceImpl implements INoteNoteService
     @Autowired
     private NoteDwtableServiceImpl noteDwtableServiceImpl;
 
+    @Autowired
+    private AgentOwnershipChecker ownershipChecker;
+
     /**
      * 查询笔记
-     * 
+     *
      * @param id 笔记主键
      * @return 笔记
      */
     @Override
-    public NoteNote selectNoteNoteById(Long id)
+    @AgentOperation(name = "note.getById", description = "按ID查询笔记")
+    public NoteNote selectNoteNoteById(@AgentParam(value = "id", type = "long", description = "笔记ID") Long id)
     {
         return noteNoteMapper.selectNoteNoteById(id);
     }
@@ -94,12 +103,13 @@ public class NoteNoteServiceImpl implements INoteNoteService
 
     /**
      * 查询笔记列表
-     * 
+     *
      * @param noteNote 笔记
      * @return 笔记
      */
     @Override
-    public List<NoteNote> selectNoteNoteList(NoteNote noteNote,Long userId)
+    @AgentOperation(name = "note.list", description = "查询笔记列表")
+    public List<NoteNote> selectNoteNoteList(@AgentParam(value = "filter", type = "object", objectType = "NoteNote", allowedFields = {"title", "remark", "parentId"}, description = "筛选条件") NoteNote noteNote,Long userId)
     {
         List<NoteNote> noteList = null;
         // 管理员显示所有菜单信息
@@ -312,12 +322,13 @@ public class NoteNoteServiceImpl implements INoteNoteService
 
     /**
      * 新增笔记
-     * 
+     *
      * @param noteNote 笔记
      * @return 结果
      */
     @Override
-    public int insertNoteNote(NoteNote noteNote)
+    @AgentOperation(name = "note.create", description = "创建笔记")
+    public int insertNoteNote(@AgentParam(value = "note", type = "object", objectType = "NoteNote", allowedFields = {"title", "remark", "parentId", "content"}, description = "笔记内容") NoteNote noteNote)
     {
         //初始化note
         if(noteNote.getDelFlag()==null){
@@ -366,13 +377,16 @@ public class NoteNoteServiceImpl implements INoteNoteService
 
     /**
      * 修改笔记
-     * 
+     *
      * @param noteNote 笔记
      * @return 结果
      */
     @Override
-    public int updateNoteNote(NoteNote noteNote)
+    @AgentOperation(name = "note.update", description = "更新笔记", permissionKey = "note:note:edit")
+    public int updateNoteNote(@AgentParam(value = "note", type = "object", objectType = "NoteNote", allowedFields = {"id", "title", "remark", "parentId", "content"}, description = "笔记内容") NoteNote noteNote)
     {
+        // 归属校验：防止越权操作他人笔记
+        ownershipChecker.checkNoteOwnership(noteNote.getId(), SecurityUtils.getUserId());
 
         //修改笔记的同时去笔记元数据里修改对应信息
         if(noteNote.getNoteType()==2L){
@@ -540,8 +554,16 @@ public class NoteNoteServiceImpl implements INoteNoteService
      */
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public int deleteNoteNoteByIds(String[] ids)
+    @AgentOperation(name = "note.batchDelete", destructive = true, permissionKey = "note:note:delete", description = "批量删除笔记")
+    public int deleteNoteNoteByIds(@AgentParam(value = "ids", type = "list", description = "笔记ID列表") String[] ids)
     {
+        // 归属校验：批量删除前逐个校验归属（团队安全约定：批量操作验证全部项后才处理）
+        Long currentUserId = SecurityUtils.getUserId();
+        for (String id : ids)
+        {
+            ownershipChecker.checkNoteOwnership(Long.parseLong(id), currentUserId);
+        }
+
         List<String> allIds = new ArrayList<>(Arrays.asList(ids));
         for(String id: ids){
             Long noteId = Long.parseLong(id);
@@ -589,6 +611,11 @@ public class NoteNoteServiceImpl implements INoteNoteService
     @Override
     public int removeAll()
     {
+        // 纵深防御：Service 层管理员校验（Controller 层已有 getUserId()==1 拦截，agent 直调 Service 会绕过）
+        if (!SecurityUtils.isAdmin(SecurityUtils.getUserId()))
+        {
+            throw new ServiceException("仅管理员可执行清空操作");
+        }
         //需要清空的表包括：meta、dwtable、view、record、item、block、column以及note中type！=1的所有数据
         noteMetaMapper.removeAll();
         noteDwtableMapper.removeAll();
@@ -612,6 +639,11 @@ public class NoteNoteServiceImpl implements INoteNoteService
     @Override
     public int removeAllData()
     {
+        // 纵深防御：Service 层管理员校验
+        if (!SecurityUtils.isAdmin(SecurityUtils.getUserId()))
+        {
+            throw new ServiceException("仅管理员可执行清空操作");
+        }
         //需要清空的表包括：meta、dwtable、view、record、item、block、column以及note中type！=1的所有数据
         noteMetaMapper.removeAll();
         noteDwtableMapper.removeAll();
@@ -780,13 +812,17 @@ public class NoteNoteServiceImpl implements INoteNoteService
 
     /**
      * 删除笔记信息
-     * 
+     *
      * @param id 笔记主键
      * @return 结果
      */
     @Override
-    public int deleteNoteNoteById(Long id)
+    @AgentOperation(name = "note.delete", destructive = true, permissionKey = "note:note:delete", description = "删除单个笔记")
+    public int deleteNoteNoteById(@AgentParam(value = "id", type = "long", description = "笔记ID") Long id)
     {
+        // 归属校验：防止越权删除他人笔记
+        ownershipChecker.checkNoteOwnership(id, SecurityUtils.getUserId());
+
         NoteNote note= noteNoteMapper.selectNoteNoteById(id);
         if(note.getNoteType()==2L){
             //修改笔记的同时去笔记元数据里修改对应信息

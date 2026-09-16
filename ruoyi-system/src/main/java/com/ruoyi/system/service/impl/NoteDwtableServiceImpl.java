@@ -6,6 +6,11 @@ import java.util.List;
 import java.util.Map;
 
 import com.alibaba.fastjson2.JSONObject;
+import com.ruoyi.common.exception.ServiceException;
+import com.ruoyi.common.utils.SecurityUtils;
+import com.ruoyi.system.agent.annotation.AgentOperation;
+import com.ruoyi.system.agent.annotation.AgentParam;
+import com.ruoyi.system.agent.security.AgentOwnershipChecker;
 import com.ruoyi.system.domain.NoteColumn;
 import com.ruoyi.system.domain.NoteDwtableItem;
 import com.ruoyi.system.mapper.*;
@@ -41,14 +46,18 @@ public class NoteDwtableServiceImpl implements INoteDwtableService
     @Autowired
     private NoteDwtableItemMapper noteDwtableItemMapper;
 
+    @Autowired
+    private AgentOwnershipChecker ownershipChecker;
+
     /**
      * 查询多维表格数据表
-     * 
+     *
      * @param id 多维表格数据表主键
      * @return 多维表格数据表
      */
+    @AgentOperation(name = "dwtable.getById", description = "按ID查询多维表")
     @Override
-    public NoteDwtable selectNoteDwtableById(Long id)
+    public NoteDwtable selectNoteDwtableById(@AgentParam(value = "id", type = "long", description = "多维表ID") Long id)
     {
         return noteDwtableMapper.selectNoteDwtableById(id);
     }
@@ -97,24 +106,26 @@ public class NoteDwtableServiceImpl implements INoteDwtableService
 
     /**
      * 查询多维表格数据表列表
-     * 
+     *
      * @param noteDwtable 多维表格数据表
      * @return 多维表格数据表
      */
+    @AgentOperation(name = "dwtable.list", description = "查询多维表列表")
     @Override
-    public List<NoteDwtable> selectNoteDwtableList(NoteDwtable noteDwtable)
+    public List<NoteDwtable> selectNoteDwtableList(@AgentParam(value = "filter", type = "object", objectType = "NoteDwtable", allowedFields = {"name", "noteId"}, description = "筛选条件") NoteDwtable noteDwtable)
     {
         return noteDwtableMapper.selectNoteDwtableList(noteDwtable);
     }
 
     /**
      * 新增多维表格数据表
-     * 
+     *
      * @param noteDwtable 多维表格数据表
      * @return 结果
      */
+    @AgentOperation(name = "dwtable.create", description = "创建多维表")
     @Override
-    public int insertNoteDwtable(NoteDwtable noteDwtable)
+    public int insertNoteDwtable(@AgentParam(value = "dwtable", type = "object", objectType = "NoteDwtable", allowedFields = {"name", "noteId", "url"}, description = "多维表信息") NoteDwtable noteDwtable)
     {
         if(noteDwtable.getDelFlag()==null){
             noteDwtable.setDelFlag(0L);
@@ -127,37 +138,50 @@ public class NoteDwtableServiceImpl implements INoteDwtableService
 
     /**
      * 修改多维表格数据表
-     * 
+     *
      * @param noteDwtable 多维表格数据表
      * @return 结果
      */
+    @AgentOperation(name = "dwtable.update", description = "更新多维表")
     @Override
-    public int updateNoteDwtable(NoteDwtable noteDwtable)
+    public int updateNoteDwtable(@AgentParam(value = "dwtable", type = "object", objectType = "NoteDwtable", allowedFields = {"id", "name", "noteId", "url"}, description = "多维表信息") NoteDwtable noteDwtable)
     {
+        // 归属校验：通过 dwtableId → noteId → note.auth 链校验
+        ownershipChecker.checkDwtableOwnership(noteDwtable.getId(), SecurityUtils.getUserId());
         return noteDwtableMapper.updateNoteDwtable(noteDwtable);
     }
 
     /**
      * 批量删除多维表格数据表
-     * 
+     *
      * @param ids 需要删除的多维表格数据表主键
      * @return 结果
      */
+    @AgentOperation(name = "dwtable.batchDelete", destructive = true, permissionKey = "system:dwtable:remove", description = "批量删除多维表")
     @Override
-    public int deleteNoteDwtableByIds(String[] ids)
+    public int deleteNoteDwtableByIds(@AgentParam(value = "ids", type = "list", description = "多维表ID列表") String[] ids)
     {
+        // 归属校验：批量删除前逐个校验归属
+        Long currentUserId = SecurityUtils.getUserId();
+        for (String id : ids)
+        {
+            ownershipChecker.checkDwtableOwnership(Long.parseLong(id), currentUserId);
+        }
         return noteDwtableMapper.deleteNoteDwtableByIds(ids);
     }
 
     /**
      * 删除多维表格数据表信息
-     * 
+     *
      * @param id 多维表格数据表主键
      * @return 结果
      */
+    @AgentOperation(name = "dwtable.delete", destructive = true, permissionKey = "system:dwtable:remove", description = "删除单个多维表")
     @Override
-    public int deleteNoteDwtableById(Long id)
+    public int deleteNoteDwtableById(@AgentParam(value = "id", type = "long", description = "多维表ID") Long id)
     {
+        // 归属校验：防止越权删除他人多维表
+        ownershipChecker.checkDwtableOwnership(id, SecurityUtils.getUserId());
         //删除数据表操作是级联删除，删除对象包括数据表下的视图view，记录record，表格数据item
         noteViewServiceImpl.deleteNoteViewByDwtableId(id);
         //删除record

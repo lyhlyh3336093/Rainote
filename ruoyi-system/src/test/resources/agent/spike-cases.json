@@ -1,0 +1,457 @@
+{
+  "description": "Agent 计划正确率 Spike 测试用例（U8）。覆盖单步查询/创建/更新/删除、多步计划、澄清问题、清单外操作。门槛：50 用例中 ≥40 个（80%）计划正确。",
+  "threshold": 0.80,
+  "totalCases": 50,
+  "cases": [
+    {
+      "id": "Q01",
+      "category": "single_query",
+      "userInput": "查看我的笔记列表",
+      "context": {},
+      "expectedType": "PLAN",
+      "expectedOperations": ["note.list"],
+      "description": "单步查询笔记列表"
+    },
+    {
+      "id": "Q02",
+      "category": "single_query",
+      "userInput": "这个笔记下有哪些多维表",
+      "context": { "currentNoteId": 100 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["dwtable.list"],
+      "description": "上下文感知查询笔记下的多维表"
+    },
+    {
+      "id": "Q03",
+      "category": "single_query",
+      "userInput": "显示这个多维表的所有列",
+      "context": { "currentDwtableId": 200 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["column.list"],
+      "description": "上下文感知查询多维表的列"
+    },
+    {
+      "id": "Q04",
+      "category": "single_query",
+      "userInput": "这个多维表里有多少条记录",
+      "context": { "currentDwtableId": 200 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["record.list"],
+      "description": "查询多维表记录数"
+    },
+    {
+      "id": "Q05",
+      "category": "single_query",
+      "userInput": "查看记录ID为50的详情",
+      "context": { "currentDwtableId": 200 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["record.getById"],
+      "description": "按ID查询记录详情"
+    },
+    {
+      "id": "Q06",
+      "category": "single_query",
+      "userInput": "我一共创建了多少篇笔记",
+      "context": {},
+      "expectedType": "PLAN",
+      "expectedOperations": ["note.list"],
+      "description": "统计笔记总数（查询类）"
+    },
+    {
+      "id": "Q07",
+      "category": "single_query",
+      "userInput": "显示最近创建的5篇笔记",
+      "context": {},
+      "expectedType": "PLAN",
+      "expectedOperations": ["note.list"],
+      "description": "查询最近笔记（分页/排序）"
+    },
+    {
+      "id": "Q08",
+      "category": "single_query",
+      "userInput": "查看这个列的配置信息",
+      "context": { "currentColumnId": 300 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["column.getById"],
+      "description": "上下文感知查询列详情"
+    },
+    {
+      "id": "Q09",
+      "category": "single_query",
+      "userInput": "列出这个多维表的所有记录",
+      "context": { "currentDwtableId": 200 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["record.list"],
+      "description": "查询记录列表"
+    },
+    {
+      "id": "Q10",
+      "category": "single_query",
+      "userInput": "这个多维表的结构是什么样的",
+      "context": { "currentDwtableId": 200 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["column.list"],
+      "description": "查询多维表结构（列定义）"
+    },
+    {
+      "id": "C01",
+      "category": "single_create",
+      "userInput": "创建一个标题为会议纪要的笔记",
+      "context": {},
+      "expectedType": "PLAN",
+      "expectedOperations": ["note.create"],
+      "description": "单步创建笔记"
+    },
+    {
+      "id": "C02",
+      "category": "single_create",
+      "userInput": "在这个笔记下创建一个名为客户管理的多维表",
+      "context": { "currentNoteId": 100 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["dwtable.create"],
+      "description": "上下文感知创建多维表"
+    },
+    {
+      "id": "C03",
+      "category": "single_create",
+      "userInput": "给这个多维表添加一个姓名列，类型是文本",
+      "context": { "currentDwtableId": 200 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["column.create"],
+      "description": "上下文感知创建文本列"
+    },
+    {
+      "id": "C04",
+      "category": "single_create",
+      "userInput": "在这个多维表添加一个年龄列，类型是数字",
+      "context": { "currentDwtableId": 200 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["column.create"],
+      "description": "创建数字列"
+    },
+    {
+      "id": "C05",
+      "category": "single_create",
+      "userInput": "添加一条记录，姓名是张三，年龄是28",
+      "context": { "currentDwtableId": 200 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["record.create"],
+      "description": "创建记录"
+    },
+    {
+      "id": "C06",
+      "category": "single_create",
+      "userInput": "给这个表加一个生日列，类型是日期",
+      "context": { "currentDwtableId": 200 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["column.create"],
+      "description": "创建日期列"
+    },
+    {
+      "id": "C07",
+      "category": "single_create",
+      "userInput": "添加一个性别列，类型是单选，选项有男女",
+      "context": { "currentDwtableId": 200 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["column.create"],
+      "description": "创建选择列"
+    },
+    {
+      "id": "C08",
+      "category": "single_create",
+      "userInput": "创建一个计算总分的公式列",
+      "context": { "currentDwtableId": 200 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["column.create"],
+      "description": "创建公式列"
+    },
+    {
+      "id": "U01",
+      "category": "single_update",
+      "userInput": "把这篇笔记的标题改成项目计划",
+      "context": { "currentNoteId": 100 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["note.update"],
+      "description": "上下文感知更新笔记标题"
+    },
+    {
+      "id": "U02",
+      "category": "single_update",
+      "userInput": "将这个多维表改名为销售数据",
+      "context": { "currentDwtableId": 200 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["dwtable.update"],
+      "description": "更新多维表名称"
+    },
+    {
+      "id": "U03",
+      "category": "single_update",
+      "userInput": "把这个列改名为联系方式",
+      "context": { "currentColumnId": 300 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["column.update"],
+      "description": "更新列配置"
+    },
+    {
+      "id": "U04",
+      "category": "single_update",
+      "userInput": "把记录ID为50的姓名改为李四",
+      "context": { "currentDwtableId": 200 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["record.update"],
+      "description": "更新记录数据"
+    },
+    {
+      "id": "U05",
+      "category": "single_update",
+      "userInput": "修改这篇笔记的内容为新的正文",
+      "context": { "currentNoteId": 100 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["note.update"],
+      "description": "更新笔记内容"
+    },
+    {
+      "id": "D01",
+      "category": "single_delete",
+      "userInput": "删除这篇笔记",
+      "context": { "currentNoteId": 100 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["note.delete"],
+      "description": "上下文感知删除笔记（破坏性）"
+    },
+    {
+      "id": "D02",
+      "category": "single_delete",
+      "userInput": "删除这个多维表",
+      "context": { "currentDwtableId": 200 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["dwtable.delete"],
+      "description": "删除多维表（破坏性）"
+    },
+    {
+      "id": "D03",
+      "category": "single_delete",
+      "userInput": "删除这个列",
+      "context": { "currentColumnId": 300 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["column.delete"],
+      "description": "删除列（破坏性）"
+    },
+    {
+      "id": "D04",
+      "category": "single_delete",
+      "userInput": "删除记录ID为50的记录",
+      "context": { "currentDwtableId": 200 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["record.delete"],
+      "description": "删除记录（破坏性）"
+    },
+    {
+      "id": "D05",
+      "category": "single_delete",
+      "userInput": "批量删除记录ID为1、2、3的记录",
+      "context": { "currentDwtableId": 200 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["record.batchDelete"],
+      "description": "批量删除记录（破坏性，AE6）"
+    },
+    {
+      "id": "M01",
+      "category": "multi_step",
+      "userInput": "创建一个标题为项目管理的笔记，并在里面创建一个多维表",
+      "context": {},
+      "expectedType": "PLAN",
+      "expectedOperations": ["note.create", "dwtable.create"],
+      "description": "多步：创建笔记+多维表（依赖链）"
+    },
+    {
+      "id": "M02",
+      "category": "multi_step",
+      "userInput": "在这个多维表里添加姓名、电话、公司三个列",
+      "context": { "currentDwtableId": 200 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["column.create", "column.create", "column.create"],
+      "description": "多步：批量创建3列（bulkGroupId）"
+    },
+    {
+      "id": "M03",
+      "category": "multi_step",
+      "userInput": "创建一个完整的客户管理表，包含姓名列和电话列，并添加一条示例记录",
+      "context": { "currentNoteId": 100 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["dwtable.create", "column.create", "column.create", "record.create"],
+      "description": "多步：建表+建列+建记录"
+    },
+    {
+      "id": "M04",
+      "category": "multi_step",
+      "userInput": "删除这个多维表的所有列后再删除多维表",
+      "context": { "currentDwtableId": 200 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["column.list", "column.delete", "dwtable.delete"],
+      "description": "多步：先查列再删列最后删表（破坏性）"
+    },
+    {
+      "id": "M05",
+      "category": "multi_step",
+      "userInput": "复制这个多维表的结构到新表",
+      "context": { "currentDwtableId": 200 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["column.list", "dwtable.create", "column.create"],
+      "description": "多步：查询列+建表+建列"
+    },
+    {
+      "id": "M06",
+      "category": "multi_step",
+      "userInput": "创建一个笔记并添加一个默认的多维表",
+      "context": {},
+      "expectedType": "PLAN",
+      "expectedOperations": ["note.create", "dwtable.create"],
+      "description": "多步：创建笔记+默认多维表"
+    },
+    {
+      "id": "M07",
+      "category": "multi_step",
+      "userInput": "在这个多维表批量添加5条记录：张三、李四、王五、赵六、钱七",
+      "context": { "currentDwtableId": 200 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["record.create", "record.create", "record.create", "record.create", "record.create"],
+      "description": "多步：批量创建5条记录"
+    },
+    {
+      "id": "M08",
+      "category": "multi_step",
+      "userInput": "把姓名为张三的记录改名为张三丰，并更新年龄为30",
+      "context": { "currentDwtableId": 200 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["record.list", "record.update"],
+      "description": "多步：查询后更新"
+    },
+    {
+      "id": "M09",
+      "category": "multi_step",
+      "userInput": "创建一个销售管理表，包含产品名称、价格、库存三个列",
+      "context": { "currentNoteId": 100 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["dwtable.create", "column.create", "column.create", "column.create"],
+      "description": "多步：建表+3列（AE6 批量效率）"
+    },
+    {
+      "id": "M10",
+      "category": "multi_step",
+      "userInput": "删除这篇笔记以及它下面的所有多维表",
+      "context": { "currentNoteId": 100 },
+      "expectedType": "PLAN",
+      "expectedOperations": ["dwtable.list", "dwtable.delete", "note.delete"],
+      "description": "多步：清理关联数据后删笔记（破坏性）"
+    },
+    {
+      "id": "CL01",
+      "category": "clarify",
+      "userInput": "帮我处理一下笔记",
+      "context": {},
+      "expectedType": "CLARIFY",
+      "expectedOperations": [],
+      "description": "意图不明确：处理方式未指定"
+    },
+    {
+      "id": "CL02",
+      "category": "clarify",
+      "userInput": "删除",
+      "context": {},
+      "expectedType": "CLARIFY",
+      "expectedOperations": [],
+      "description": "缺少操作目标"
+    },
+    {
+      "id": "CL03",
+      "category": "clarify",
+      "userInput": "创建一个",
+      "context": {},
+      "expectedType": "CLARIFY",
+      "expectedOperations": [],
+      "description": "缺少创建类型"
+    },
+    {
+      "id": "CL04",
+      "category": "clarify",
+      "userInput": "更新一下",
+      "context": {},
+      "expectedType": "CLARIFY",
+      "expectedOperations": [],
+      "description": "缺少更新目标和字段"
+    },
+    {
+      "id": "CL05",
+      "category": "clarify",
+      "userInput": "整理一下数据",
+      "context": { "currentDwtableId": 200 },
+      "expectedType": "CLARIFY",
+      "expectedOperations": [],
+      "description": "意图模糊：整理方式未明确"
+    },
+    {
+      "id": "CL06",
+      "category": "clarify",
+      "userInput": "优化一下这个表",
+      "context": { "currentDwtableId": 200 },
+      "expectedType": "CLARIFY",
+      "expectedOperations": [],
+      "description": "意图模糊：优化方式未明确"
+    },
+    {
+      "id": "CL07",
+      "category": "clarify",
+      "userInput": "弄一下那个东西",
+      "context": {},
+      "expectedType": "CLARIFY",
+      "expectedOperations": [],
+      "description": "极度模糊：目标与操作均未明确"
+    },
+    {
+      "id": "O01",
+      "category": "out_of_manifest",
+      "userInput": "把所有笔记导出为Excel文件",
+      "context": {},
+      "expectedType": "ERROR",
+      "expectedOperations": [],
+      "description": "清单外：无导出Excel操作（AE3）"
+    },
+    {
+      "id": "O02",
+      "category": "out_of_manifest",
+      "userInput": "给所有用户发送邮件通知",
+      "context": {},
+      "expectedType": "ERROR",
+      "expectedOperations": [],
+      "description": "清单外：无邮件发送操作"
+    },
+    {
+      "id": "O03",
+      "category": "out_of_manifest",
+      "userInput": "备份所有数据到云端",
+      "context": {},
+      "expectedType": "ERROR",
+      "expectedOperations": [],
+      "description": "清单外：无备份操作"
+    },
+    {
+      "id": "O04",
+      "category": "out_of_manifest",
+      "userInput": "生成一份数据统计报表",
+      "context": {},
+      "expectedType": "ERROR",
+      "expectedOperations": [],
+      "description": "清单外：无报表生成操作"
+    },
+    {
+      "id": "O05",
+      "category": "out_of_manifest",
+      "userInput": "同步笔记到其他设备",
+      "context": {},
+      "expectedType": "ERROR",
+      "expectedOperations": [],
+      "description": "清单外：无同步操作"
+    }
+  ]
+}

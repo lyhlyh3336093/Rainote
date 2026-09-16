@@ -13,6 +13,7 @@ import com.ruoyi.system.service.impl.ColumnDefaultValueSupport;
 import com.ruoyi.common.utils.SecurityUtils;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -190,7 +191,7 @@ public class NoteColumnController extends BaseController
     /**
      * 删除列信息
      */
-    // @PreAuthorize("@ss.hasPermi('system:column:remove')")
+    @PreAuthorize("@ss.hasPermi('system:column:remove')")
     @Log(title = "列信息", businessType = BusinessType.DELETE)
     @RequestMapping(value = "/remove/{ids}",method = org.springframework.web.bind.annotation.RequestMethod.GET)
     public AjaxResult remove(@PathVariable String ids)
