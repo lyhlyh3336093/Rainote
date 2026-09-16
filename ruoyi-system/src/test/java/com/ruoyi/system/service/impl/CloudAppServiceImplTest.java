@@ -17,6 +17,7 @@ import org.springframework.security.authentication.UsernamePasswordAuthenticatio
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -107,16 +108,15 @@ public class CloudAppServiceImplTest
         assertEquals("系统默认应用仅管理员可删除", ex.getMessage());
     }
 
-    // ===== T3.4 非创建者且非 admin 删除他人应用(creater="3")→ R6 失败 =====
+    // ===== T3.4 非创建者且非 admin 删除他人应用(creater="3")→ R6 已放开，通过 =====
     @Test
-    void testValidateBeforeDelete_nonOwnerNonAdminDelete_throws()
+    void testValidateBeforeDelete_nonOwnerNonAdminDelete_r6Relaxed_passes()
     {
         setCurrentUser(2L); // 当前用户 id=2
         when(cloudAppMapper.selectCloudAppById(10L)).thenReturn(buildApp(10L, "3")); // creater=3
 
-        ServiceException ex = assertThrows(ServiceException.class,
-                () -> cloudAppService.validateBeforeDelete(new Long[]{10L}));
-        assertEquals("没有权限删除该应用", ex.getMessage());
+        // R6 已放开：普通应用删除不再校验创建者，非管理员可删除他人应用
+        assertDoesNotThrow(() -> cloudAppService.validateBeforeDelete(new Long[]{10L}));
     }
 
     // ===== T3.5 创建者本人删除自己的应用(creater="2",当前用户 id=2)→ 通过 =====
@@ -150,16 +150,15 @@ public class CloudAppServiceImplTest
         cloudAppService.validateBeforeDelete(new Long[]{1L});
     }
 
-    // ===== T3.8 creater=null:非 admin → R6 失败(无 NPE);admin → 通过 =====
+    // ===== T3.8 creater=null:非 admin → R6 已放开(无 NPE);admin → 通过 =====
     @Test
-    void testValidateBeforeDelete_nullCreater_nonAdmin_throwsR6_noNPE()
+    void testValidateBeforeDelete_nullCreater_nonAdmin_r6Relaxed_noNPE()
     {
         setCurrentUser(2L);
         when(cloudAppMapper.selectCloudAppById(10L)).thenReturn(buildApp(10L, null));
 
-        ServiceException ex = assertThrows(ServiceException.class,
-                () -> cloudAppService.validateBeforeDelete(new Long[]{10L}));
-        assertEquals("没有权限删除该应用", ex.getMessage());
+        // R6 已放开：null creater 不抛 NPE，也不抛权限异常
+        assertDoesNotThrow(() -> cloudAppService.validateBeforeDelete(new Long[]{10L}));
     }
 
     @Test
@@ -209,17 +208,16 @@ public class CloudAppServiceImplTest
         cloudAppService.validateBeforeDelete(new Long[]{10L, 1L});
     }
 
-    // ===== T3.12 非 admin 批量[自己应用, 他人应用] → 整体中止(R6 + R7)=====
+    // ===== T3.12 非 admin 批量[自己应用, 他人应用] → R6 已放开，通过 =====
     @Test
-    void testValidateBeforeDelete_nonAdminBatchWithOtherApp_aborts()
+    void testValidateBeforeDelete_nonAdminBatchWithOtherApp_r6Relaxed_passes()
     {
         setCurrentUser(2L); // 非 admin
         when(cloudAppMapper.selectCloudAppById(10L)).thenReturn(buildApp(10L, "2")); // 自己的
         when(cloudAppMapper.selectCloudAppById(11L)).thenReturn(buildApp(11L, "3")); // 他人的
 
-        ServiceException ex = assertThrows(ServiceException.class,
-                () -> cloudAppService.validateBeforeDelete(new Long[]{10L, 11L}));
-        assertEquals("没有权限删除该应用", ex.getMessage());
+        // R6 已放开：批量删除含他人应用不再中止
+        assertDoesNotThrow(() -> cloudAppService.validateBeforeDelete(new Long[]{10L, 11L}));
     }
 
     // ===== 边界:空数组(不应抛异常,for 循环不执行)=====

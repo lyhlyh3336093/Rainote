@@ -1,6 +1,6 @@
 -- 菜单 SQL
 insert into sys_menu (menu_name, parent_id, order_num, path, component, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, update_by, update_time, remark)
-values('应用', '3', '1', 'app', 'system/app/index', 1, 0, 'C', '0', '0', 'system:app:list', '#', 'admin', sysdate(), '', null, '应用菜单');
+values('应用', '0', '1', 'application', 'system/app/index', 1, 0, 'C', '0', '0', 'system:app:list', '#', 'admin', sysdate(), '', null, '应用菜单');
 
 -- 按钮父菜单ID
 SELECT @parentId := LAST_INSERT_ID();

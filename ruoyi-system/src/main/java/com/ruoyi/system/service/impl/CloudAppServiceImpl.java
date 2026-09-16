@@ -104,8 +104,11 @@ public class CloudAppServiceImpl implements ICloudAppService
     }
 
     /**
-     * 删除前公共校验:存在性(R4)、默认应用仅管理员可删(R5)、创建者权限(R6)
+     * 删除前公共校验:存在性(R4)、默认应用仅管理员可删(R5)
      * 任一 id 校验失败即整体中止(R7,由异常机制天然保证)
+     *
+     * 注意:R6 创建者权限校验已放开,所有拥有 system:app:remove 权限的用户
+     * 均可删除普通应用;系统默认应用(creater="1")仍仅管理员可删(R5)
      *
      * @param ids 待删除的应用主键数组
      * @throws ServiceException 校验失败时抛出
@@ -115,7 +118,6 @@ public class CloudAppServiceImpl implements ICloudAppService
     {
         Long currentUserId = SecurityUtils.getUserId();
         boolean isAdmin = SecurityUtils.isAdmin(currentUserId);
-        String currentUserIdStr = String.valueOf(currentUserId);
 
         for (Long id : ids)
         {
@@ -130,14 +132,7 @@ public class CloudAppServiceImpl implements ICloudAppService
             {
                 throw new ServiceException("系统默认应用仅管理员可删除");
             }
-            // R6: 创建者权限校验(仅对非默认应用生效;默认应用已在 R5 处理)
-            // 比较左侧用 String.valueOf(...).equals(...) 避免 creater=null 时 NPE
-            if (!"1".equals(app.getCreater())
-                && !currentUserIdStr.equals(app.getCreater())
-                && !isAdmin)
-            {
-                throw new ServiceException("没有权限删除该应用");
-            }
+            // R6 已放开:普通应用删除不再校验创建者,所有有权限用户均可删除
         }
     }
 }
