@@ -304,11 +304,13 @@ export default defineComponent({
     // #10: precheck 引用变化即重建分组（与 open 状态无关）——失败保留期间用户重新预检成功后，
     // 弹框分组刷新为新文件内容（已填补参重置为空是预期：新文件新基线）
     watch(() => props.precheck, rebuildGroups);
+    // immediate：父组件在同一同步块内设置 precheck 与 modalOpen（v-if 首挂时 open 已为 true，
+    // 非 immediate 的 watch 挂载后无变化永不触发，弹框死锁不显示——#15）
     watch(() => props.open, (open) => {
       state.visible = open;
       // 引用未变才由 open 重建（本次引用已由 precheck watch 构建过则跳过）
       if (open && builtFrom !== props.precheck) rebuildGroups();
-    });
+    }, { immediate: true });
     watch(() => state.visible, (v) => ctx.emit('update:open', v));
 
     /** 前端类型校验（与后端 ExcelColumnMatcher.validateCellText 同语义，空输入=接受空值） */
