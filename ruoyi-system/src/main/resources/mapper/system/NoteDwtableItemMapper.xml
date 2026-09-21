@@ -164,9 +164,16 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     </delete>
 
     <delete id="deleteNoteDwtableItemByIds" parameterType="String">
-        delete from note_dwtable_item where id in 
+        delete from note_dwtable_item where id in
         <foreach item="id" collection="array" open="(" separator="," close=")">
             #{id}
         </foreach>
     </delete>
+
+    <!-- 替换式 Excel 导入：本表记录全删后，其他表指向本表的关联列（kept 21 配对列/他表 18 列）
+         的 items 旧引用悬空，按列清空关联三字段（linkColumnId 保留标识配对方向） -->
+    <update id="clearLinkFieldsByColumnId" parameterType="Long">
+        update note_dwtable_item set linkRecordId = '', linkItemId = '', value = ''
+        where columnId = #{columnId} and (linkRecordId is not null or linkItemId is not null)
+    </update>
 </mapper>

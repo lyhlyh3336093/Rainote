@@ -40,6 +40,7 @@ import com.ruoyi.system.domain.vo.NoteRecordVo;
 import com.ruoyi.system.mapper.NoteColumnMapper;
 import com.ruoyi.system.mapper.NoteDwtableItemMapper;
 import com.ruoyi.system.mapper.NoteDwtableMapper;
+import com.ruoyi.system.mapper.NoteNotelinkMapper;
 import com.ruoyi.system.mapper.NoteRecordMapper;
 import com.ruoyi.system.service.INoteRecordService;
 
@@ -57,11 +58,13 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * {@code dwtable.importExcel} agent 操作单元测试。
+ * {@code dwtable.importExcel} agent 操作单元测试（<b>替换式语义</b>）。
  * <p>
- * 覆盖：无缺参成功导入、columnValues 覆盖缺参（含数字归一化）、缺参未覆盖失败态
- * （零写入 + 结构化清单）、关联未命中失败清单、歧义预选成功报告、
- * 路径穿越拒绝、非 profile 前缀拒绝、文件不存在、归属失败穿透。
+ * 覆盖：无缺参成功导入（含 replaceImpact 透传）、columnValues 覆盖缺参（含数字归一化）、
+ * 表头未映射列的删除/新建 replaceImpact 行为（不再产生缺参）、成功结果替换摘要
+ * （"替换：删除原 N 行"）与 agent 基线 replaceDeletedColumns、关联未命中失败清单
+ * （零写入 + 结构化清单）、歧义预选成功报告、路径穿越拒绝、非 profile 前缀拒绝、
+ * 文件不存在、归属失败穿透。
  *
  * @author ruoyi
  */
@@ -89,6 +92,10 @@ class NoteDwtableExcelImportAgentTest
     @Mock
     private NoteDwtableItemMapper noteDwtableItemMapper;
 
+    /** 替换式导入：被删列的孤儿语义链接清理（service 新注入，@InjectMocks 自动装配） */
+    @Mock
+    private NoteNotelinkMapper noteNotelinkMapper;
+
     @Mock
     private AgentOwnershipChecker agentOwnershipChecker;
 
@@ -106,6 +113,9 @@ class NoteDwtableExcelImportAgentTest
 
     /** 模拟 NoteRecordMapper.insertNoteRecord 的 useGeneratedKeys 自增 id 回填 */
     private final AtomicLong recordIdSequence = new AtomicLong(1000L);
+
+    /** 模拟 insertNoteColumn 的 useGeneratedKeys 自增 id 回填（pending 列 items 组装依赖） */
+    private final AtomicLong columnIdSequence = new AtomicLong(8000L);
 
     @BeforeEach
     void setUp()
@@ -128,6 +138,12 @@ class NoteDwtableExcelImportAgentTest
         when(noteDwtableItemMapper.insertNoteDwtableItems(anyList())).thenAnswer(inv -> {
             List<NoteDwtableItem> items = inv.getArgument(0);
             return items.size();
+        });
+        // 替换式导入：pending 新建列落库回填自增 id（useGeneratedKeys 语义）
+        when(noteColumnMapper.insertNoteColumn(any(NoteColumn.class))).thenAnswer(inv -> {
+            NoteColumn column = inv.getArgument(0);
+            column.setId(columnIdSequence.getAndIncrement());
+            return 1;
         });
     }
 
@@ -250,6 +266,9 @@ class NoteDwtableExcelImportAgentTest
         assertTrue(result.isSuccess());
         assertEquals(Integer.valueOf(2), result.getImportedCount());
         assertNotNull(result.getMessage());
+        // 替换式影响面随成功结果返回（无删除/新建时各清单为空）
+        assertNotNull(result.getReplaceImpact());
+        assertTrue(result.getReplaceImpact().getDeletedColumns().isEmpty());
         verify(noteRecordMapper, times(2)).insertNoteRecord(any(NoteRecord.class));
         verify(noteDwtableItemMapper).insertNoteDwtableItems(itemsCaptor.capture());
         List<NoteDwtableItem> items = itemsCaptor.getValue();
@@ -257,15 +276,56 @@ class NoteDwtableExcelImportAgentTest
     }
 
     @Test
+    void importExcelShouldIncludeReplaceImpactAndSummaryInSuccessResult() throws IOException
+    {
+        // 目标表现有 3 条记录 + 备注列不在 Excel → 删除行数/删除列进入 replaceImpact 与成功摘要
+        when(noteRecordMapper.selectNoteRecordList(any(NoteRecordVo.class))).thenAnswer(inv -> {
+            NoteRecordVo query = inv.getArgument(0);
+            if (DWTABLE_ID.equals(query.getDwtableId()))
+            {
+                return java.util.Arrays.asList(
+                        record(1L, "旧1", 1L), record(2L, "旧2", 2L), record(3L, "旧3", 3L));
+            }
+            return new ArrayList<NoteRecord>();
+        });
+        byte[] bytes = twoRowWorkbook();
+        String filePath = writeUploadFile("2026/09/16/替换摘要.xlsx", bytes);
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class)))
+                .thenReturn(java.util.Arrays.asList(
+                        column(101L, "名称", 1L, null),
+                        column(102L, "备注", 1L, null)));
+
+        ExcelImportAgentResult result = service.importExcel(
+                NOTE_ID, DWTABLE_ID, filePath, null, USER_ID);
+
+        assertTrue(result.isSuccess());
+        assertEquals(Integer.valueOf(2), result.getImportedCount());
+        // 成功结果携带替换影响面
+        assertNotNull(result.getReplaceImpact());
+        assertEquals(3, result.getReplaceImpact().getDeletedRowCount());
+        assertEquals(1, result.getReplaceImpact().getDeletedColumns().size());
+        assertEquals("备注", result.getReplaceImpact().getDeletedColumns().get(0).getColumnName());
+        // 成功消息含替换摘要分句
+        assertTrue(result.getMessage().contains("替换：删除原 3 行"));
+        assertTrue(result.getMessage().contains("删除 1 列"));
+        // 备注（列删除）实际执行：agent 基线含 replaceDeletedColumns（否则导入段漂移拒绝），
+        // 导入成功即证明基线正确携带
+        verify(noteColumnMapper).deleteNoteColumnById(102L);
+    }
+
+    @Test
     void importExcelShouldFillFromColumnValuesWhenCovered() throws IOException
     {
-        // xlsx 只有名称列；数量列缺列，columnValues 提供数字字面量（归一化 toString）
+        // 数量列在表头中但单元格为空（缺值），columnValues 提供数字字面量（归一化 toString）
         byte[] bytes = workbookBytes(workbook -> {
             XSSFSheet sheet = workbook.createSheet("目标表");
-            sheet.createRow(0).createCell(0).setCellValue("名称");
-            sheet.createRow(1).createCell(0).setCellValue("张三");
+            org.apache.poi.ss.usermodel.Row headerRow = sheet.createRow(0);
+            headerRow.createCell(0).setCellValue("名称");
+            headerRow.createCell(1).setCellValue("数量");
+            org.apache.poi.ss.usermodel.Row dataRow = sheet.createRow(1);
+            dataRow.createCell(0).setCellValue("张三");
         });
-        String filePath = writeUploadFile("2026/09/16/缺列.xlsx", bytes);
+        String filePath = writeUploadFile("2026/09/16/缺值.xlsx", bytes);
         when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class)))
                 .thenReturn(java.util.Arrays.asList(
                         column(101L, "名称", 1L, null),
@@ -280,7 +340,7 @@ class NoteDwtableExcelImportAgentTest
         assertEquals(Integer.valueOf(1), result.getImportedCount());
         verify(noteDwtableItemMapper).insertNoteDwtableItems(itemsCaptor.capture());
         List<NoteDwtableItem> items = itemsCaptor.getValue();
-        // 名称列 + 数量列（缺列补参）各一条 item
+        // 名称列 + 数量列（缺值补参）各一条 item
         assertEquals(2, items.size());
         NoteDwtableItem fillItem = items.stream()
                 .filter(i -> Long.valueOf(102L).equals(i.getColumnId())).findFirst().orElse(null);
@@ -289,14 +349,12 @@ class NoteDwtableExcelImportAgentTest
     }
 
     @Test
-    void importExcelShouldReturnUncoveredListWithoutWriting() throws IOException
+    void importExcelShouldReplaceUnmatchedColumnsInsteadOfReportingMissing() throws IOException
     {
-        byte[] bytes = workbookBytes(workbook -> {
-            XSSFSheet sheet = workbook.createSheet("目标表");
-            sheet.createRow(0).createCell(0).setCellValue("名称");
-            sheet.createRow(1).createCell(0).setCellValue("张三");
-        });
-        String filePath = writeUploadFile("2026/09/16/未覆盖.xlsx", bytes);
+        // 替换式语义：表头未映射列（备注）不再产生缺参，而是删除；Excel 独有表头（新列）自动新建
+        byte[] bytes = singleSheetBytes(new String[] {"名称", "新列"},
+                Collections.singletonList(new String[] {"张三", "v"}));
+        String filePath = writeUploadFile("2026/09/16/替换列.xlsx", bytes);
         when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class)))
                 .thenReturn(java.util.Arrays.asList(
                         column(101L, "名称", 1L, null),
@@ -305,15 +363,22 @@ class NoteDwtableExcelImportAgentTest
         ExcelImportAgentResult result = service.importExcel(
                 NOTE_ID, DWTABLE_ID, filePath, null, USER_ID);
 
-        assertFalse(result.isSuccess());
-        assertEquals(1, result.getMissingParams().size());
-        ExcelImportPrecheckResult.MissingParam missing = result.getMissingParams().get(0);
-        assertEquals("备注", missing.getColumnName());
-        assertEquals(ExcelImportPrecheckResult.KIND_MISSING_COLUMN, missing.getKind());
-        assertTrue(result.getMessage().contains("未执行"));
-        // 失败态零写入
-        verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
-        verify(noteDwtableItemMapper, never()).insertNoteDwtableItems(anyList());
+        // 无缺参 → 成功执行（替换式）
+        assertTrue(result.isSuccess());
+        assertTrue(result.getMissingParams().isEmpty());
+        assertEquals(Integer.valueOf(1), result.getImportedCount());
+        // replaceImpact：备注列删除 + 新列新建
+        assertNotNull(result.getReplaceImpact());
+        assertEquals(1, result.getReplaceImpact().getDeletedColumns().size());
+        assertEquals("备注", result.getReplaceImpact().getDeletedColumns().get(0).getColumnName());
+        assertEquals(Collections.singletonList("新列"), result.getReplaceImpact().getNewColumnNames());
+        assertTrue(result.getMessage().contains("删除 1 列"));
+        assertTrue(result.getMessage().contains("新建 1 列"));
+        // 落库：备注列被删、新列 insert、行 items = 名称 + 新列
+        verify(noteColumnMapper).deleteNoteColumnById(102L);
+        verify(noteColumnMapper).insertNoteColumn(any(NoteColumn.class));
+        verify(noteDwtableItemMapper).insertNoteDwtableItems(itemsCaptor.capture());
+        assertEquals(2, itemsCaptor.getValue().size());
     }
 
     @Test
@@ -327,7 +392,7 @@ class NoteDwtableExcelImportAgentTest
         when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class)))
                 .thenReturn(java.util.Arrays.asList(
                         column(101L, "名称", 1L, null),
-                        column(104L, "关联", 21L, "{\"table_id\":80}")));
+                        column(104L, "关联", 21L, "{\"table_id\":80,\"back_field_id\":502}")));
 
         ExcelImportAgentResult result = service.importExcel(
                 NOTE_ID, DWTABLE_ID, filePath, null, USER_ID);

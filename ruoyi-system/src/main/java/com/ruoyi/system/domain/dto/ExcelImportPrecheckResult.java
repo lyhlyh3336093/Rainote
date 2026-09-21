@@ -4,11 +4,14 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 多维表格 Excel 导入预检结果（U4，阶段一，R9/R11）。
+ * 多维表格 Excel 导入预检结果（U4，阶段一，R9/R11；替换式语义）。
  * <p>
  * 预检不写库，本 DTO 随端点响应回传前端，供补参弹框（U6）与阶段二文件同一性比对（KTD5）消费：
  * <ul>
- *   <li>缺参项（{@link MissingParam}）：缺列/缺值/类型违规/关联缺列/关联未命中；</li>
+ *   <li>缺参项（{@link MissingParam}）：缺值/类型违规/关联未命中（替换式语义下表头未映射
+ *       一律新建列、未出现的列一律删除，缺列/关联缺列两类已消失）；</li>
+ *   <li>替换影响面（{@link ReplaceImpact}）：将删除的行/列、将新建的列、跨表引用清空与
+ *       取消隐藏清单——删除类字段非空/非零即必须经弹框确认；</li>
  *   <li>歧义项（{@link AmbiguityItem}）：同名多记录，预选 sort 靠前；</li>
  *   <li>默认值填充项（{@link DefaultValueFill}）：有默认值的列不进缺参弹框（R10 填充优先级）；</li>
  *   <li>新选项创建项（{@link NewOption}）：单选/多选未命中选项自动追加（R19）；</li>
@@ -23,17 +26,11 @@ import java.util.List;
  */
 public class ExcelImportPrecheckResult
 {
-    /** 缺参类型：基础列缺列（表头未映射到且无默认值，全部行受影响） */
-    public static final String KIND_MISSING_COLUMN = "缺列";
-
     /** 缺参类型：基础列缺值（表头命中但单元格空且无默认值，携带行号集） */
     public static final String KIND_MISSING_VALUE = "缺值";
 
     /** 缺参类型：单元格类型校验违规（数字/日期/复选框，走补值链路，附违规原因） */
     public static final String KIND_TYPE_VIOLATION = "类型违规";
-
-    /** 缺参类型：关联列缺列（表头未映射到；关联列不支持默认值） */
-    public static final String KIND_LINK_MISSING_COLUMN = "关联缺列";
 
     /** 缺参类型：关联列未命中（单元格文本未匹配到被关联表记录名，携带未命中名清单） */
     public static final String KIND_LINK_MISS = "关联未命中";
@@ -64,6 +61,9 @@ public class ExcelImportPrecheckResult
 
     /** 关联列选择器候选清单：每个映射到的 18/21 关联列附被关联表记录候选首批（KTD7，已过 R23 归属校验） */
     private List<RelationCandidates> relationCandidates = new ArrayList<>();
+
+    /** 替换式导入影响面（删除类字段非空/非零即前端必须弹框确认后才执行导入） */
+    private ReplaceImpact replaceImpact = new ReplaceImpact();
 
     /** 是否存在阻断性问题（缺参或歧义非空 → 前端打开补参弹框，R13 分流） */
     private boolean hasBlockingIssues;
@@ -156,6 +156,16 @@ public class ExcelImportPrecheckResult
     public void setRelationCandidates(List<RelationCandidates> relationCandidates)
     {
         this.relationCandidates = relationCandidates;
+    }
+
+    public ReplaceImpact getReplaceImpact()
+    {
+        return replaceImpact;
+    }
+
+    public void setReplaceImpact(ReplaceImpact replaceImpact)
+    {
+        this.replaceImpact = replaceImpact;
     }
 
     public boolean isHasBlockingIssues()
@@ -681,6 +691,187 @@ public class ExcelImportPrecheckResult
         public void setName(String name)
         {
             this.name = name;
+        }
+    }
+
+    /**
+     * 替换式导入影响面：本次导入成功后目标表现有数据行全部删除、列集合对齐 Excel。
+     * <ul>
+     *   <li>删除类字段（{@link #deletedRowCount}/{@link #deletedColumns}/{@link #clearedLinkColumns}）
+     *       任一非空/非零，前端即必须经预检弹框确认后才执行导入（数据删除不可无提示发生）；</li>
+     *   <li>新建列（{@link #newColumnNames}）与取消隐藏（{@link #unhiddenColumnNames}）为信息性
+     *       展示，不单独强制弹框。</li>
+     * </ul>
+     */
+    public static class ReplaceImpact
+    {
+        /** 将被删除的现有数据行数（目标表全部记录） */
+        private int deletedRowCount;
+
+        /** 将被删除的列（非系统列且不被任何 Excel 表头引用，含公式/查找/集合运算/语义关联/隐藏列） */
+        private List<DeletedColumnInfo> deletedColumns = new ArrayList<>();
+
+        /** 将新建的列名（Excel 独有表头 → 纯文本列，按出现顺序，同名去重） */
+        private List<String> newColumnNames = new ArrayList<>();
+
+        /** 其他表中引用将被清空的关联列（kept 21 列的配对列 + 指向本表的 18 列） */
+        private List<ClearedLinkColumn> clearedLinkColumns = new ArrayList<>();
+
+        /** 匹配到隐藏列将取消隐藏（isShow 1→0）并导入数据的列名 */
+        private List<String> unhiddenColumnNames = new ArrayList<>();
+
+        public int getDeletedRowCount()
+        {
+            return deletedRowCount;
+        }
+
+        public void setDeletedRowCount(int deletedRowCount)
+        {
+            this.deletedRowCount = deletedRowCount;
+        }
+
+        public List<DeletedColumnInfo> getDeletedColumns()
+        {
+            return deletedColumns;
+        }
+
+        public void setDeletedColumns(List<DeletedColumnInfo> deletedColumns)
+        {
+            this.deletedColumns = deletedColumns;
+        }
+
+        public List<String> getNewColumnNames()
+        {
+            return newColumnNames;
+        }
+
+        public void setNewColumnNames(List<String> newColumnNames)
+        {
+            this.newColumnNames = newColumnNames;
+        }
+
+        public List<ClearedLinkColumn> getClearedLinkColumns()
+        {
+            return clearedLinkColumns;
+        }
+
+        public void setClearedLinkColumns(List<ClearedLinkColumn> clearedLinkColumns)
+        {
+            this.clearedLinkColumns = clearedLinkColumns;
+        }
+
+        public List<String> getUnhiddenColumnNames()
+        {
+            return unhiddenColumnNames;
+        }
+
+        public void setUnhiddenColumnNames(List<String> unhiddenColumnNames)
+        {
+            this.unhiddenColumnNames = unhiddenColumnNames;
+        }
+    }
+
+    /**
+     * 将被删除的列信息（预检弹框确认载体 + agent 替换摘要元素）。
+     */
+    public static class DeletedColumnInfo
+    {
+        /** 列 id */
+        private Long columnId;
+
+        /** 列名 */
+        private String columnName;
+
+        /** 列类型 */
+        private Long columnType;
+
+        /** 21 双向关联列：其在被关联表中的配对列将被级联删除 */
+        private boolean cascadeDeletesPairedColumn;
+
+        public Long getColumnId()
+        {
+            return columnId;
+        }
+
+        public void setColumnId(Long columnId)
+        {
+            this.columnId = columnId;
+        }
+
+        public String getColumnName()
+        {
+            return columnName;
+        }
+
+        public void setColumnName(String columnName)
+        {
+            this.columnName = columnName;
+        }
+
+        public Long getColumnType()
+        {
+            return columnType;
+        }
+
+        public void setColumnType(Long columnType)
+        {
+            this.columnType = columnType;
+        }
+
+        public boolean isCascadeDeletesPairedColumn()
+        {
+            return cascadeDeletesPairedColumn;
+        }
+
+        public void setCascadeDeletesPairedColumn(boolean cascadeDeletesPairedColumn)
+        {
+            this.cascadeDeletesPairedColumn = cascadeDeletesPairedColumn;
+        }
+    }
+
+    /**
+     * 其他表中引用将被清空的关联列：本表记录全删后，kept 21 列的配对列与
+     * 指向本表的 18 列的 items 旧引用全部悬空，link 字段将被清空。
+     */
+    public static class ClearedLinkColumn
+    {
+        /** 关联列所在表名 */
+        private String tableName;
+
+        /** 关联列名 */
+        private String columnName;
+
+        /** 关联列 id */
+        private Long columnId;
+
+        public String getTableName()
+        {
+            return tableName;
+        }
+
+        public void setTableName(String tableName)
+        {
+            this.tableName = tableName;
+        }
+
+        public String getColumnName()
+        {
+            return columnName;
+        }
+
+        public void setColumnName(String columnName)
+        {
+            this.columnName = columnName;
+        }
+
+        public Long getColumnId()
+        {
+            return columnId;
+        }
+
+        public void setColumnId(Long columnId)
+        {
+            this.columnId = columnId;
         }
     }
 }

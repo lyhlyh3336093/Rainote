@@ -140,9 +140,20 @@ public interface NoteDwtableItemMapper
 
     /**
      * 批量删除多维表格数据表内容
-     * 
+     *
      * @param ids 需要删除的数据主键集合
      * @return 结果
      */
     public int deleteNoteDwtableItemByIds(Long[] ids);
+
+    /**
+     * 清空指定列全部 items 的关联字段（linkRecordId/linkItemId/value 置空串，linkColumnId 保留）。
+     * <p>
+     * 替换式 Excel 导入用：本表记录全删后，其他表指向本表的关联列
+     * （kept 21 列的配对列 / 他表 18 列）的 items 旧引用全部悬空。
+     *
+     * @param columnId 列主键
+     * @return 受影响行数
+     */
+    public int clearLinkFieldsByColumnId(Long columnId);
 }

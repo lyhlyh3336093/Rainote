@@ -50,6 +50,9 @@ import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.MissingParam;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.MissName;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.NewOption;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.RecordCandidate;
+import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.ReplaceImpact;
+import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.DeletedColumnInfo;
+import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.ClearedLinkColumn;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.RelationCandidates;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.SkippedHeader;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.SymmetricWriteImpact;
@@ -57,6 +60,7 @@ import com.ruoyi.system.domain.vo.NoteRecordVo;
 import com.ruoyi.system.mapper.NoteColumnMapper;
 import com.ruoyi.system.mapper.NoteDwtableItemMapper;
 import com.ruoyi.system.mapper.NoteDwtableMapper;
+import com.ruoyi.system.mapper.NoteNotelinkMapper;
 import com.ruoyi.system.mapper.NoteRecordMapper;
 import com.ruoyi.system.service.INoteDwtableExcelImportService;
 import com.ruoyi.system.service.INoteRecordService;
@@ -67,22 +71,29 @@ import com.ruoyi.system.service.impl.ExcelWorkbookReader.ParsedSheet;
 import com.ruoyi.system.service.impl.ExcelWorkbookReader.RowData;
 
 /**
- * 多维表格 Excel 导入服务（U4 阶段一预检 + U5 阶段二导入写入）。
+ * 多维表格 Excel 导入服务（U4 阶段一预检 + U5 阶段二导入写入；<b>替换式语义</b>）。
+ * <p>
+ * 替换式语义：导入成功后目标表现有数据行全部删除、列集合对齐 Excel——同名列保留配置只换数据，
+ * Excel 独有表头自动新建纯文本列，表中 Excel 未含的非系统列（含公式/查找/隐藏列）删除，
+ * 被删 21 双向关联列在被关联表的配对列级联删除，其他表指向本表的关联列引用被清空。
  * <p>
  * 预检流程（R9/R10/R11/R14/R15/R23/R24/R25，KTD4/KTD5）：
  * <ol>
  *   <li>查目标表（防御性复查 noteId 匹配，调用端已做过归属校验）；</li>
  *   <li>{@link ExcelWorkbookReader#parse} 安全解析全部 sheet；</li>
- *   <li>{@link ExcelColumnMatcher#selectSheet} 选定逻辑表（目标表名）；</li>
+ *   <li>{@link ExcelColumnMatcher#selectSheet} 选定逻辑表（目标表名）；
+ *       无任何非空表头 → 拒绝（防误删）；</li>
  *   <li>查目标表全部列定义 → {@link ExcelColumnMatcher#mapColumns} 映射
- *       （传全部列，隐藏/排除类型由 matcher 过滤）；</li>
+ *       （传全部列，隐藏列参与匹配、排除类型列由 matcher 过滤）；</li>
  *   <li>对每个映射到的 18/21 关联列：解析 property 取 table_id → R23 归属校验
  *       （被关联表须存在、与目标表同 noteId 且过 {@link AgentOwnershipChecker}，
  *       失败抛 {@link ServiceException} 含列名与原因，阻断整次预检）→
  *       KTD4 批量预解析（一次查被关联表全部 NoteRecord，按 sort 升序构建
  *       name → 有序记录列表，同名多条保留全部：首条=预选，size&gt;1=歧义）；</li>
- *   <li>逐行汇总：缺参项（缺列/缺值/类型违规/关联缺列/关联未命中）、歧义项、
- *       默认值填充项、新选项创建项、对称写入影响、忽略提示；</li>
+ *   <li>逐行汇总：缺参项（缺值/类型违规/关联未命中）、歧义项、默认值填充项、新选项创建项、
+ *       对称写入影响、忽略提示；</li>
+ *   <li>替换影响面（{@link ReplaceImpact}）：将删除的行/列、将新建的列、跨表引用清空与
+ *       取消隐藏清单——删除类字段非空/非零即前端必须弹框确认；</li>
  *   <li>文件指纹（KTD5：size + md5）随结果返回，供阶段二比对。</li>
  * </ol>
  * 文本匹配（KTD4 整串优先）：单元格文本（trim）先整串匹配记录名，命中即用（不拆逗号）；
@@ -94,8 +105,11 @@ import com.ruoyi.system.service.impl.ExcelWorkbookReader.RowData;
  * <p>
  * 导入流程（U5，R16-R26，KTD3/KTD5/KTD8）：非事务前置段（指纹校验 → 同一私有方法链
  * 重新解析/映射/匹配 → params 解析 → 补参校验 R26 → 反向漂移 fail-fast）→
- * {@code @Transactional} 写入段（逐行 NoteRecord + items 批量 ≥500 flush + 选项追加 +
- * 全量最终 flush + 双链对称写入 + 重算编排）→ 返回 recordCount；失败整体回滚（R22）。
+ * {@code @Transactional} 写入段（替换阶段：全删本表行与 items → 清空跨表关联引用 →
+ * 级联删被删 21 列的配对列 → 删旧列+清孤儿 notelink → 建新列 → 取消隐藏；
+ * 写入阶段：逐行 NoteRecord + items 批量 ≥500 flush + 选项追加 + 全量最终 flush +
+ * 双链对称写入 + 重算编排——重算无条件执行，仅表头无数据行的清空场景也要跑）→
+ * 返回 recordCount；失败整体回滚（R22）。
  *
  * @author ruoyi
  */
@@ -146,6 +160,10 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     @Autowired
     private NoteDwtableItemMapper noteDwtableItemMapper;
 
+    /** 替换式导入：被删列的孤儿语义链接清理（byColumnId） */
+    @Autowired
+    private NoteNotelinkMapper noteNotelinkMapper;
+
     @Autowired
     private AgentOwnershipChecker agentOwnershipChecker;
 
@@ -170,7 +188,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     // ==================== Agent 操作（dwtable.importExcel，对称 dwtable.importSql） ====================
 
     /**
-     * Agent 操作入口：导入 Excel（xlsx）文件到指定多维表格（与界面导入等价的追加语义），
+     * Agent 操作入口：导入 Excel（xlsx）文件到指定多维表格（<b>替换式语义</b>，与界面导入等价），
      * 返回成功/失败双态结果（{@link ExcelImportAgentResult}）。
      * <p>
      * agent 为单次计划模型（执行结果不回传 LLM 重试），与界面两阶段交互的差异处理：
@@ -179,14 +197,15 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
      *       上传返回的 {@code fileName}（{@code /profile/upload/...} 路径），服务端从磁盘读取
      *       （路径解析限定 profile/upload 根内，防穿越；大小超 {@link ExcelWorkbookReader#MAX_FILE_SIZE} 拒绝）；</li>
      *   <li>缺参语义：先复用预检管线（同请求内预检即导入，指纹天然一致），基础列缺参
-     *       （缺值/缺列/类型违规）仅当 {@code columnValues} 覆盖全部时才执行导入，
+     *       （缺值/类型违规）仅当 {@code columnValues} 覆盖全部时才执行导入，
      *       否则<b>零写入</b>返回结构化缺参清单——LLM 将清单呈现给用户，用户在对话中
      *       提供补值后由 LLM 生成带 {@code columnValues} 的第二次调用；</li>
-     *   <li>关联列缺参（关联缺列/关联未命中）无法文本补值（须选择被关联表记录 id），
-     *       一律进失败清单，提示用户改走界面导入；</li>
+     *   <li>关联列未命中无法文本补值（须选择被关联表记录 id），一律进失败清单，
+     *       提示用户改走界面导入；</li>
      *   <li>歧义（同名多条）：按 sort 靠前预选建立关联（与界面预检默认一致），不阻断，
      *       成功结果中报告歧义处理清单；</li>
-     *   <li>列默认值/新选项/对称写入等静默变更在成功结果中报告（与界面预检清单对齐）。</li>
+     *   <li>列默认值/新选项/对称写入等静默变更与<b>替换影响</b>（删除行/删除列/新建列/
+     *       跨表引用清空）在成功结果中报告（与界面预检清单对齐）。</li>
      * </ul>
      * 事务：本方法不加 {@code @Transactional}（对齐 HTTP 控制器直调 {@code importExcelData}，
      * 非事务前置段 + 写入段经自注入代理进入事务）；归属校验 + noteId 匹配断言自带（KTD6 对称）。
@@ -199,11 +218,13 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
      * @return 成功/失败双态结果（失败=未执行任何写入）
      */
     @AgentOperation(name = "dwtable.importExcel", destructive = true,
-            description = "导入 Excel（xlsx）文件到指定多维表格（与界面导入等价的追加语义），返回成功/失败双态结果。"
+            description = "导入 Excel（xlsx）文件到指定多维表格（替换式：成功后目标表现有数据行全部删除，列集合对齐 Excel——"
+                    + "同名列保留配置只换数据，Excel 独有表头自动新建文本列，表中 Excel 未含的列被删除（系统列除外），"
+                    + "被删双向关联列的配对列一并删除），返回成功/失败双态结果。"
                     + "文件须先经 /common/upload 上传，filePath 传其返回的 fileName（/profile/upload/... 路径）。"
-                    + "有基础列缺参时仅当 columnValues 全部覆盖才执行导入，否则零写入并返回缺参清单"
+                    + "有基础列缺参（缺值/类型违规）时仅当 columnValues 全部覆盖才执行导入，否则零写入并返回缺参清单"
                     + "（将清单告知用户，用户补充补值后带 columnValues 再次调用）。"
-                    + "关联列缺参无法文本补值，须改走界面导入。")
+                    + "关联列未命中无法文本补值，须改走界面导入。")
     public ExcelImportAgentResult importExcel(
             @AgentParam(value = "noteId", type = "long", required = true, description = "目标笔记 id")
             Long noteId,
@@ -213,7 +234,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                     description = "服务器上传文件路径（/common/upload 返回的 fileName，形如 /profile/upload/2026/09/16/数据.xlsx）")
             String filePath,
             @AgentParam(value = "columnValues", type = "object", required = false,
-                    description = "缺参列补值：键=列名，值=统一补值（可为空串=显式补空），覆盖基础列缺参（缺值/缺列/类型违规）")
+                    description = "缺参列补值：键=列名，值=统一补值（可为空串=显式补空），覆盖基础列缺参（缺值/类型违规）")
             Map<String, Object> columnValues,
             Long userId)
     {
@@ -231,8 +252,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             {
                 continue;
             }
-            boolean link = ExcelImportPrecheckResult.KIND_LINK_MISSING_COLUMN.equals(param.getKind())
-                    || ExcelImportPrecheckResult.KIND_LINK_MISS.equals(param.getKind());
+            boolean link = ExcelImportPrecheckResult.KIND_LINK_MISS.equals(param.getKind());
             if (link || !fills.containsKey(param.getColumnName()))
             {
                 uncovered.add(param);
@@ -245,7 +265,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             result.setMissingParams(uncovered);
             result.setMessage("导入未执行（零写入）：有 " + uncovered.size() + " 项缺参未覆盖。"
                     + "基础列缺参可通过 columnValues 提供补值后再次调用；"
-                    + "关联列缺参（关联缺列/关联未命中）无法文本补值，请改走界面导入。");
+                    + "关联列缺参（关联未命中）无法文本补值，请改走界面导入。");
             log.info("[EXCEL-AGENT] 缺参未覆盖拒绝导入 noteId={}, dwtableId={}, userId={}, uncovered={}",
                     noteId, dwtableId, userId, uncovered.size());
             return result;
@@ -261,13 +281,37 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         result.setNewOptions(precheck.getNewOptions());
         result.setSymmetricWriteImpact(precheck.getSymmetricWriteImpact());
         result.setAmbiguityApplied(precheck.getAmbiguityItems());
+        result.setReplaceImpact(precheck.getReplaceImpact());
+        ReplaceImpact replace = precheck.getReplaceImpact();
         result.setMessage("成功导入 " + count + " 条记录"
+                + (replace == null ? "" : replaceSummary(replace))
                 + (precheck.getNewOptions().isEmpty() ? "" : "，创建新选项 " + precheck.getNewOptions().size() + " 个")
                 + (precheck.getAmbiguityItems().isEmpty() ? "" : "，歧义记录已按 sort 靠前预选建立关联 " + precheck.getAmbiguityItems().size() + " 项")
                 + (precheck.getSymmetricWriteImpact().isEmpty() ? "" : "，双链对称写入影响 " + precheck.getSymmetricWriteImpact().size() + " 处"));
         log.info("[EXCEL-AGENT] 导入完成 noteId={}, dwtableId={}, userId={}, recordCount={}",
                 noteId, dwtableId, userId, count);
         return result;
+    }
+
+    /**
+     * agent 成功消息的替换摘要（为 0/空的分句省略）。
+     */
+    private static String replaceSummary(ReplaceImpact replace)
+    {
+        StringBuilder summary = new StringBuilder();
+        if (replace.getDeletedRowCount() > 0)
+        {
+            summary.append("，替换：删除原 ").append(replace.getDeletedRowCount()).append(" 行");
+        }
+        if (!replace.getDeletedColumns().isEmpty())
+        {
+            summary.append("，删除 ").append(replace.getDeletedColumns().size()).append(" 列");
+        }
+        if (!replace.getNewColumnNames().isEmpty())
+        {
+            summary.append("，新建 ").append(replace.getNewColumnNames().size()).append(" 列");
+        }
+        return summary.toString();
     }
 
     /**
@@ -341,7 +385,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
 
     /**
      * 组装 agent 路径的阶段二参数：文件指纹（同请求预检结果直传）+ 预检基线
-     * （缺参列名/未命中名/歧义预选，供漂移检查比对）+ LLM 补参。
+     * （缺参列名/未命中名/歧义预选/替换删除列，供漂移检查比对）+ LLM 补参。
      * 关联补参恒为空：agent 无法选择被关联表记录（未命中即失败态，歧义按预选）。
      */
     private static ExcelImportParams buildAgentParams(ExcelImportPrecheckResult precheck, Map<String, String> fills)
@@ -373,6 +417,21 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             }
         }
         baseline.setMissingColumns(new ArrayList<>(missingColumns));
+        // 替换基线：预检时将删除/新建的列（阶段二漂移比对用）
+        ReplaceImpact replace = precheck.getReplaceImpact();
+        if (replace != null)
+        {
+            List<String> replaceDeleted = new ArrayList<>();
+            for (DeletedColumnInfo deleted : replace.getDeletedColumns())
+            {
+                if (deleted != null && deleted.getColumnName() != null)
+                {
+                    replaceDeleted.add(deleted.getColumnName());
+                }
+            }
+            baseline.setReplaceDeletedColumns(replaceDeleted);
+            baseline.setReplaceNewColumns(new ArrayList<>(replace.getNewColumnNames()));
+        }
         for (AmbiguityItem item : precheck.getAmbiguityItems())
         {
             if (item == null || item.getColumnName() == null || item.getName() == null)
@@ -469,6 +528,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         ExcelImportPrecheckResult.FileFingerprint fp = fingerprint(file);
         List<ParsedSheet> sheets = ExcelWorkbookReader.parse(file);
         SheetSelection selection = ExcelColumnMatcher.selectSheet(sheets, dwtable.getName());
+        verifyNonBlankHeaders(selection);
 
         NoteColumn query = new NoteColumn();
         query.setDwtableId(dwtableId);
@@ -480,29 +540,50 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         result.setIgnoredSheets(new ArrayList<>(selection.getIgnoredSheetNames()));
         appendSkippedHeaders(result, mapping, noteId, dwtableId);
         analyzeColumns(result, noteId, dwtableId, userId, selection.getRows(), columns, mapping);
+        buildReplaceImpact(result, noteId, dwtableId, columns, mapping);
         result.setHasBlockingIssues(!result.getMissingParams().isEmpty() || !result.getAmbiguityItems().isEmpty());
 
         log.info("[EXCEL-PRECHECK] 预检完成 noteId={}, dwtableId={}, userId={}, totalRows={}, missingParams={}, "
-                        + "ambiguityItems={}, defaultValueFills={}, newOptions={}, symmetricWriteImpact={}, "
-                        + "ignoredSheets={}, skippedHeaders={}",
+                        + "ambiguityItems={}, replaceImpact{{}行/{}删列/{}新列/{}清空/{}取消隐藏}, defaultValueFills={}, "
+                        + "newOptions={}, symmetricWriteImpact={}, ignoredSheets={}, skippedHeaders={}",
                 noteId, dwtableId, userId, selection.getRows().size(),
                 result.getMissingParams().size(), result.getAmbiguityItems().size(),
+                result.getReplaceImpact().getDeletedRowCount(), result.getReplaceImpact().getDeletedColumns().size(),
+                result.getReplaceImpact().getNewColumnNames().size(),
+                result.getReplaceImpact().getClearedLinkColumns().size(),
+                result.getReplaceImpact().getUnhiddenColumnNames().size(),
                 result.getDefaultValueFills().size(), result.getNewOptions().size(),
                 result.getSymmetricWriteImpact().size(), result.getIgnoredSheets().size(),
                 result.getSkippedHeaders().size());
         return result;
     }
 
+    /**
+     * 空表头防误删 guard（预检与导入两阶段共用）：选定 sheet 无任何非空表头时，
+     * 替换式导入将清空整表却无任何列可建，大概率选错文件/工作表——直接拒绝。
+     */
+    private static void verifyNonBlankHeaders(SheetSelection selection)
+    {
+        for (String header : selection.getHeaders())
+        {
+            if (header != null && !header.trim().isEmpty())
+            {
+                return;
+            }
+        }
+        throw new ServiceException("选定工作表没有任何非空表头，为防止误删数据已拒绝导入（请检查是否选错了文件或工作表）");
+    }
+
     // ==================== 列分析 ====================
 
     /**
-     * 遍历参与导入的列（非隐藏 且 类型 ∈ 六类基础 1/2/3/4/5/7 + 关联 18/21），逐列汇总预检清单。
+     * 遍历参与导入的列（已映射到表头 且 类型 ∈ 六类基础 1/2/3/4/5/7 + 关联 18/21），
+     * 逐列汇总预检清单。替换式语义：隐藏列映射即参与（导入时取消隐藏）；
+     * 表头未映射的列将删除（进 replaceImpact），不再产生缺列/关联缺列缺参。
      */
     private void analyzeColumns(ExcelImportPrecheckResult result, Long noteId, Long dwtableId, Long userId,
             List<RowData> rows, List<NoteColumn> columns, ColumnMapping mapping)
     {
-        int totalRows = rows.size();
-
         // 已映射列实例 → headerIndex（matcher 保证一个列至多被一个表头映射）
         Map<NoteColumn, Integer> headerIndexByColumn = new IdentityHashMap<>();
         for (HeaderEntry entry : mapping.getMappedEntries())
@@ -515,7 +596,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
 
         for (NoteColumn column : columns)
         {
-            if (column == null || column.getType() == null || ExcelColumnMatcher.isHidden(column))
+            if (column == null || column.getType() == null)
             {
                 continue;
             }
@@ -528,8 +609,8 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             Integer headerIndex = headerIndexByColumn.get(column);
             if (headerIndex == null)
             {
-                // 缺列：有默认值 → 默认值填充项（影响行数=全部行数）；否则缺参项（R10）
-                appendMissingColumn(result, column, type, link, totalRows);
+                // 替换式语义：表头未映射的列将删除（replaceImpact.deletedColumns），
+                // 不再产生缺列/关联缺列缺参，也不做默认值填充
                 continue;
             }
             if (link)
@@ -542,37 +623,6 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                 analyzeBasicColumn(result, column, type, headerIndex.intValue(), mapping, rows);
             }
         }
-    }
-
-    /**
-     * 缺列情形：表头未映射到。基础列有默认值 → 默认值填充项（rowCount=全部行数，不进缺参弹框）；
-     * 否则缺参项（基础列 kind=缺列；关联列 kind=关联缺列，关联列不支持默认值）。
-     */
-    private static void appendMissingColumn(ExcelImportPrecheckResult result, NoteColumn column,
-            Long type, boolean link, int totalRows)
-    {
-        if (!link)
-        {
-            String defaultValue = ColumnDefaultValueSupport.read(column);
-            if (defaultValue != null)
-            {
-                DefaultValueFill fill = new DefaultValueFill();
-                fill.setColumnId(column.getId());
-                fill.setColumnName(dtoColumnName(column));
-                fill.setDefaultValue(defaultValue);
-                fill.setRowCount(totalRows);
-                result.getDefaultValueFills().add(fill);
-                return;
-            }
-        }
-        MissingParam param = new MissingParam();
-        param.setColumnId(column.getId());
-        param.setColumnName(dtoColumnName(column));
-        param.setColumnType(type);
-        param.setKind(link ? ExcelImportPrecheckResult.KIND_LINK_MISSING_COLUMN
-                : ExcelImportPrecheckResult.KIND_MISSING_COLUMN);
-        param.setTotalRows(Integer.valueOf(totalRows));
-        result.getMissingParams().add(param);
     }
 
     /**
@@ -912,16 +962,187 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
 
     /**
      * 忽略提示 + 跳过表头清单；后端日志记录跳过列名与原因（不含单元格值，R25/R7）。
+     * 替换式语义：未匹配表头（{@link HeaderEntry#isUnmatched()}）为新建列候选，
+     * 进 replaceImpact.newColumnNames，不进 skippedHeaders。
      */
     private static void appendSkippedHeaders(ExcelImportPrecheckResult result, ColumnMapping mapping,
             Long noteId, Long dwtableId)
     {
         for (HeaderEntry entry : mapping.getSkippedEntries())
         {
+            if (entry.isUnmatched())
+            {
+                // 新建列候选（replaceImpact 已汇总），不算跳过
+                continue;
+            }
             result.getSkippedHeaders().add(new SkippedHeader(entry.getHeaderName(), entry.getReason()));
             log.info("[EXCEL-PRECHECK] 跳过表头 noteId={}, dwtableId={}, headerName={}, reason={}",
                     noteId, dwtableId, entry.getHeaderName(), entry.getReason());
         }
+    }
+
+    // ==================== 替换式影响面（预检弹框确认载体 + agent 替换摘要） ====================
+
+    /**
+     * 组装替换式导入影响面：
+     * <ul>
+     *   <li>deletedRowCount——目标表现有全部记录数（导入成功即全删）；</li>
+     *   <li>deletedColumns——不被任何表头引用的非系统列（mapped 列 ∪ 同名排除类型跳过列之外的列），
+     *       21 列标记配对列级联删除；</li>
+     *   <li>newColumnNames——未匹配表头（同名去重，按出现顺序）；</li>
+     *   <li>clearedLinkColumns——kept 21 列的配对列 + 同 note 他表指向本表的 18 列
+     *       （本表行全删后其 items 旧引用悬空，link 字段将被清空）；</li>
+     *   <li>unhiddenColumnNames——映射到的隐藏列（导入时取消隐藏并导数据）。</li>
+     * </ul>
+     */
+    private void buildReplaceImpact(ExcelImportPrecheckResult result, Long noteId, Long dwtableId,
+            List<NoteColumn> columns, ColumnMapping mapping)
+    {
+        ReplaceImpact impact = new ReplaceImpact();
+
+        // 现有行数（导入成功即全删）
+        NoteRecordVo recordQuery = new NoteRecordVo();
+        recordQuery.setDwtableId(dwtableId);
+        impact.setDeletedRowCount(noteRecordMapper.selectNoteRecordList(recordQuery).size());
+
+        // 被引用列 id 集（mapped 列 ∪ 同名排除类型跳过列）+ 取消隐藏清单
+        Set<Long> referencedIds = new HashSet<>();
+        for (HeaderEntry entry : mapping.getEntries())
+        {
+            if (entry.getColumn() != null && entry.getColumn().getId() != null)
+            {
+                referencedIds.add(entry.getColumn().getId());
+                if (ExcelColumnMatcher.isHidden(entry.getColumn()))
+                {
+                    impact.getUnhiddenColumnNames().add(entry.getHeaderName());
+                }
+            }
+            if (entry.getSkippedColumn() != null && entry.getSkippedColumn().getId() != null)
+            {
+                referencedIds.add(entry.getSkippedColumn().getId());
+            }
+        }
+
+        // 删除列 = 不被引用且非系统列
+        for (NoteColumn column : columns)
+        {
+            if (column == null || column.getId() == null || referencedIds.contains(column.getId()))
+            {
+                continue;
+            }
+            Long type = column.getType();
+            if (type != null && type >= 1001L && type <= 1005L)
+            {
+                continue;
+            }
+            DeletedColumnInfo deleted = new DeletedColumnInfo();
+            deleted.setColumnId(column.getId());
+            deleted.setColumnName(column.getName() == null ? "" : column.getName().trim());
+            deleted.setColumnType(type);
+            deleted.setCascadeDeletesPairedColumn(type != null
+                    && type == ExcelColumnMatcher.TYPE_DOUBLE_LINK);
+            impact.getDeletedColumns().add(deleted);
+        }
+
+        // 新建列名（未匹配表头，同名已去重）
+        for (HeaderEntry entry : mapping.getUnmatchedEntries())
+        {
+            impact.getNewColumnNames().add(entry.getHeaderName());
+        }
+
+        // 跨表引用清空列（kept 21 配对列 + 他表指向本表的 18 列）
+        for (NoteColumn cleared : collectClearedLinkColumns(noteId, dwtableId, mapping))
+        {
+            ClearedLinkColumn item = new ClearedLinkColumn();
+            item.setColumnId(cleared.getId());
+            item.setColumnName(cleared.getName() == null ? "" : cleared.getName().trim());
+            NoteDwtable owner = cleared.getDwtableId() == null ? null
+                    : noteDwtableMapper.selectNoteDwtableById(cleared.getDwtableId());
+            item.setTableName(owner == null || owner.getName() == null ? "" : owner.getName());
+            impact.getClearedLinkColumns().add(item);
+        }
+
+        result.setReplaceImpact(impact);
+    }
+
+    /**
+     * 收集其他表中引用将被清空的关联列：kept（映射到的）21 列在被关联表的配对列
+     * + 同 note 其他表 type=18 且 property.table_id 指向本表的列。
+     * 自引用表的配对列也在收集范围（其 items 已随本表全删，清空为 no-op，报告口径统一）。
+     */
+    private List<NoteColumn> collectClearedLinkColumns(Long noteId, Long dwtableId, ColumnMapping mapping)
+    {
+        List<NoteColumn> cleared = new ArrayList<>();
+        Set<Long> collectedIds = new LinkedHashSet<>();
+        for (HeaderEntry entry : mapping.getMappedEntries())
+        {
+            NoteColumn column = entry.getColumn();
+            if (column == null || column.getType() == null
+                    || column.getType() != ExcelColumnMatcher.TYPE_DOUBLE_LINK)
+            {
+                continue;
+            }
+            Long pairId = parseBackFieldId(column);
+            if (pairId != null && collectedIds.add(pairId))
+            {
+                NoteColumn pair = noteColumnMapper.selectNoteColumnById(pairId);
+                if (pair != null)
+                {
+                    cleared.add(pair);
+                }
+            }
+        }
+        for (NoteDwtable table : noteDwtableMapper.selectDWTableList(noteId))
+        {
+            if (table == null || table.getId() == null || table.getId().equals(dwtableId))
+            {
+                continue;
+            }
+            NoteColumn query = new NoteColumn();
+            query.setDwtableId(table.getId());
+            for (NoteColumn column : noteColumnMapper.selectNoteColumnList(query))
+            {
+                if (column == null || column.getId() == null || column.getType() == null
+                        || column.getType() != ExcelColumnMatcher.TYPE_SINGLE_LINK)
+                {
+                    continue;
+                }
+                if (dwtableId.equals(parseTableIdLenient(column)) && collectedIds.add(column.getId()))
+                {
+                    cleared.add(column);
+                }
+            }
+        }
+        return cleared;
+    }
+
+    /**
+     * 宽松解析关联列 property 的 table_id（缺失/非法返回 null，不抛异常；
+     * 替换清理扫描用——配置残缺的列不阻断导入）。
+     */
+    private static Long parseTableIdLenient(NoteColumn column)
+    {
+        JSONObject prop = parsePropertySafe(column);
+        if (prop.isEmpty())
+        {
+            return null;
+        }
+        Long tableId = prop.getLong("table_id");
+        if (tableId == null && column.getType() != null
+                && column.getType() == ExcelColumnMatcher.TYPE_SINGLE_LINK)
+        {
+            tableId = prop.getLong("select");
+        }
+        return tableId;
+    }
+
+    /**
+     * 宽松解析 21 列 property 的 back_field_id（缺失/非法返回 null，不抛异常；
+     * 级联删除与重算扫描用——被删列的配置残缺时跳过级联而非阻断导入）。
+     */
+    private static Long parseBackFieldIdLenient(NoteColumn column)
+    {
+        return parsePropertySafe(column).getLong("back_field_id");
     }
 
     /**
@@ -1135,7 +1356,8 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     }
 
     /**
-     * 构建导入计划（非事务前置段主体）：与预检同一私有方法链重新解析/映射/匹配 →
+     * 构建导入计划（非事务前置段主体，<b>替换式语义</b>）：与预检同一私有方法链重新解析/映射/匹配 →
+     * 替换分类（kept 参与列 / pending 新建列 / deleted 删除列 / unhide 取消隐藏 / cleared 跨表清空）→
      * 阶段二原始状态汇总 → 反向漂移 fail-fast → 补参校验（R26）→
      * 三源合并 + 补参应用构建逐行写入计划 → 重算编排清单（KTD8）。
      */
@@ -1144,6 +1366,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     {
         List<ParsedSheet> sheets = ExcelWorkbookReader.parse(file);
         SheetSelection selection = ExcelColumnMatcher.selectSheet(sheets, dwtable.getName());
+        verifyNonBlankHeaders(selection);
 
         NoteColumn query = new NoteColumn();
         query.setDwtableId(dwtableId);
@@ -1152,10 +1375,9 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         List<RowData> rows = selection.getRows();
         int rowCount = rows.size();
 
-        // 参与列分类（与预检 analyzeColumns 同口径：非隐藏 且 ∈ 六类基础 + 18/21）
-        List<NoteColumn> participants = new ArrayList<>();
+        // ===== 替换式分类 =====
+        // 补参列名校验用全列索引（与现状一致）
         Map<String, NoteColumn> columnByName = new HashMap<>();
-        Long nameColumnId = null;
         for (NoteColumn column : columns)
         {
             if (column == null || column.getType() == null)
@@ -1166,27 +1388,102 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             {
                 columnByName.putIfAbsent(column.getName().trim(), column);
             }
-            if (ExcelColumnMatcher.isHidden(column))
+        }
+
+        // kept 参与列 = 已映射且类型 ∈ 六类基础 + 18/21（隐藏列映射即参与，导入时取消隐藏）
+        Map<NoteColumn, Integer> headerIndexByColumn = new IdentityHashMap<>();
+        List<NoteColumn> participants = new ArrayList<>();
+        Set<Long> referencedIds = new HashSet<>();
+        for (HeaderEntry entry : mapping.getEntries())
+        {
+            if (entry.getColumn() != null && entry.getColumn().getId() != null)
             {
-                continue;
+                referencedIds.add(entry.getColumn().getId());
             }
-            // name 派生源列：首个非隐藏 type=1 列（隐藏列不生成 item，选它派生恒空）
-            if (nameColumnId == null && column.getType() == 1L)
+            if (entry.getSkippedColumn() != null && entry.getSkippedColumn().getId() != null)
             {
-                nameColumnId = column.getId();
+                referencedIds.add(entry.getSkippedColumn().getId());
             }
+        }
+        for (HeaderEntry entry : mapping.getMappedEntries())
+        {
+            NoteColumn column = entry.getColumn();
+            headerIndexByColumn.put(column, Integer.valueOf(entry.getHeaderIndex()));
             Long type = column.getType();
-            if (BASIC_TYPES.contains(type) || type == ExcelColumnMatcher.TYPE_SINGLE_LINK
-                    || type == ExcelColumnMatcher.TYPE_DOUBLE_LINK)
+            if (type != null && (BASIC_TYPES.contains(type)
+                    || type == ExcelColumnMatcher.TYPE_SINGLE_LINK
+                    || type == ExcelColumnMatcher.TYPE_DOUBLE_LINK))
             {
                 participants.add(column);
             }
         }
 
-        Map<NoteColumn, Integer> headerIndexByColumn = new IdentityHashMap<>();
-        for (HeaderEntry entry : mapping.getMappedEntries())
+        // pending 新建列 = 未匹配表头（纯文本列，值在计划期预解析，事务段 insert 后组装 items）
+        List<PendingColumn> pendingColumns = new ArrayList<>();
+        for (HeaderEntry entry : mapping.getUnmatchedEntries())
         {
-            headerIndexByColumn.put(entry.getColumn(), Integer.valueOf(entry.getHeaderIndex()));
+            NoteColumn pending = new NoteColumn();
+            pending.setName(entry.getHeaderName());
+            pending.setType(1L);
+            pending.setDwtableId(dwtableId);
+            pending.setIsShow(0L);
+            String[] values = new String[rowCount];
+            for (int r = 0; r < rowCount; r++)
+            {
+                values[r] = mapping.cellText(rows.get(r), entry.getHeaderIndex()).trim();
+            }
+            PendingColumn pendingColumn = new PendingColumn();
+            pendingColumn.column = pending;
+            pendingColumn.headerIndex = entry.getHeaderIndex();
+            pendingColumn.values = values;
+            pendingColumns.add(pendingColumn);
+        }
+
+        // unhide 取消隐藏列 = kept 中的隐藏列
+        List<NoteColumn> unhideColumns = new ArrayList<>();
+        for (NoteColumn participant : participants)
+        {
+            if (ExcelColumnMatcher.isHidden(participant))
+            {
+                unhideColumns.add(participant);
+            }
+        }
+
+        // deleted 删除列 = 不被任何表头引用（mapped ∪ 排除类型同名列）的非系统列
+        List<NoteColumn> deletedColumns = new ArrayList<>();
+        for (NoteColumn column : columns)
+        {
+            if (column == null || column.getId() == null || referencedIds.contains(column.getId()))
+            {
+                continue;
+            }
+            Long type = column.getType();
+            if (type != null && type >= 1001L && type <= 1005L)
+            {
+                continue;
+            }
+            deletedColumns.add(column);
+        }
+
+        // name 派生源列（替换后最终列集合）：kept 中首个 type=1 列（按列表序，含取消隐藏者），
+        // 无则取首个 pending 新建文本列（id 未生成，name 从预解析值派生）
+        Long nameColumnId = null;
+        for (NoteColumn column : columns)
+        {
+            if (column == null || column.getType() == null || column.getId() == null)
+            {
+                continue;
+            }
+            if (referencedIds.contains(column.getId()) && column.getType() == 1L)
+            {
+                nameColumnId = column.getId();
+                break;
+            }
+        }
+        PendingColumn namePendingSource = null;
+        if (nameColumnId == null && !pendingColumns.isEmpty())
+        {
+            namePendingSource = pendingColumns.get(0);
         }
 
         // ===== 阶段二逐列逐行分析（重新匹配的原始状态，未应用补参——供漂移比对） =====
@@ -1204,16 +1501,8 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             String columnName = column.getName() == null ? "" : column.getName().trim();
             Long type = column.getType();
             boolean link = type == ExcelColumnMatcher.TYPE_SINGLE_LINK || type == ExcelColumnMatcher.TYPE_DOUBLE_LINK;
-            Integer headerIndex = headerIndexByColumn.get(column);
-            if (headerIndex == null)
-            {
-                // 缺列：基础列有默认值 → 默认填充不算缺参；否则缺参列（R10）
-                if (link || ColumnDefaultValueSupport.read(column) == null)
-                {
-                    stage2MissingColumns.add(columnName);
-                }
-                continue;
-            }
+            // 替换式语义：participants 全部已映射（未映射列已进 deletedColumns），headerIndex 恒非空
+            int headerIndex = headerIndexByColumn.get(column).intValue();
             if (link)
             {
                 LinkTableContext context = linkTableContext(column, noteId, userId, contextByTableId);
@@ -1224,7 +1513,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                 Map<String, Long> ambiguity = new LinkedHashMap<>();
                 for (int r = 0; r < rowCount; r++)
                 {
-                    String text = mapping.cellText(rows.get(r), headerIndex.intValue()).trim();
+                    String text = mapping.cellText(rows.get(r), headerIndex).trim();
                     List<String> names = candidateNames(text, context.getRecordsByName());
                     analysis.namesPerRow.add(names);
                     for (String name : names)
@@ -1266,7 +1555,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                 LinkedHashSet<String> newOptions = new LinkedHashSet<>();
                 for (int r = 0; r < rowCount; r++)
                 {
-                    String text = mapping.cellText(rows.get(r), headerIndex.intValue()).trim();
+                    String text = mapping.cellText(rows.get(r), headerIndex).trim();
                     if (!text.isEmpty() && ExcelColumnMatcher.validateCellText(column, text) == null)
                     {
                         excelValues[r] = text;
@@ -1310,8 +1599,16 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             }
         }
 
-        // ===== 反向漂移 fail-fast（KTD5 全触发集） =====
-        checkDrift(stage2MissingColumns, missNamesByColumn, ambiguityByColumn, params);
+        // ===== 反向漂移 fail-fast（KTD5 全触发集 + 替换删除漂移） =====
+        Set<String> deletedColumnNames = new LinkedHashSet<>();
+        for (NoteColumn deleted : deletedColumns)
+        {
+            if (deleted != null && deleted.getName() != null)
+            {
+                deletedColumnNames.add(deleted.getName().trim());
+            }
+        }
+        checkDrift(stage2MissingColumns, missNamesByColumn, ambiguityByColumn, deletedColumnNames, params);
 
         // ===== 补参服务端校验（R26）与预解析 =====
         validateColumnValues(params, columnByName);
@@ -1331,6 +1628,11 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         plan.userId = userId;
         plan.participants.addAll(participants);
         plan.newOptionsByColumnId = newOptionsByColumnId;
+        plan.pendingColumns.addAll(pendingColumns);
+        plan.deletedColumns.addAll(deletedColumns);
+        plan.unhideColumns.addAll(unhideColumns);
+        plan.survivingColumnIds.addAll(referencedIds);
+        plan.clearedLinkColumns.addAll(collectClearedLinkColumns(noteId, dwtableId, mapping));
         for (int r = 0; r < rowCount; r++)
         {
             RowPlan rowPlan = new RowPlan();
@@ -1344,10 +1646,8 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                 if (link)
                 {
                     LinkColumnAnalysis analysis = linkAnalysisByColumn.get(column);
-                    // analysis == null：表头未映射的关联列（关联缺列，漂移检查已保证 ∈ baseline）
-                    List<NoteRecord> resolved = analysis == null ? Collections.<NoteRecord>emptyList()
-                            : resolveLinkRecords(column, analysis.namesPerRow.get(r),
-                                    relations, analysis.context.getRecordsByName());
+                    List<NoteRecord> resolved = resolveLinkRecords(column, analysis.namesPerRow.get(r),
+                            relations, analysis.context.getRecordsByName());
                     if (!resolved.isEmpty())
                     {
                         // 21/18 列 link 字段经扩展批量 insert 落库（P0：不得被批量 insert 丢弃）
@@ -1366,7 +1666,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                     }
                     else
                     {
-                        // R15：空单元格/显式留空/关联缺列 → 空串 value，不建立关联
+                        // R15：空单元格/显式留空 → 空串 value，不建立关联
                         item.setValue("");
                     }
                 }
@@ -1378,12 +1678,24 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                 }
                 rowPlan.items.add(item);
             }
-            // name 派生：首个 type=1 列的本行最终值（三源合并后，对齐 SQL 导入 deriveName）
-            rowPlan.name = deriveRowName(nameColumnId, rowPlan.items);
+            // name 派生：替换后最终列集合中首个 type=1 列的本行最终值（kept 列优先，无则取首个新建文本列）
+            if (nameColumnId != null)
+            {
+                rowPlan.name = deriveRowName(nameColumnId, rowPlan.items);
+            }
+            else if (namePendingSource != null)
+            {
+                String pendingName = r < namePendingSource.values.length ? namePendingSource.values[r] : "";
+                rowPlan.name = pendingName == null ? "" : pendingName;
+            }
+            else
+            {
+                rowPlan.name = "";
+            }
             plan.rows.add(rowPlan);
         }
 
-        // ===== 重算编排清单（KTD8） =====
+        // ===== 重算编排清单（KTD8，替换式扩展） =====
         buildRecomputeTargets(plan, columns, headerIndexByColumn);
         return plan;
     }
@@ -1394,11 +1706,14 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
      *   <li>阶段二未命中名 ∉ baseline.missNames（被关联记录被删等）；</li>
      *   <li>歧义集合与 baseline 不一致（新增同名记录 / 预选变化）；</li>
      *   <li>缺参列 ∉ baseline.missingColumns（列配置/默认值变化等）；</li>
+     *   <li>替换删除列 ∉ baseline.replaceDeletedColumns（预检后新建/改名的列将被
+     *       用户未确认过的删除——防"确认的删除清单 ≠ 实际删除"）。</li>
      * </ol>
      * 补参 recordId 已不存在的校验在 {@link #resolveRelationSelections}（查库，KTD4 预解析记录集）。
      */
     private static void checkDrift(Set<String> stage2MissingColumns, Map<String, Set<String>> missNamesByColumn,
-            Map<String, Map<String, Long>> ambiguityByColumn, ExcelImportParams params)
+            Map<String, Map<String, Long>> ambiguityByColumn, Set<String> deletedColumnNames,
+            ExcelImportParams params)
     {
         ExcelImportParams.PrecheckBaseline baseline = params.getPrecheckBaseline() == null
                 ? new ExcelImportParams.PrecheckBaseline() : params.getPrecheckBaseline();
@@ -1473,6 +1788,24 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             if (!baselineMissingColumns.contains(columnName))
             {
                 throw driftException("列“" + columnName + "”在预检后出现新的缺参");
+            }
+        }
+
+        // 4. 替换删除漂移：本次将删的列 ∉ baseline.replaceDeletedColumns
+        //（预检后新建的列不在 Excel 表头中 → 将被用户未确认过的删除）
+        Set<String> baselineDeletedColumns = new HashSet<>();
+        for (String columnName : baseline.getReplaceDeletedColumns())
+        {
+            if (columnName != null)
+            {
+                baselineDeletedColumns.add(columnName);
+            }
+        }
+        for (String columnName : deletedColumnNames)
+        {
+            if (!baselineDeletedColumns.contains(columnName))
+            {
+                throw driftException("列“" + columnName + "”在预检后出现，本次导入将删除它");
             }
         }
     }
@@ -1718,22 +2051,38 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     }
 
     /**
-     * 构建重算编排清单（KTD8）：
+     * 构建重算编排清单（KTD8，<b>替换式语义扩展</b>）：
      * <ol>
-     *   <li>目标表全部 lookup(26) 列（两步级联，含隐藏列——隐藏只影响显示不影响存储值）；</li>
-     *   <li>目标表中 columnA/B 直接引用本次导入（已映射）18/21 列的集合运算列；</li>
+     *   <li>目标表全部 <b>保留</b>的 lookup(26) 列（两步级联，含隐藏列——隐藏只影响显示不影响
+     *       存储值；<b>被删列绝不能进</b>——{@code recomputeLookupColumnValues} 对不存在 item
+     *       会 upsert 重建，为已删列重建 items 即数据损坏）；</li>
+     *   <li>目标表保留列中 columnA/B 直接引用本次导入（已映射）18/21 列的集合运算列；</li>
      *   <li>每个对称写入涉及的（源 21 列 C，被关联表 B，配对列 P）：
      *       B 表中锚定列（double_link_column_id）指向 C 的 lookup 列（读取被修改的配对 P items）
-     *       与 columnA/B 直接引用 P 的集合运算列。</li>
+     *       与 columnA/B 直接引用 P 的集合运算列；</li>
+     *   <li><b>替换清空/删除引发的跨表锚定重算</b>：items 被清空（kept 21 配对列、他表指向
+     *       本表的 18 列）或被删（deleted 21 列及其配对列）的列，锚定/引用它们的其他表
+     *       lookup 与集合运算列须重算——覆盖 rows 为空的纯清空场景（对 SymmetricLink
+     *       驱动的 case-3 的补全：kept 21 列 Excel 全空单元格时无 symmetricLinks）。</li>
      * </ol>
      */
     private void buildRecomputeTargets(ImportPlan plan, List<NoteColumn> columns,
             Map<NoteColumn, Integer> headerIndexByColumn)
     {
+        Set<Long> deletedColumnIds = new HashSet<>();
+        for (NoteColumn deleted : plan.deletedColumns)
+        {
+            if (deleted != null && deleted.getId() != null)
+            {
+                deletedColumnIds.add(deleted.getId());
+            }
+        }
+
         Set<Long> importedLinkColumnIds = new HashSet<>();
         for (NoteColumn column : columns)
         {
-            if (column == null || column.getType() == null || ExcelColumnMatcher.isHidden(column))
+            if (column == null || column.getType() == null || column.getId() == null
+                    || deletedColumnIds.contains(column.getId()) || ExcelColumnMatcher.isHidden(column))
             {
                 continue;
             }
@@ -1746,7 +2095,8 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         }
         for (NoteColumn column : columns)
         {
-            if (column == null || column.getType() == null)
+            if (column == null || column.getType() == null || column.getId() == null
+                    || deletedColumnIds.contains(column.getId()))
             {
                 continue;
             }
@@ -1808,6 +2158,76 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                 plan.symmetricTargets.add(target);
             }
         }
+
+        // ===== case-4：替换清空/删除引发的跨表锚定重算（rows 为空的纯清空场景也要覆盖） =====
+        // affectedIds = items 被清空/被删的跨表列 id：clearedLinkColumns（kept 21 配对列 + 他表 18 列）
+        // + deleted 21 列及其配对列；scanTableIds = 这些列所在的表 + deleted 21 的被关联表
+        //（锚定列 double_link_column_id 指向对端 21 列，读取所在表配对 items——须扫对端所在表）
+        Set<Long> affectedIds = new HashSet<>();
+        Set<Long> scanTableIds = new LinkedHashSet<>();
+        for (NoteColumn cleared : plan.clearedLinkColumns)
+        {
+            if (cleared == null || cleared.getId() == null)
+            {
+                continue;
+            }
+            affectedIds.add(cleared.getId());
+            if (cleared.getDwtableId() != null)
+            {
+                scanTableIds.add(cleared.getDwtableId());
+            }
+        }
+        for (NoteColumn deleted : plan.deletedColumns)
+        {
+            if (deleted == null || deleted.getId() == null || deleted.getType() == null
+                    || deleted.getType() != ExcelColumnMatcher.TYPE_DOUBLE_LINK)
+            {
+                continue;
+            }
+            affectedIds.add(deleted.getId());
+            Long pairId = parseBackFieldIdLenient(deleted);
+            if (pairId != null)
+            {
+                affectedIds.add(pairId);
+            }
+            Long relatedTableId = parseTableIdLenient(deleted);
+            if (relatedTableId != null)
+            {
+                scanTableIds.add(relatedTableId);
+            }
+        }
+        for (Long tableId : scanTableIds)
+        {
+            if (tableId == null || tableId.equals(plan.dwtableId))
+            {
+                continue;   // 目标表保留列已由 case-1/2 覆盖
+            }
+            for (NoteColumn related : relatedColumnsByTableId.computeIfAbsent(tableId, tableId2 -> {
+                NoteColumn query = new NoteColumn();
+                query.setDwtableId(tableId2);
+                return noteColumnMapper.selectNoteColumnList(query);
+            }))
+            {
+                if (related == null || related.getType() == null || related.getId() == null)
+                {
+                    continue;
+                }
+                if (related.getType() == TYPE_LOOKUP)
+                {
+                    // 锚定列（double_link_column_id）指向受影响列：其读取的 items 已被清空/删除
+                    String anchor = parsePropertySafe(related).getString("double_link_column_id");
+                    if (anchor != null && containsColumnId(anchor, affectedIds))
+                    {
+                        plan.targetLookupColumns.add(related);
+                    }
+                }
+                else if (related.getType() == TYPE_SET_OPERATION
+                        && referencesColumnId(related, affectedIds))
+                {
+                    plan.targetSetColumns.add(related);
+                }
+            }
+        }
     }
 
     /**
@@ -1837,21 +2257,63 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     }
 
     /**
-     * 事务写入段（R22，经自注入代理进入）：#13 漂移触发集补"列被删"方向——入口按事务段
-     * 时点重查目标表参与列与被关联表配对列存在性（fail-fast 于任何写入之前）→
-     * 逐行 NoteRecord insert（sort=maxSort+1 递增、name 已派生、自增 id 回填）→
-     * items 累积 ≥500 flush → 选项追加（FOR UPDATE）→
-     * items 全量最终 flush（零缓冲不变量）→ 双链对称写入 → 重算编排 → 返回 recordCount。
-     * 任一步骤抛 {@link ServiceException} 整体回滚（含被关联表存量 item 修改与选项追加）。
+     * 事务写入段（R22，经自注入代理进入，<b>替换式语义</b>）：
+     * <ol>
+     *   <li>漂移复查（kept 参与列/被关联表配对列存在性 + pending 新列名冲突，fail-fast 于任何写入之前）；</li>
+     *   <li><b>替换阶段（rows 为空也执行——只有表头的 Excel = 清表重建列）</b>：全删本表 items/records →
+     *       清空跨表关联引用（kept 21 配对列 + 他表指向本表的 18 列）→ 级联删被删 21 列的配对列 →
+     *       删旧列 + 清孤儿 notelink → insert 新建列（id 回填）→ 取消隐藏；</li>
+     *   <li>写入阶段（仅 rows 非空）：逐行 NoteRecord insert（sort 从 1 递增、name 已派生、自增 id 回填）→
+     *       kept items + pending 列 items 累积 ≥500 flush → 选项追加（FOR UPDATE）→
+     *       items 全量最终 flush（零缓冲不变量）→ 双链对称写入；</li>
+     *   <li>重算编排（<b>无条件执行</b>——清空引发的跨表重算不依赖新行）。</li>
+     * </ol>
+     * 任一步骤抛 {@link ServiceException} 整体回滚（含跨表清理与选项追加）。
      */
     @Transactional(rollbackFor = Exception.class)
     public int executeImport(ImportPlan plan)
     {
+        // (a) 漂移复查：fail-fast 于任何写入之前
+        verifyReplacePreconditions(plan);
+        verifyBackFieldsExist(plan);
+
+        // ===== (b) 替换阶段：全删本表行与单元格（rows 为空也执行） =====
+        noteDwtableItemMapper.deleteNoteDwtableItemByDwtId(plan.dwtableId);
+        noteRecordMapper.deleteNoteRecordByDwtableId(plan.dwtableId);
+
+        // (c) 清空跨表关联引用（kept 21 配对列 + 他表指向本表的 18 列；自引用配对列已被 (b) 清，no-op 无害）
+        for (NoteColumn cleared : plan.clearedLinkColumns)
+        {
+            if (cleared != null && cleared.getId() != null)
+            {
+                noteDwtableItemMapper.clearLinkFieldsByColumnId(cleared.getId());
+            }
+        }
+
+        // (d) 级联删被删 21 列的配对列及其 items（guard 防误删本表存活列）
+        cascadeDeletePairedColumns(plan);
+
+        // (e) 删旧列 + 清孤儿语义链接（本表 deleted 列的 items 已随 (b) 删）
+        for (NoteColumn deleted : plan.deletedColumns)
+        {
+            if (deleted == null || deleted.getId() == null)
+            {
+                continue;
+            }
+            noteNotelinkMapper.deleteNoteNotelinkByColumnId(deleted.getId());
+            noteColumnMapper.deleteNoteColumnById(deleted.getId());
+        }
+
+        // (f) 落库新建列（type=1，sort 递增，id 回填供 items 组装）
+        createPendingColumns(plan);
+
+        // (g) 取消隐藏（Excel 出现同名列即取消隐藏导数据）
+        unhideColumns(plan);
+
+        // ===== (h) 写入阶段（仅 rows 非空） =====
         int recordCount = 0;
         if (!plan.rows.isEmpty())
         {
-            verifyParticipantsExist(plan);
-            verifyBackFieldsExist(plan);
             Long maxSort = noteRecordMapper.selectMaxSortByDwtableId(plan.dwtableId);
             long sort = (maxSort == null ? 0L : maxSort.longValue()) + 1L;
             List<NoteDwtableItem> batch = new ArrayList<>(BATCH_LIMIT);
@@ -1869,6 +2331,17 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                     item.setRecordId(record.getId());
                 }
                 batch.addAll(row.items);
+                // pending 新建列的 items（列 id 已在 (f) 回填；空单元格为空串，不产生缺参）
+                for (PendingColumn pending : plan.pendingColumns)
+                {
+                    NoteDwtableItem item = new NoteDwtableItem();
+                    item.setDwtId(plan.dwtableId);
+                    item.setColumnId(pending.column.getId());
+                    item.setRecordId(record.getId());
+                    String value = recordCount < pending.values.length ? pending.values[recordCount] : "";
+                    item.setValue(value == null ? "" : value);
+                    batch.add(item);
+                }
                 recordCount++;
                 if (batch.size() >= BATCH_LIMIT)
                 {
@@ -1885,39 +2358,160 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                 noteDwtableItemMapper.insertNoteDwtableItems(batch);
             }
             executeSymmetricWrite(plan);
-            executeRecompute(plan);
         }
-        log.info("[EXCEL-IMPORT] 导入完成 noteId={}, dwtableId={}, userId={}, recordCount={}, "
+
+        // (i) 重算编排（无条件执行：清空/删除引发的跨表重算不依赖新行）
+        executeRecompute(plan);
+
+        log.info("[EXCEL-IMPORT] 替换式导入完成 noteId={}, dwtableId={}, userId={}, recordCount={}, "
+                        + "deletedColumns={}, createdColumns={}, unhiddenColumns={}, clearedLinkColumns={}, "
                         + "newOptionColumns={}, symmetricTargets={}",
                 plan.noteId, plan.dwtableId, plan.userId, recordCount,
-                plan.newOptionsByColumnId.size(), plan.symmetricTargets.size());
+                plan.deletedColumns.size(), plan.pendingColumns.size(), plan.unhideColumns.size(),
+                plan.clearedLinkColumns.size(), plan.newOptionsByColumnId.size(), plan.symmetricTargets.size());
         return recordCount;
     }
 
     /**
-     * #13 漂移校验（目标表参与列方向）：事务段入口重查目标表列清单，校验前置段快照的
-     * 全部参与列仍存在——防前置段列快照与事务段之间参与列被并发删除（TOCTOU 窄窗口）
-     * 导致批量 insert 写入指向已删列的孤儿 item。缺失抛 driftException（含列名）。
+     * 替换式漂移复查（事务段入口，扩展 #13 两方向）：
+     * <ol>
+     *   <li>kept 参与列仍存在（防前置段列快照与事务段之间参与列被并发删除，
+     *       导致批量 insert 写入指向已删列的孤儿 item）；</li>
+     *   <li>pending 新建列名不得与现存列冲突（TOCTOU 窗口内用户新建同名列 → 拒绝重新预检；
+     *       计划期同名列恒不存在，冲突必为窗口内新增）。</li>
+     * </ol>
+     * deleted 列已不存在 → 后续 delete 影响 0 行，无害不校验。
      */
-    private void verifyParticipantsExist(ImportPlan plan)
+    private void verifyReplacePreconditions(ImportPlan plan)
     {
         NoteColumn query = new NoteColumn();
         query.setDwtableId(plan.dwtableId);
         Set<Long> currentColumnIds = new HashSet<>();
+        Set<String> currentNames = new HashSet<>();
         for (NoteColumn current : noteColumnMapper.selectNoteColumnList(query))
         {
-            if (current != null && current.getId() != null)
+            if (current == null)
+            {
+                continue;
+            }
+            if (current.getId() != null)
             {
                 currentColumnIds.add(current.getId());
+            }
+            if (current.getName() != null && !current.getName().trim().isEmpty())
+            {
+                currentNames.add(current.getName().trim());
             }
         }
         for (NoteColumn participant : plan.participants)
         {
-            if (!currentColumnIds.contains(participant.getId()))
+            if (participant == null || !currentColumnIds.contains(participant.getId()))
             {
-                throw driftException("列“" + (participant.getName() == null ? "" : participant.getName())
-                        + "”已被删除");
+                throw driftException("列“" + (participant == null || participant.getName() == null
+                        ? "" : participant.getName()) + "”已被删除");
             }
+        }
+        for (PendingColumn pending : plan.pendingColumns)
+        {
+            String name = pending.column.getName() == null ? "" : pending.column.getName().trim();
+            if (currentNames.contains(name))
+            {
+                throw driftException("列“" + name + "”已存在，无法新建同名列");
+            }
+        }
+    }
+
+    /**
+     * 级联删除被删 21 列的配对列及其 items（照 {@code NoteDwtableServiceImpl.deleteNoteDwtableById}
+     * 先例，不复制其疑似传参 bug）。Guard：配对列 id 属于本表存活列（kept/skip-referenced——
+     * 自引用表且配对列被 Excel 保留）或已在本表删除清单（重复删）时跳过；跨表配对列无条件级联。
+     */
+    private void cascadeDeletePairedColumns(ImportPlan plan)
+    {
+        Set<Long> deletedIds = new HashSet<>();
+        for (NoteColumn deleted : plan.deletedColumns)
+        {
+            if (deleted != null && deleted.getId() != null)
+            {
+                deletedIds.add(deleted.getId());
+            }
+        }
+        Set<Long> pairIdsToDelete = new LinkedHashSet<>();
+        for (NoteColumn deleted : plan.deletedColumns)
+        {
+            if (deleted == null || deleted.getId() == null || deleted.getType() == null
+                    || deleted.getType() != ExcelColumnMatcher.TYPE_DOUBLE_LINK)
+            {
+                continue;
+            }
+            Long pairId = parseBackFieldIdLenient(deleted);
+            if (pairId == null || pairId.equals(deleted.getId()))
+            {
+                // 配置缺失/自指异常：跳过级联（不阻断导入，残留由既有删表先例容忍）
+                log.warn("[EXCEL-IMPORT] 被删 21 列（id={}）的配对列配置缺失或异常，跳过级联删除",
+                        deleted.getId());
+                continue;
+            }
+            if (plan.survivingColumnIds.contains(pairId) || deletedIds.contains(pairId))
+            {
+                // 自引用且配对列被 Excel 保留 / 已在本表删除清单：跳过（防误删 kept 列/重复删）
+                continue;
+            }
+            pairIdsToDelete.add(pairId);
+        }
+        for (Long pairId : pairIdsToDelete)
+        {
+            noteDwtableItemMapper.deleteNoteDwtableItemByColumnId(pairId);
+            noteNotelinkMapper.deleteNoteNotelinkByColumnId(pairId);
+            noteColumnMapper.deleteNoteColumnById(pairId);
+        }
+    }
+
+    /**
+     * 落库待新建列（替换式语义）：纯文本列（type=1、property=null、isShow=0，
+     * 对齐 {@code NoteViewServiceImpl} 默认列形态），sort 从事务段现存列最大值递增，
+     * useGeneratedKeys 回填 id 供 items 组装。
+     */
+    private void createPendingColumns(ImportPlan plan)
+    {
+        if (plan.pendingColumns.isEmpty())
+        {
+            return;
+        }
+        NoteColumn query = new NoteColumn();
+        query.setDwtableId(plan.dwtableId);
+        long maxSort = 0L;
+        for (NoteColumn current : noteColumnMapper.selectNoteColumnList(query))
+        {
+            if (current != null && current.getSort() != null)
+            {
+                maxSort = Math.max(maxSort, current.getSort().longValue());
+            }
+        }
+        for (PendingColumn pending : plan.pendingColumns)
+        {
+            pending.column.setSort(Long.valueOf(++maxSort));
+            noteColumnMapper.insertNoteColumn(pending.column);
+        }
+    }
+
+    /**
+     * 取消隐藏（替换式语义：Excel 出现同名列即取消隐藏导数据）：重查后仅改 isShow=0，
+     * {@code updateNoteColumn} 动态 SET（null 字段不覆盖）。列已被并发删除则跳过
+     * （漂移复查后的窄窗口，删除级联已处理）。
+     */
+    private void unhideColumns(ImportPlan plan)
+    {
+        for (NoteColumn column : plan.unhideColumns)
+        {
+            NoteColumn fresh = column.getId() == null ? null
+                    : noteColumnMapper.selectNoteColumnById(column.getId());
+            if (fresh == null)
+            {
+                continue;
+            }
+            fresh.setIsShow(0L);
+            noteColumnMapper.updateNoteColumn(fresh);
         }
     }
 
@@ -2191,7 +2785,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
 
     // ==================== U5 内部结构 ====================
 
-    /** 导入计划（非事务前置段产物，写入段消费） */
+    /** 导入计划（非事务前置段产物，写入段消费；替换式语义扩展） */
     static final class ImportPlan
     {
         Long noteId;
@@ -2203,20 +2797,45 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         /** 逐行写入计划（与数据行等长同序） */
         final List<RowPlan> rows = new ArrayList<>();
 
-        /** 全部参与列（#13 事务段入口列存在性校验用，含错误消息所需列名） */
+        /** 全部参与列（kept：事务段入口列存在性校验用，含错误消息所需列名） */
         final List<NoteColumn> participants = new ArrayList<>();
 
         /** 列 id → 有序去重新选项（R19，事务段 FOR UPDATE 追加） */
         Map<Long, LinkedHashSet<String>> newOptionsByColumnId = Collections.emptyMap();
 
-        /** 目标表全部 lookup(26) 列（KTD8 两步级联） */
+        /** 目标表保留的 lookup(26) 列 + 跨表受影响 lookup 列（KTD8 两步级联；被删列绝不能进） */
         final List<NoteColumn> targetLookupColumns = new ArrayList<>();
 
-        /** 目标表中 columnA/B 直接引用导入 18/21 列的集合运算列（KTD8） */
+        /** 目标表保留列中 columnA/B 直接引用导入 18/21 列的集合运算列 + 跨表受影响集合运算列（KTD8） */
         final List<NoteColumn> targetSetColumns = new ArrayList<>();
 
         /** 对称写入涉及的（源 21 列 → 被关联表派生列）编排清单（KTD8） */
         final List<SymmetricTarget> symmetricTargets = new ArrayList<>();
+
+        /** 待新建列（未匹配表头 → 纯文本列，未落库无 id；事务段 insert 回填 id 后组装 items） */
+        final List<PendingColumn> pendingColumns = new ArrayList<>();
+
+        /** 将删除的现有列（不被任何表头引用的非系统列；21 列级联删配对列） */
+        final List<NoteColumn> deletedColumns = new ArrayList<>();
+
+        /** 匹配到隐藏列将取消隐藏（isShow 1→0）的列 */
+        final List<NoteColumn> unhideColumns = new ArrayList<>();
+
+        /** 本表存活列 id 集（mapped ∪ 排除类型同名列；级联删除 guard 用） */
+        final Set<Long> survivingColumnIds = new HashSet<>();
+
+        /** 其他表中引用将被清空的关联列（kept 21 配对列 + 他表指向本表的 18 列） */
+        final List<NoteColumn> clearedLinkColumns = new ArrayList<>();
+    }
+
+    /** 待新建列：未落库 NoteColumn（无 id，事务段 insert 后回填）+ 逐行预解析值（trim 文本） */
+    private static final class PendingColumn
+    {
+        NoteColumn column;
+
+        int headerIndex;
+
+        String[] values;
     }
 
     /** 单行写入计划 */

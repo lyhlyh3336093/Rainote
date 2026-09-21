@@ -50,7 +50,7 @@ export interface ExcelMissName {
     rowNumbers: number[] | null;
 }
 
-/** 缺参项（一个列一条，kind 区分缺列/缺值/类型违规/关联缺列/关联未命中） */
+/** 缺参项（一个列一条，kind 区分缺值/类型违规/关联未命中；替换式语义下缺列/关联缺列已消失） */
 export interface ExcelMissingParam {
     /** 列 id */
     columnId: number;
@@ -59,10 +59,10 @@ export interface ExcelMissingParam {
     /** 列类型（1 文本/2 数字/3 单选/4 多选/5 日期/7 复选框/18 单向关联/21 双向关联） */
     columnType: number | null;
     /** 缺参类型 */
-    kind: '缺列' | '缺值' | '类型违规' | '关联缺列' | '关联未命中';
+    kind: '缺值' | '类型违规' | '关联未命中';
     /** 受影响行号集（缺值/类型违规时填写） */
     rowNumbers: number[] | null;
-    /** 受影响总行数（缺列/关联缺列时填写） */
+    /** 受影响总行数 */
     totalRows: number | null;
     /** 违规原因（类型违规时填写） */
     reason: string | null;
@@ -140,11 +140,47 @@ export interface ExcelRelationCandidates {
     candidates: ExcelRecordCandidate[] | null;
 }
 
-/** Excel 导入预检结果（阶段一，R9/R11，对齐后端 ExcelImportPrecheckResult） */
+/** 将被删除的列（替换式导入影响面） */
+export interface ExcelDeletedColumnInfo {
+    /** 列 id */
+    columnId: number;
+    /** 列名 */
+    columnName: string;
+    /** 列类型 */
+    columnType: number | null;
+    /** 21 双向关联列：其在被关联表中的配对列将被级联删除 */
+    cascadeDeletesPairedColumn: boolean;
+}
+
+/** 其他表中引用将被清空的关联列（替换式导入影响面） */
+export interface ExcelClearedLinkColumn {
+    /** 关联列所在表名 */
+    tableName: string;
+    /** 关联列名 */
+    columnName: string;
+    /** 关联列 id */
+    columnId: number;
+}
+
+/** 替换式导入影响面（删除类字段任一非空/非零 → 必须弹框确认后才执行导入） */
+export interface ExcelReplaceImpact {
+    /** 将被删除的现有数据行数（目标表全部记录） */
+    deletedRowCount: number;
+    /** 将被删除的列（非系统列且不被任何 Excel 表头引用） */
+    deletedColumns: ExcelDeletedColumnInfo[];
+    /** 将新建的列名（Excel 独有表头 → 纯文本列，同名去重） */
+    newColumnNames: string[];
+    /** 其他表中引用将被清空的关联列（kept 21 配对列 + 指向本表的 18 列） */
+    clearedLinkColumns: ExcelClearedLinkColumn[];
+    /** 匹配到隐藏列将取消隐藏（isShow 1→0）并导入数据的列名 */
+    unhiddenColumnNames: string[];
+}
+
+/** Excel 导入预检结果（阶段一，R9/R11，替换式语义，对齐后端 ExcelImportPrecheckResult） */
 export interface ExcelImportPrecheckResult {
     /** 文件指纹（size + md5） */
     fileFingerprint: ExcelFileFingerprint;
-    /** 缺参项清单 */
+    /** 缺参项清单（缺值/类型违规/关联未命中；表头未映射一律新建列/删列，缺列类已消失） */
     missingParams: ExcelMissingParam[];
     /** 歧义项清单 */
     ambiguityItems: ExcelAmbiguityItem[];
@@ -160,6 +196,8 @@ export interface ExcelImportPrecheckResult {
     skippedHeaders: ExcelSkippedHeader[];
     /** 关联列选择器候选清单 */
     relationCandidates: ExcelRelationCandidates[];
+    /** 替换式导入影响面 */
+    replaceImpact: ExcelReplaceImpact;
     /** 是否存在阻断性问题（缺参或歧义非空） */
     hasBlockingIssues: boolean;
 }
@@ -170,12 +208,16 @@ export interface ExcelImportParamsPayload {
     fileFingerprint: ExcelFileFingerprint;
     /** 预检基线（反向漂移 fail-fast 比对基线） */
     precheckBaseline: {
-        /** 预检时缺参列名（含全部 kind 涉及的列） */
+        /** 预检时缺参列名（缺值/类型违规/关联未命中涉及的列） */
         missingColumns: string[];
         /** 预检时全部未命中名（键=列名+名） */
         missNames: { columnName: string; name: string }[];
         /** 预检时歧义项（键=列名+名，含预选记录 id） */
         ambiguity: { columnName: string; name: string; preselectedRecordId: number | null }[];
+        /** 预检时将被删除的列名（阶段二出现基线之外的删除列即漂移拒绝） */
+        replaceDeletedColumns: string[];
+        /** 预检时将新建的列名（信息性基线） */
+        replaceNewColumns: string[];
     };
     /** 基础列/违规列统一补值：键=列名，值=统一值（可为空串=显式补空） */
     columnValues: Record<string, string>;
@@ -334,10 +376,10 @@ export async function importExcelData(
             signal: controller.signal,
         });
     } catch (e: any) {
-        // 导入为纯追加、无幂等键：超时只代表前端放弃等待，服务端事务可能仍在执行并最终成功提交，
-        // 此时立即重试会造成整批重复导入——文案必须引导先确认结果而非重发（与 importDwtable 一致）
+        // Excel 导入为替换式、无幂等键：超时只代表前端放弃等待，服务端事务可能仍在执行并最终成功提交
+        //（表数据已被替换），此时立即重试会造成对已替换结果的二次替换——文案必须引导先确认结果而非重发
         if (e?.name === 'AbortError') {
-            throw new Error('导入仍在后台执行中，请稍后刷新表格确认结果；请勿立即重新导入，否则可能造成数据重复');
+            throw new Error('导入仍在后台执行中，请稍后刷新表格确认结果；请勿在结果确认前重新导入，以免二次替换数据');
         }
         throw new Error('网络异常，请稍后重试');
     } finally {

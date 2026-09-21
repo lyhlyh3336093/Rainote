@@ -8,6 +8,14 @@
     centered
   >
     <div class="excel-precheck-body">
+      <!-- 替换式导入警示（有删除即必显：数据删除不可无提示发生） -->
+      <a-alert v-if="hasReplace" type="error" show-icon style="margin-bottom: 12px">
+        <template #message>本次导入将替换表数据（不可恢复，请确认）</template>
+        <template #description>
+          <div v-for="(line, i) in replaceLines" :key="i">{{ line }}</div>
+        </template>
+      </a-alert>
+
       <!-- 基础列/违规列缺参：每列一行统一值输入（R12） -->
       <template v-if="basicGroups.length > 0">
         <a-divider orientation="left" class="precheck-divider">列补值（空 = 接受空值）</a-divider>
@@ -27,14 +35,12 @@
         <div v-if="g.error" class="precheck-error">{{ g.error }}</div>
       </div>
 
-      <!-- 关联列缺参：按 distinct 未命中名分组逐值选择器（KTD7） -->
+      <!-- 关联列缺参：按 distinct 未命中名分组逐值选择器（KTD7；替换式语义下列未出现在
+           Excel 中即被删除，"关联缺列"kind 已消失） -->
       <template v-for="col in relationColumns" :key="`rel-${col.columnId}`">
         <a-divider orientation="left" class="precheck-divider">
-          关联列「{{ col.columnName }}」{{ col.groups.length > 0 ? `未命中记录（${col.groups.length} 组）` : '（文件中未找到该列，将不建立关联）' }}
+          关联列「{{ col.columnName }}」未命中记录（{{ col.groups.length }} 组）
         </a-divider>
-        <div v-if="col.groups.length === 0" class="precheck-hint" style="margin-bottom: 8px">
-          该关联列在文件表头中未出现，本次导入对此列不建立任何关联。
-        </div>
         <div v-if="col.groups.length > COLLAPSE_THRESHOLD" class="precheck-toolbar">
           <a-button size="small" :disabled="state.loading" @click="toggleCollapse(col)">
             {{ col.collapsed ? `展开全部（剩余 ${unhandledCount(col)} 组未处理）` : '折叠未处理项' }}
@@ -239,11 +245,11 @@ export default defineComponent({
       const p = props.precheck;
       if (!p) return;
 
-      // 基础列/违规列：缺列/缺值/类型违规 → a-input 统一值（关联缺列/关联未命中走选择器）
+      // 基础列/违规列：缺值/类型违规 → a-input 统一值（替换式语义下缺列 kind 已消失）
       for (const m of p.missingParams || []) {
-        if (m.kind === '缺列' || m.kind === '缺值' || m.kind === '类型违规') {
+        if (m.kind === '缺值' || m.kind === '类型违规') {
           const { hint: tHint, placeholder } = typeHint(m.columnType);
-          const rows = m.kind === '缺列' ? null : m.rowNumbers;
+          const rows = m.rowNumbers;
           const hint = [rowHint(rows, m.totalRows), m.kind === '类型违规' ? m.reason : '']
             .filter(Boolean).join('：') || tHint;
           basicGroups.push({
@@ -257,9 +263,9 @@ export default defineComponent({
         }
       }
 
-      // 关联列：关联未命中的 missNames + 关联缺列（无 missNames，仅提示该列不建立关联）
+      // 关联列：关联未命中的 missNames（替换式语义下关联缺列 kind 已消失）
       for (const m of p.missingParams || []) {
-        if (m.kind === '关联缺列' || m.kind === '关联未命中') {
+        if (m.kind === '关联未命中') {
           const options = candidatesOf(m.columnId);
           const groups: RelationGroup[] = (m.missNames || []).map((n) => ({
             columnId: m.columnId,
@@ -391,7 +397,39 @@ export default defineComponent({
       }
     };
 
-    /** 影响面摘要（所有模式显示，R11） */
+    /** 替换式导入警示：有删除（行/列/跨表关联引用）即必显（数据删除不可无提示发生） */
+    const hasReplace = computed(() => {
+      const p = props.precheck;
+      if (!p) return false;
+      const r = p.replaceImpact;
+      return !!r && ((r.deletedRowCount || 0) > 0
+        || (r.deletedColumns || []).length > 0
+        || (r.clearedLinkColumns || []).length > 0);
+    });
+
+    /** 替换警示分句（只列删除类影响；新建列/取消隐藏在影响面摘要中呈现） */
+    const replaceLines = computed<string[]>(() => {
+      const p = props.precheck;
+      const r = p?.replaceImpact;
+      if (!r) return [];
+      const lines: string[] = [];
+      if ((r.deletedRowCount || 0) > 0) {
+        lines.push(`删除现有 ${r.deletedRowCount} 行数据`);
+      }
+      const deleted = r.deletedColumns || [];
+      if (deleted.length > 0) {
+        const names = deleted.map((c) => c.columnName).join('、');
+        lines.push(`删除 ${deleted.length} 列：${names.length > 60 ? `${names.slice(0, 60)}…` : names}`);
+      }
+      const cleared = r.clearedLinkColumns || [];
+      if (cleared.length > 0) {
+        const names = cleared.map((c) => `${c.tableName}.${c.columnName}`).join('、');
+        lines.push(`其他表指向本表的关联将被清空（${names.length > 60 ? `${names.slice(0, 60)}…` : names}）`);
+      }
+      return lines;
+    });
+
+    /** 影响面摘要（所有模式显示，R11；替换式新增建列/取消隐藏信息性条目） */
     const impactSummary = computed<string[]>(() => {
       const p = props.precheck;
       if (!p) return [];
@@ -409,6 +447,14 @@ export default defineComponent({
       }
       for (const [tableName, count] of byTable) {
         items.push(`双向关联将修改表「${tableName}」的 ${count} 条记录`);
+      }
+      const newColumnNames = p.replaceImpact?.newColumnNames || [];
+      if (newColumnNames.length > 0) {
+        items.push(`将新建 ${newColumnNames.length} 个文本列：${newColumnNames.join('、')}`);
+      }
+      const unhiddenColumnNames = p.replaceImpact?.unhiddenColumnNames || [];
+      if (unhiddenColumnNames.length > 0) {
+        items.push(`${unhiddenColumnNames.length} 个隐藏列将取消隐藏并导入数据`);
       }
       if ((p.ignoredSheets || []).length > 0) {
         items.push(`忽略 sheet：${p.ignoredSheets.join('、')}`);
@@ -469,6 +515,9 @@ export default defineComponent({
             name: a.name,
             preselectedRecordId: a.preselectedRecordId ?? null,
           })),
+          // 替换基线：预检时将删除/新建的列（漏发会被后端漂移拒绝——契约一致性关键）
+          replaceDeletedColumns: (p.replaceImpact?.deletedColumns || []).map((c) => c.columnName),
+          replaceNewColumns: p.replaceImpact?.newColumnNames || [],
         },
         columnValues,
         relationSelections,
@@ -497,7 +546,7 @@ export default defineComponent({
           buildParamsPayload(),
         );
         state.visible = false;
-        Modal.success({ title: '导入成功', content: `成功导入 ${recordCount} 条记录` });
+        Modal.success({ title: '导入成功', content: `已替换导入 ${recordCount} 条记录` });
         ctx.emit('success', recordCount);
       } catch (e: any) {
         if (e?.message?.includes('数据已变化')) {
@@ -522,6 +571,8 @@ export default defineComponent({
       remainingUnhandledCount,
       toggleCollapse,
       markAllBlank,
+      hasReplace,
+      replaceLines,
       impactSummary,
       canConfirm,
       validateBasic,

@@ -22,7 +22,7 @@ import com.ruoyi.system.service.impl.ExcelWorkbookReader.ParsedSheet;
 import com.ruoyi.system.service.impl.ExcelWorkbookReader.RowData;
 
 /**
- * Excel 导入的 sheet 选定与表头→目标列映射工具（U3，R2/R5/R6/R11）。
+ * Excel 导入的 sheet 选定与表头→目标列映射工具（U3，R2/R5/R6/R11；替换式语义）。
  * <p>
  * 三个职责（全部静态、无状态，预检与导入两阶段共用）：
  * <ul>
@@ -30,11 +30,12 @@ import com.ruoyi.system.service.impl.ExcelWorkbookReader.RowData;
  *       同名净化规则（{@code []:*?/\}→{@code _}、31 字符截断）匹配，无同名时识别
  *       {@code 表名_p<序号>} 分片家族按序号升序合并为逻辑表（表头取首分片、行数据按序拼接），
  *       两者皆无抛 {@link ServiceException}（含表名与已有 sheet 清单）；</li>
- *   <li>{@link #mapColumns(List, List)}——表头→目标列映射（R5/R6）：精确匹配（区分大小写）优先，
- *       round-trip 双列后缀（{@code 列名_文本}/{@code 列名_ID}）与 record_id 源列仅识别未精确命中的表头；
- *       隐藏列（isShow=1）与排除类型列（公式 20/23、集合运算 24、语义关联 25、lookup 26、系统列
- *       1001-1005）不参与映射，同名表头记录跳过原因；18/21 关联列参与导入（值来源为文本列，
- *       匹配逻辑归 U4）；</li>
+ *   <li>{@link #mapColumns(List, List)}——表头→目标列映射（R5/R6，替换式语义）：精确匹配
+ *       （区分大小写）优先，round-trip 双列后缀（{@code 列名_文本}/{@code 列名_ID}）与
+ *       record_id 源列仅识别未精确命中的表头；<b>隐藏列参与匹配</b>（Excel 出现同名列即
+ *       取消隐藏并导入数据）；排除类型列（公式 20/23、集合运算 24、语义关联 25、lookup 26、
+ *       系统列 1001-1005）同名跳过但记录被引用（列保留）；未匹配表头为新建纯文本列候选；
+ *       18/21 关联列参与导入（值来源为文本匹配，匹配逻辑归 U4）；</li>
  *   <li>{@link #validateCellText(NoteColumn, String)}——单元格显示文本的类型校验（R11/KTD9）：
  *       数字(2)/日期(5)/复选框(7) 三类，空缺值不算违规，违规返回中文描述供预检聚合为缺参。</li>
  * </ul>
@@ -245,37 +246,41 @@ public final class ExcelColumnMatcher
         throw new ServiceException(message.toString());
     }
 
-    // ==================== 列映射（R5/R6） ====================
+    // ==================== 列映射（R5/R6，替换式语义） ====================
 
     /**
-     * 把选定 sheet 的表头映射到目标表列（R5/R6）。
+     * 把选定 sheet 的表头映射到目标表列（R5/R6，替换式导入语义）。
      * <p>
      * 匹配优先级（KTD/R5）：
      * <ol>
      *   <li>精确匹配（表头 == NoteColumn.name，区分大小写，前后空白宽容）——真实列名优先消费表头，
      *       包括名为 {@code record_id} 或恰与后缀约定形式相同的真实用户列（非首列 record_id 表头
-     *       映射到真实列是合法的显式意图）；</li>
+     *       映射到真实列是合法的显式意图）；<b>隐藏列参与匹配</b>（替换式语义：Excel 出现该列
+     *       即取消隐藏并导入数据，不静默丢弃）；</li>
      *   <li>未命中的表头才做 round-trip 识别：首列且恰为 {@code record_id} 的表头是导出固定的
      *       记录 id 源列 → 忽略；{@code 列名_文本} 剥离后缀命中 type 18/21 关联列 → 该表头为其
      *       文本值来源；{@code 列名_ID} 剥离后缀命中 18/21 列 → 忽略（源 id 不映射）；</li>
-     *   <li>隐藏列（isShow=1）与排除类型列（公式/集合运算/语义关联/lookup/系统列）不参与映射，
-     *       其同名表头（含后缀形式）记录明确跳过原因。</li>
+     *   <li>排除类型列（公式/集合运算/语义关联/lookup）与系统列同名 → 跳过但记录
+     *       {@link HeaderEntry#getSkippedColumn()}（替换式语义：列保留、值由系统计算，
+     *       不进删除清单）；</li>
+     *   <li>其余未匹配表头 = <b>新建列候选</b>（{@link HeaderEntry#isUnmatched()}，替换式语义：
+     *       自动新建纯文本列；同名去重，仅首个建列）。</li>
      * </ol>
      * 冲突检测（R5）：首列表头恰为 {@code record_id} 且目标表存在同名的真实参与导入列时，
      * 同名列歧义（源 id 应忽略 vs 真实列应导入）→ 抛 {@link ServiceException}，不静默丢弃。
      *
      * @param headers 选定 sheet 的表头（首行显示文本）
      * @param targetColumns 目标表全部列定义（含隐藏/排除类型列，由本方法分类）
-     * @return 每个表头的映射条目（按下标对应，含跳过原因）
+     * @return 每个表头的映射条目（按下标对应，含跳过原因与新建列标记）
      * @throws ServiceException record_id 表头冲突（消息含列名）
      */
     public static ColumnMapping mapColumns(List<String> headers, List<NoteColumn> targetColumns)
     {
         List<String> safeHeaders = headers == null ? Collections.<String>emptyList() : headers;
 
-        // 目标列分类索引（键与表头一致做 trim，区分大小写；同名列取遍历序首个）
+        // 目标列分类索引（键与表头一致做 trim，区分大小写；同名列取遍历序首个）。
+        // 替换式语义：隐藏列参与导入匹配（同名即取消隐藏导数据）；仅排除类型/系统列不参与
         Map<String, NoteColumn> importableByName = new HashMap<>();
-        Map<String, NoteColumn> hiddenByName = new HashMap<>();
         Map<String, NoteColumn> excludedByName = new HashMap<>();
         if (targetColumns != null)
         {
@@ -286,11 +291,7 @@ public final class ExcelColumnMatcher
                     continue;
                 }
                 String key = column.getName().trim();
-                if (isHidden(column))
-                {
-                    hiddenByName.putIfAbsent(key, column);
-                }
-                else if (!isImportable(column))
+                if (!isImportable(column))
                 {
                     excludedByName.putIfAbsent(key, column);
                 }
@@ -307,6 +308,7 @@ public final class ExcelColumnMatcher
             entries.add(null);
         }
         Set<NoteColumn> mappedColumns = Collections.newSetFromMap(new IdentityHashMap<NoteColumn, Boolean>());
+        Set<String> unmatchedSeen = new HashSet<>();
 
         // 第一遍：精确匹配（区分大小写）——真实列名优先消费表头
         for (int i = 0; i < safeHeaders.size(); i++)
@@ -339,7 +341,7 @@ public final class ExcelColumnMatcher
             mappedColumns.add(exact);
         }
 
-        // 第二遍：未命中表头——record_id 源列 / 隐藏列 / 排除类型 / round-trip 双列后缀
+        // 第二遍：未命中表头——record_id 源列 / 排除类型 / round-trip 双列后缀 / 新建列候选
         for (int i = 0; i < safeHeaders.size(); i++)
         {
             if (entries.get(i) != null)
@@ -355,19 +357,11 @@ public final class ExcelColumnMatcher
                 continue;
             }
 
-            // 隐藏列同名（R6：不参与映射）
-            NoteColumn hidden = hiddenByName.get(header);
-            if (hidden != null)
-            {
-                entries.set(i, new HeaderEntry(i, header, null, "隐藏列不导入"));
-                continue;
-            }
-
-            // 排除类型/系统列同名
+            // 排除类型/系统列同名（替换式语义：列保留、值由系统计算，记录被引用不删除）
             NoteColumn excluded = excludedByName.get(header);
             if (excluded != null)
             {
-                entries.set(i, new HeaderEntry(i, header, null, excludedReason(excluded)));
+                entries.set(i, new HeaderEntry(i, header, null, excludedReason(excluded), excluded));
                 continue;
             }
 
@@ -389,13 +383,13 @@ public final class ExcelColumnMatcher
                     }
                     continue;
                 }
-                String suffixReason = suffixTargetReason(bare, excludedByName, hiddenByName);
-                if (suffixReason != null)
+                NoteColumn suffixTarget = excludedByName.get(bare);
+                if (suffixTarget != null)
                 {
-                    entries.set(i, new HeaderEntry(i, header, null, suffixReason));
+                    entries.set(i, new HeaderEntry(i, header, null, excludedReason(suffixTarget), suffixTarget));
                     continue;
                 }
-                // 剥离后缀未命中 18/21 关联列 → 落入未匹配
+                // 剥离后缀未命中 18/21 关联列 → 落入未匹配（新建列候选）
             }
             else if (header.endsWith(ID_SUFFIX) && header.length() > ID_SUFFIX.length())
             {
@@ -407,16 +401,24 @@ public final class ExcelColumnMatcher
                             "关联列源 id 列（" + bare + "_ID），不导入值"));
                     continue;
                 }
-                String suffixReason = suffixTargetReason(bare, excludedByName, hiddenByName);
-                if (suffixReason != null)
+                NoteColumn suffixTarget = excludedByName.get(bare);
+                if (suffixTarget != null)
                 {
-                    entries.set(i, new HeaderEntry(i, header, null, suffixReason));
+                    entries.set(i, new HeaderEntry(i, header, null, excludedReason(suffixTarget), suffixTarget));
                     continue;
                 }
             }
 
-            // 未匹配
-            entries.set(i, new HeaderEntry(i, header, null, "目标数据表中不存在同名参与导入的列"));
+            // 未匹配（替换式语义：新建纯文本列候选；同名去重，仅首个建列）
+            if (unmatchedSeen.add(header))
+            {
+                entries.set(i, new HeaderEntry(i, header, null, "目标数据表中不存在同名列，将新建文本列",
+                        null, true));
+            }
+            else
+            {
+                entries.set(i, new HeaderEntry(i, header, null, "重复表头，同名新建列仅首个生效"));
+            }
         }
         return new ColumnMapping(entries);
     }
@@ -587,27 +589,6 @@ public final class ExcelColumnMatcher
     }
 
     /**
-     * round-trip 后缀剥离后目标列的跳过原因（排除/隐藏列的后缀表头给明确原因，避免笼统“未匹配”）。
-     *
-     * @return null=剥离目标既非排除列也非隐藏列（由调用方落入未匹配）
-     */
-    private static String suffixTargetReason(String bare, Map<String, NoteColumn> excludedByName,
-            Map<String, NoteColumn> hiddenByName)
-    {
-        NoteColumn excluded = excludedByName.get(bare);
-        if (excluded != null)
-        {
-            return excludedReason(excluded);
-        }
-        NoteColumn hidden = hiddenByName.get(bare);
-        if (hidden != null)
-        {
-            return "隐藏列不导入";
-        }
-        return null;
-    }
-
-    /**
      * 严格日期格式判定：yyyy-MM-dd HH:mm:ss 或 yyyy-MM-dd（STRICT 解析，2026/1/1 等变体违规）。
      * 纯日期格式用 {@link LocalDate} 解析——{@code LocalDateTime.parse} 对缺时间字段的模式必抛异常。
      */
@@ -742,6 +723,20 @@ public final class ExcelColumnMatcher
             return skipped;
         }
 
+        /** 新建列候选表头条目（目标表无同名列，替换式语义 → 新建纯文本列；同名已去重） */
+        public List<HeaderEntry> getUnmatchedEntries()
+        {
+            List<HeaderEntry> unmatched = new ArrayList<>();
+            for (HeaderEntry entry : entries)
+            {
+                if (entry.isUnmatched())
+                {
+                    unmatched.add(entry);
+                }
+            }
+            return unmatched;
+        }
+
         /**
          * 按 headerIndex 从数据行取显示文本（双列错位警戒：只认 headerIndex，绝不按列序号）。
          * 行短于表头数（尾列空单元格被 Excel 裁剪）时返回空串。
@@ -767,6 +762,14 @@ public final class ExcelColumnMatcher
 
     /**
      * 单个表头的映射条目：column 非 null 即映射成功；否则 reason 为跳过原因（中文，供预检提示）。
+     * <p>
+     * 替换式语义扩展：
+     * <ul>
+     *   <li>{@link #skippedColumn}——表头因同名排除类型/系统列跳过时记录该列
+     *       （列保留、值由系统计算，供调用方判定"被引用不删除"）；其余跳过为 null；</li>
+     *   <li>{@link #unmatched}——目标表无任何同名列（= 新建纯文本列候选）；
+     *       同名重复表头仅首个标记。</li>
+     * </ul>
      */
     public static final class HeaderEntry
     {
@@ -782,12 +785,32 @@ public final class ExcelColumnMatcher
         /** 跳过原因；column 非 null 时为 null */
         private final String reason;
 
-        private HeaderEntry(int headerIndex, String headerName, NoteColumn column, String reason)
+        /** 因同名排除类型/系统列跳过时记录的列（该列保留不删除）；其余为 null */
+        private final NoteColumn skippedColumn;
+
+        /** 目标表无同名列（替换式语义 = 新建纯文本列候选） */
+        private final boolean unmatched;
+
+        HeaderEntry(int headerIndex, String headerName, NoteColumn column, String reason)
+        {
+            this(headerIndex, headerName, column, reason, null, false);
+        }
+
+        HeaderEntry(int headerIndex, String headerName, NoteColumn column, String reason,
+                NoteColumn skippedColumn)
+        {
+            this(headerIndex, headerName, column, reason, skippedColumn, false);
+        }
+
+        HeaderEntry(int headerIndex, String headerName, NoteColumn column, String reason,
+                NoteColumn skippedColumn, boolean unmatched)
         {
             this.headerIndex = headerIndex;
             this.headerName = headerName;
             this.column = column;
             this.reason = reason;
+            this.skippedColumn = skippedColumn;
+            this.unmatched = unmatched;
         }
 
         public int getHeaderIndex()
@@ -808,6 +831,16 @@ public final class ExcelColumnMatcher
         public String getReason()
         {
             return reason;
+        }
+
+        public NoteColumn getSkippedColumn()
+        {
+            return skippedColumn;
+        }
+
+        public boolean isUnmatched()
+        {
+            return unmatched;
         }
     }
 }

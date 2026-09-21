@@ -636,7 +636,8 @@ export default defineComponent({
       },
     });
     // 多维表格导入:隐藏 file input + 导入状态(R1 accept .sql/.zip/.xlsx,按扩展名分流:
-    // .sql/.zip 走既有 SQL 导入路径不动;.xlsx 走两阶段预检→补参→导入,U6)
+    // .sql/.zip 走既有 SQL 追加导入路径不动;.xlsx 走两阶段预检→补参→导入,替换式语义——
+    // 成功后表数据行全删重建、列集合对齐 Excel,U6)
     const importFileInput = ref<HTMLInputElement | null>(null);
     // Excel 两阶段导入状态:预检结果 + 弹框开关 + 阶段二上下文(弹框组件消费)
     const excelImport = reactive({
@@ -646,14 +647,17 @@ export default defineComponent({
       noteId: null as string | number | null,
       dwtableId: null as string | number | null,
       // 弹框确认导入成功后:清空预检上下文并刷新表格(由 ImportPrecheckModal @success 触发)
+      // 替换式导入会改列(删列/建列/取消隐藏),须同时刷新记录与列
       onImportSuccess() {
         excelImport.modalOpen = false;
         excelImport.precheck = null;
         excelImport.file = null;
+        table.get.columns();
         table.get.list();
       },
     });
-    // 完全干净分支的直连导入(无弹框,R13):params 只含 fileFingerprint + 空 baseline/selections
+    // 完全干净分支的直连导入(无弹框,R13):params 只含 fileFingerprint + 基线
+    // 替换式语义:基线补发 replaceDeletedColumns/replaceNewColumns(漏发会被后端漂移拒绝)
     const buildCleanParams = (precheck: ExcelImportPrecheckResult): ExcelImportParamsPayload => ({
       fileFingerprint: precheck.fileFingerprint,
       precheckBaseline: {
@@ -664,17 +668,24 @@ export default defineComponent({
           name: a.name,
           preselectedRecordId: a.preselectedRecordId ?? null,
         })),
+        replaceDeletedColumns: (precheck.replaceImpact?.deletedColumns || []).map((c) => c.columnName),
+        replaceNewColumns: precheck.replaceImpact?.newColumnNames || [],
       },
       columnValues: {},
       relationSelections: [],
     });
-    // 是否仅有影响面信息(无缺参无歧义,R13 轻量确认分支的判据)
+    // 是否有须弹框确认的影响面信息(无缺参无歧义时的分流判据,R13)
+    // 替换式语义(决策:有删除即弹框):将删除任何行/列/跨表关联引用 → 必须弹框确认,不走干净直导;
+    // 新建列/取消隐藏为信息性展示(弹框因其他原因打开时在影响面摘要中呈现)
     const hasImpactInfo = (p: ExcelImportPrecheckResult): boolean =>
       (p.defaultValueFills?.length || 0) > 0
       || (p.newOptions?.length || 0) > 0
       || (p.symmetricWriteImpact?.length || 0) > 0
       || (p.ignoredSheets?.length || 0) > 0
-      || (p.skippedHeaders?.length || 0) > 0;
+      || (p.skippedHeaders?.length || 0) > 0
+      || (p.replaceImpact?.deletedRowCount || 0) > 0
+      || (p.replaceImpact?.deletedColumns?.length || 0) > 0
+      || (p.replaceImpact?.clearedLinkColumns?.length || 0) > 0;
     const importState = reactive({
       loading: false,
       pick() {
@@ -740,12 +751,14 @@ export default defineComponent({
           // 导入段:仅干净分支直连(补参/确认分支的导入调用在弹框组件内)
           try {
             if (!precheck.hasBlockingIssues && !hasImpactInfo(precheck)) {
-              // 完全干净:直接导入(params 只含指纹 + 空 baseline/selections,按契约发射)
+              // 完全干净:直接导入(params 只含指纹 + 基线,按契约发射)
               const recordCount = await importExcelData(
                 { noteId, dwtableId: datasheetID.value, file },
                 buildCleanParams(precheck),
               );
               Modal.success({ title: '导入成功', content: `成功导入 ${recordCount} 条记录` });
+              // 替换式导入可能改列(理论上干净分支无删除,防御性同时刷新列)
+              table.get.columns();
               table.get.list();
             } else {
               // 补参模式(缺参/歧义)或只读确认模式(仅影响面):一个组件两种模式

@@ -95,6 +95,16 @@ class NoteDwtableControllerExcelImportTest
         sampleResult.setHasBlockingIssues(false);
         sampleResult.getFileFingerprint().setSize(3L);
         sampleResult.getFileFingerprint().setMd5("d41d8cd98f00b204e9800998ecf8427e");
+        // 替换式影响面（前端弹框确认载体）：随 data 原样透传
+        sampleResult.getReplaceImpact().setDeletedRowCount(5);
+        ExcelImportPrecheckResult.DeletedColumnInfo deletedColumn =
+                new ExcelImportPrecheckResult.DeletedColumnInfo();
+        deletedColumn.setColumnId(102L);
+        deletedColumn.setColumnName("备注");
+        deletedColumn.setColumnType(1L);
+        deletedColumn.setCascadeDeletesPairedColumn(false);
+        sampleResult.getReplaceImpact().getDeletedColumns().add(deletedColumn);
+        sampleResult.getReplaceImpact().getNewColumnNames().add("新列");
         when(noteDwtableExcelImportService.precheck(eq(NOTE_ID), eq(DWTABLE_ID),
                 any(MultipartFile.class), eq(USER_ID))).thenReturn(sampleResult);
     }
@@ -121,6 +131,15 @@ class NoteDwtableControllerExcelImportTest
         assertFalse(((ExcelImportPrecheckResult) result.get("data")).isHasBlockingIssues());
         assertEquals("d41d8cd98f00b204e9800998ecf8427e",
                 ((ExcelImportPrecheckResult) result.get("data")).getFileFingerprint().getMd5());
+        // 替换影响面随 data 透传（删除行数/删除列/新建列）
+        ExcelImportPrecheckResult.ReplaceImpact replaceImpact =
+                ((ExcelImportPrecheckResult) result.get("data")).getReplaceImpact();
+        assertEquals(5, replaceImpact.getDeletedRowCount());
+        assertEquals(1, replaceImpact.getDeletedColumns().size());
+        assertEquals("备注", replaceImpact.getDeletedColumns().get(0).getColumnName());
+        assertEquals(Long.valueOf(102L), replaceImpact.getDeletedColumns().get(0).getColumnId());
+        assertFalse(replaceImpact.getDeletedColumns().get(0).isCascadeDeletesPairedColumn());
+        assertEquals(java.util.Collections.singletonList("新列"), replaceImpact.getNewColumnNames());
         verify(noteDwtableExcelImportService, times(1))
                 .precheck(eq(NOTE_ID), eq(DWTABLE_ID), any(MultipartFile.class), eq(USER_ID));
         // 归属校验先行（照 importData 模式）

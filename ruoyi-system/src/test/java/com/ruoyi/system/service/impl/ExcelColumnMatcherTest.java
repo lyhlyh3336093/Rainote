@@ -30,10 +30,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * {@link ExcelColumnMatcher} 单元测试。
  * <p>
- * 覆盖 U3 场景（R2/R5/R6/R11）：sheet 选定（单 sheet 直用 / 净化名匹配含特殊字符表名 /
+ * 覆盖 U3 场景（R2/R5/R6/R11，替换式语义）：sheet 选定（单 sheet 直用 / 净化名匹配含特殊字符表名 /
  * 分片家族按序合并含不连续序号 / 两者皆无报错含长表名提示）、列映射（精确匹配区分大小写 /
- * round-trip 双列后缀与 record_id 源列识别 / record_id 同名列冲突 / 隐藏列与排除类型列跳过 /
- * 未匹配表头记录）、单元格显示值类型校验（数字/日期/复选框，空缺值不算违规）。
+ * round-trip 双列后缀与 record_id 源列识别 / record_id 同名列冲突 / 隐藏列参与匹配 /
+ * 排除类型列跳过记录 / 未匹配表头为新建列候选）、单元格显示值类型校验（数字/日期/复选框，
+ * 空缺值不算违规）。
  * <p>
  * ParsedSheet 直接构造（包级构造器）为主，另含一条 POI 真实 xlsx →
  * {@link ExcelWorkbookReader#parse} → selectSheet 的端到端链路验证。
@@ -409,10 +410,10 @@ class ExcelColumnMatcherTest
         assertEquals(realRecordId, mapping.mappedColumn(1));
     }
 
-    // ==================== 列映射：隐藏列与排除类型（R6/R17） ====================
+    // ==================== 列映射：隐藏列与排除类型（R6/R17，替换式语义） ====================
 
     @Test
-    void mapShouldSkipHiddenColumnHeaders()
+    void mapShouldMatchHiddenColumns()
     {
         NoteColumn hiddenText = column(3L, "机密", 1L, 1L);
         NoteColumn hiddenLink = column(4L, "隐藏关联", 21L, 1L);
@@ -420,11 +421,12 @@ class ExcelColumnMatcherTest
                 Arrays.asList("机密", "隐藏关联_文本", "隐藏关联_ID"),
                 Arrays.asList(hiddenText, hiddenLink));
 
-        // isShow=1 列即使表头同名（含后缀形式）也不映射，记录原因
+        // 替换式语义：isShow=1 隐藏列参与匹配（Excel 出现同名列即取消隐藏并导数据），
+        // 同名表头映射到隐藏列、round-trip 后缀照常识别
         HeaderEntry hidden = entryOf(mapping, "机密");
-        assertNull(hidden.getColumn());
-        assertTrue(hidden.getReason().contains("隐藏"));
-        assertNull(entryOf(mapping, "隐藏关联_文本").getColumn());
+        assertEquals(hiddenText, hidden.getColumn());
+        assertEquals(hiddenLink, entryOf(mapping, "隐藏关联_文本").getColumn());
+        // 源 id 后缀表头仍忽略（不导入值）
         assertNull(entryOf(mapping, "隐藏关联_ID").getColumn());
     }
 

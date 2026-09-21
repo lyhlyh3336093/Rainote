@@ -9,9 +9,11 @@ import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
@@ -43,7 +45,9 @@ import com.ruoyi.system.domain.NoteDwtableItem;
 import com.ruoyi.system.domain.NoteRecord;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.AmbiguityItem;
+import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.ClearedLinkColumn;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.DefaultValueFill;
+import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.DeletedColumnInfo;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.MissingParam;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.MissName;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.NewOption;
@@ -54,6 +58,7 @@ import com.ruoyi.system.domain.vo.NoteRecordVo;
 import com.ruoyi.system.mapper.NoteColumnMapper;
 import com.ruoyi.system.mapper.NoteDwtableItemMapper;
 import com.ruoyi.system.mapper.NoteDwtableMapper;
+import com.ruoyi.system.mapper.NoteNotelinkMapper;
 import com.ruoyi.system.mapper.NoteRecordMapper;
 import com.ruoyi.system.service.INoteRecordService;
 
@@ -66,6 +71,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
@@ -87,6 +93,11 @@ import static org.mockito.Mockito.when;
  * 选项自动创建（AE7 + 上限 100）、重算编排时序（KTD8）、失败回滚（AE8）、
  * 反向漂移 fail-fast（KTD5 全触发集）、补参校验（R26）、补参优先语义、params 非法、
  * sort 追加与 name 派生。
+ * <p>
+ * 替换式语义（replace_ 前缀）：全链路（删行/删列/新建列/清 notelink）、同名列配置保留、
+ * 删除 21 列级联删配对列、kept 21 清空配对引用、新建列空单元格、隐藏列匹配取消隐藏、
+ * 他表 18 列跨表清空、仅表头 Excel（重算无条件执行）、空表头 guard、自引用配对列 guard、
+ * pending 同名冲突 drift、name 从新文本列派生、替换删除漂移（checkDrift 第 4 触发集）。
  *
  * @author ruoyi
  */
@@ -117,6 +128,10 @@ class NoteDwtableExcelImportServiceImplTest
     @Mock
     private NoteDwtableItemMapper noteDwtableItemMapper;
 
+    /** 替换式导入：被删列的孤儿语义链接清理（service 新注入，@InjectMocks 自动装配） */
+    @Mock
+    private NoteNotelinkMapper noteNotelinkMapper;
+
     @Mock
     private AgentOwnershipChecker agentOwnershipChecker;
 
@@ -143,6 +158,9 @@ class NoteDwtableExcelImportServiceImplTest
 
     /** 模拟 insertNoteDwtableItem(s) 的 useGeneratedKeys 自增 id 回填（零缓冲不变量依赖） */
     private final AtomicLong itemIdSequence = new AtomicLong(5000L);
+
+    /** 模拟 insertNoteColumn 的 useGeneratedKeys 自增 id 回填（pending 列 items 组装依赖） */
+    private final AtomicLong columnIdSequence = new AtomicLong(8000L);
 
     @BeforeEach
     void setUp()
@@ -174,6 +192,12 @@ class NoteDwtableExcelImportServiceImplTest
         when(noteDwtableItemMapper.insertNoteDwtableItem(any(NoteDwtableItem.class))).thenAnswer(inv -> {
             NoteDwtableItem item = inv.getArgument(0);
             item.setId(itemIdSequence.getAndIncrement());
+            return 1;
+        });
+        // 替换式导入：pending 新建列落库回填自增 id（useGeneratedKeys 语义，否则 pending items 的 columnId 为 null）
+        when(noteColumnMapper.insertNoteColumn(any(NoteColumn.class))).thenAnswer(inv -> {
+            NoteColumn column = inv.getArgument(0);
+            column.setId(columnIdSequence.getAndIncrement());
             return 1;
         });
     }
@@ -226,6 +250,17 @@ class NoteDwtableExcelImportServiceImplTest
             }
             return new ArrayList<NoteRecord>();
         });
+    }
+
+    /**
+     * 补充目标表现有记录桩（替换式影响面 deletedRowCount 用；在 mockRelatedRecords 之后调用，
+     * argThat 桩按注册序优先生效，不影响被关联表记录路由）。
+     */
+    private void mockTargetTableRecords(List<NoteRecord> records)
+    {
+        when(noteRecordMapper.selectNoteRecordList(argThat((NoteRecordVo query) ->
+                query != null && DWTABLE_ID.equals(query.getDwtableId()))))
+                .thenReturn(new ArrayList<>(records));
     }
 
     private byte[] workbookBytes(Consumer<XSSFWorkbook> customizer)
@@ -301,7 +336,7 @@ class NoteDwtableExcelImportServiceImplTest
         }
     }
 
-    // ===== AE1：预检无缺参，完整影响面，零写库 =====
+    // ===== AE1：预检无缺参，完整影响面（替换式），零写库 =====
 
     @Test
     void precheck_noMissingParams_returnsFullImpactAndZeroWrites()
@@ -310,11 +345,13 @@ class NoteDwtableExcelImportServiceImplTest
                 column(101L, "名称", 1L, null, 0L),
                 column(102L, "数量", 2L, "{\"default\":\"0\"}", 0L),
                 column(103L, "状态", 3L, "{\"select\":\"进行中,已完成\"}", 0L),
-                column(104L, "关联", 21L, "{\"table_id\":80}", 0L),
+                column(104L, "关联", 21L, "{\"table_id\":80,\"back_field_id\":502}", 0L),
                 column(105L, "隐藏列", 1L, null, 1L),
                 column(106L, "公式", 20L, null, 0L)));
         mockRelatedTable(relatedTable("被关联表", NOTE_ID));
         mockRelatedRecords(Arrays.asList(record(301L, "张三", 1L), record(302L, "李四", 2L)));
+        mockTargetTableRecords(Arrays.asList(record(1L, "旧行1", 1L), record(2L, "旧行2", 2L)));
+        when(noteColumnMapper.selectNoteColumnById(502L)).thenReturn(relatedColumn(502L, "关联的双向链接"));
 
         byte[] bytes = twoSheetBytes(
                 new String[] {"record_id", "名称", "状态", "关联_文本", "未知列"},
@@ -330,13 +367,8 @@ class NoteDwtableExcelImportServiceImplTest
         assertTrue(result.getAmbiguityItems().isEmpty());
         assertFalse(result.isHasBlockingIssues());
 
-        // 缺列有默认值 → 默认值填充项（行数=全部行数），不进缺参清单（AE2 同源断言）
-        assertEquals(1, result.getDefaultValueFills().size());
-        DefaultValueFill fill = result.getDefaultValueFills().get(0);
-        assertEquals(Long.valueOf(102L), fill.getColumnId());
-        assertEquals("数量", fill.getColumnName());
-        assertEquals("0", fill.getDefaultValue());
-        assertEquals(2, fill.getRowCount());
+        // 替换式语义：未映射列不再产生默认值填充（数量列将删除）
+        assertTrue(result.getDefaultValueFills().isEmpty());
 
         // 单选未命中选项 → 新选项创建项（R19）
         assertEquals(1, result.getNewOptions().size());
@@ -351,13 +383,11 @@ class NoteDwtableExcelImportServiceImplTest
         assertEquals("被关联表", impact.getTableName());
         assertEquals(2, impact.getAffectedRecordCount());
 
-        // 忽略 sheet（R2）与跳过表头（R5/R6：record_id 源列 + 未匹配表头）
+        // 忽略 sheet（R2）；跳过表头（R5/R6：record_id 源列——未匹配表头为新建列候选不再进跳过清单）
         assertEquals(Collections.singletonList("其他表"), result.getIgnoredSheets());
-        assertEquals(2, result.getSkippedHeaders().size());
+        assertEquals(1, result.getSkippedHeaders().size());
         assertEquals("record_id", result.getSkippedHeaders().get(0).getHeaderName());
         assertNotNull(result.getSkippedHeaders().get(0).getReason());
-        assertEquals("未知列", result.getSkippedHeaders().get(1).getHeaderName());
-        assertNotNull(result.getSkippedHeaders().get(1).getReason());
 
         // 选择器候选（KTD7：sort 升序前 100 条，已过 R23 归属校验）
         assertEquals(1, result.getRelationCandidates().size());
@@ -368,13 +398,33 @@ class NoteDwtableExcelImportServiceImplTest
         assertEquals("张三", candidates.getCandidates().get(0).getName());
         assertEquals(Long.valueOf(302L), candidates.getCandidates().get(1).getRecordId());
 
+        // 替换影响面：目标表现有 2 行将全删；数量/隐藏列/公式列不被任何表头引用 → 删除；
+        // 未知列无同名列 → 新建；kept 21 列的配对列（被关联表 502）引用将被清空
+        ExcelImportPrecheckResult.ReplaceImpact replace = result.getReplaceImpact();
+        assertNotNull(replace);
+        assertEquals(2, replace.getDeletedRowCount());
+        assertEquals(3, replace.getDeletedColumns().size());
+        DeletedColumnInfo deleted = replace.getDeletedColumns().get(0);
+        assertEquals(Long.valueOf(102L), deleted.getColumnId());
+        assertEquals("数量", deleted.getColumnName());
+        assertFalse(deleted.isCascadeDeletesPairedColumn());
+        assertEquals(Long.valueOf(105L), replace.getDeletedColumns().get(1).getColumnId());
+        assertEquals(Long.valueOf(106L), replace.getDeletedColumns().get(2).getColumnId());
+        assertEquals(Collections.singletonList("未知列"), replace.getNewColumnNames());
+        assertEquals(1, replace.getClearedLinkColumns().size());
+        ClearedLinkColumn cleared = replace.getClearedLinkColumns().get(0);
+        assertEquals(Long.valueOf(502L), cleared.getColumnId());
+        assertEquals("关联的双向链接", cleared.getColumnName());
+        assertEquals("被关联表", cleared.getTableName());
+        assertTrue(replace.getUnhiddenColumnNames().isEmpty());
+
         // 文件指纹（KTD5）
         assertEquals(bytes.length, result.getFileFingerprint().getSize());
         assertEquals(md5Hex(bytes), result.getFileFingerprint().getMd5());
 
         // R23：被关联表归属校验执行
         verify(agentOwnershipChecker, times(1)).checkDwtableOwnership(RELATED_TABLE_ID, USER_ID);
-        // 预检零写路径（R9：不写库）
+        // 预检零写路径（R9：不写库；select 类读调用不算写）
         verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
         verify(noteRecordMapper, never()).updateNoteRecord(any(NoteRecord.class));
         verify(noteColumnMapper, never()).insertNoteColumn(any(NoteColumn.class));
@@ -383,10 +433,10 @@ class NoteDwtableExcelImportServiceImplTest
         verify(noteDwtableMapper, never()).updateNoteDwtable(any(NoteDwtable.class));
     }
 
-    // ===== AE2：缺列有默认值 → 默认值填充项 =====
+    // ===== AE2（替换式改写）：表头未映射的有默认值列 → 进删除清单，不再默认值填充 =====
 
     @Test
-    void precheck_missingColumnWithDefault_goesToDefaultFill()
+    void precheck_unmappedColumnWithDefault_goesToDeletedColumnsNotDefaultFill()
     {
         when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
                 column(101L, "名称", 1L, null, 0L),
@@ -398,14 +448,17 @@ class NoteDwtableExcelImportServiceImplTest
         ExcelImportPrecheckResult result =
                 precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
 
-        // 不进缺参清单，进默认值填充项（行数=总行数）
+        // 不进缺参清单、不产生默认值填充（列将删除，替换式语义）
         assertTrue(result.getMissingParams().isEmpty());
         assertFalse(result.isHasBlockingIssues());
-        assertEquals(1, result.getDefaultValueFills().size());
-        DefaultValueFill fill = result.getDefaultValueFills().get(0);
-        assertEquals("数量", fill.getColumnName());
-        assertEquals("0", fill.getDefaultValue());
-        assertEquals(1, fill.getRowCount());
+        assertTrue(result.getDefaultValueFills().isEmpty());
+        // 进替换影响面删除清单
+        assertEquals(1, result.getReplaceImpact().getDeletedColumns().size());
+        DeletedColumnInfo deleted = result.getReplaceImpact().getDeletedColumns().get(0);
+        assertEquals(Long.valueOf(102L), deleted.getColumnId());
+        assertEquals("数量", deleted.getColumnName());
+        assertEquals(Long.valueOf(2L), deleted.getColumnType());
+        assertFalse(deleted.isCascadeDeletesPairedColumn());
     }
 
     // ===== AE3：缺值无默认值 → 缺参项含行号集 =====
@@ -580,7 +633,7 @@ class NoteDwtableExcelImportServiceImplTest
     {
         when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
                 column(101L, "名称", 1L, null, 0L),
-                column(104L, "关联", 21L, "{\"table_id\":80}", 0L)));
+                column(104L, "关联", 21L, "{\"table_id\":80,\"back_field_id\":502}", 0L)));
         mockRelatedTable(relatedTable("被关联表", NOTE_ID));
         // 同名两记录：sort=5 在前插入，sort=2 在后 → 预选应取 sort=2
         mockRelatedRecords(Arrays.asList(record(201L, "张三", 5L), record(202L, "张三", 2L)));
@@ -610,7 +663,7 @@ class NoteDwtableExcelImportServiceImplTest
     {
         when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
                 column(101L, "名称", 1L, null, 0L),
-                column(104L, "关联", 21L, "{\"table_id\":80}", 0L)));
+                column(104L, "关联", 21L, "{\"table_id\":80,\"back_field_id\":502}", 0L)));
         mockRelatedTable(relatedTable("被关联表", NOTE_ID));
         mockRelatedRecords(Collections.singletonList(record(301L, "张三", 1L)));
 
@@ -645,7 +698,7 @@ class NoteDwtableExcelImportServiceImplTest
     {
         when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
                 column(101L, "名称", 1L, null, 0L),
-                column(104L, "关联", 21L, "{\"table_id\":80}", 0L)));
+                column(104L, "关联", 21L, "{\"table_id\":80,\"back_field_id\":502}", 0L)));
         mockRelatedTable(relatedTable("被关联表", NOTE_ID));
         mockRelatedRecords(Arrays.asList(
                 record(301L, "Smith, John", 1L),
@@ -677,7 +730,7 @@ class NoteDwtableExcelImportServiceImplTest
     {
         when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
                 column(101L, "名称", 1L, null, 0L),
-                column(104L, "关联", 21L, "{\"table_id\":80}", 0L)));
+                column(104L, "关联", 21L, "{\"table_id\":80,\"back_field_id\":502}", 0L)));
         mockRelatedTable(relatedTable("被关联表", NOTE_ID));
         mockRelatedRecords(Arrays.asList(
                 record(301L, "张三", 1L),
@@ -700,14 +753,14 @@ class NoteDwtableExcelImportServiceImplTest
         assertEquals(3, impact.getAffectedRecordCount());
     }
 
-    // ===== 关联缺列：缺参项 kind=关联缺列，不做 R23/不查记录 =====
+    // ===== 关联列不在表头（替换式改写）：不产生缺参 → 进删除清单且标记配对列级联删除 =====
 
     @Test
-    void precheck_linkColumnMissingFromHeader_missingParamKindLinkMissingColumn()
+    void precheck_unmappedLinkColumn_goesToDeletedColumnsWithCascadeFlag()
     {
         when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
                 column(101L, "名称", 1L, null, 0L),
-                column(104L, "关联", 21L, "{\"table_id\":80}", 0L)));
+                column(104L, "关联", 21L, "{\"table_id\":80,\"back_field_id\":502}", 0L)));
 
         byte[] bytes = singleSheetBytes(new String[] {"名称"},
                 Collections.singletonList(new String[] {"a"}));
@@ -715,16 +768,19 @@ class NoteDwtableExcelImportServiceImplTest
         ExcelImportPrecheckResult result =
                 precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
 
-        assertEquals(1, result.getMissingParams().size());
-        MissingParam param = result.getMissingParams().get(0);
-        assertEquals("关联", param.getColumnName());
-        assertEquals(ExcelImportPrecheckResult.KIND_LINK_MISSING_COLUMN, param.getKind());
-        assertEquals(Integer.valueOf(1), param.getTotalRows());
-        // 未映射的关联列不触发 R23 校验与 KTD4 预解析，也不附候选
+        // 未映射列不再产生缺参（列将删除），无阻断
+        assertTrue(result.getMissingParams().isEmpty());
+        assertFalse(result.isHasBlockingIssues());
+        // 21 列进删除清单且标记配对列级联删除
+        assertEquals(1, result.getReplaceImpact().getDeletedColumns().size());
+        DeletedColumnInfo deleted = result.getReplaceImpact().getDeletedColumns().get(0);
+        assertEquals(Long.valueOf(104L), deleted.getColumnId());
+        assertEquals("关联", deleted.getColumnName());
+        assertEquals(Long.valueOf(21L), deleted.getColumnType());
+        assertTrue(deleted.isCascadeDeletesPairedColumn());
+        // 未映射的关联列不触发 R23 校验，也不附候选
         verify(noteDwtableMapper, never()).selectNoteDwtableById(RELATED_TABLE_ID);
-        verify(noteRecordMapper, never()).selectNoteRecordList(any(NoteRecordVo.class));
         assertTrue(result.getRelationCandidates().isEmpty());
-        assertTrue(result.isHasBlockingIssues());
     }
 
     // ===== R23：被关联表不同 noteId → 阻断（含列名） =====
@@ -734,7 +790,7 @@ class NoteDwtableExcelImportServiceImplTest
     {
         when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
                 column(101L, "名称", 1L, null, 0L),
-                column(104L, "关联", 21L, "{\"table_id\":80}", 0L)));
+                column(104L, "关联", 21L, "{\"table_id\":80,\"back_field_id\":502}", 0L)));
         mockRelatedTable(relatedTable("其他笔记的表", 999L));
 
         byte[] bytes = singleSheetBytes(new String[] {"名称", "关联_文本"},
@@ -756,7 +812,7 @@ class NoteDwtableExcelImportServiceImplTest
     {
         when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
                 column(101L, "名称", 1L, null, 0L),
-                column(104L, "关联", 21L, "{\"table_id\":80}", 0L)));
+                column(104L, "关联", 21L, "{\"table_id\":80,\"back_field_id\":502}", 0L)));
         mockRelatedTable(relatedTable("被关联表", NOTE_ID));
         doThrow(new ServiceException("无权操作他人数据")).when(agentOwnershipChecker)
                 .checkDwtableOwnership(RELATED_TABLE_ID, USER_ID);
@@ -819,6 +875,17 @@ class NoteDwtableExcelImportServiceImplTest
     private String paramsJson(byte[] fingerprintBytes, String missingColumns, String missNames,
             String ambiguity, String columnValues, String relationSelections)
     {
+        return paramsJson(fingerprintBytes, missingColumns, missNames, ambiguity,
+                columnValues, relationSelections, null);
+    }
+
+    /**
+     * 构造 params JSON（含替换基线）：replaceDeletedColumns 为预检时确认将删除的列名清单
+     * （替换式语义漂移比对基线——本次将删列不在其中即整体拒绝；null → 空清单）。
+     */
+    private String paramsJson(byte[] fingerprintBytes, String missingColumns, String missNames,
+            String ambiguity, String columnValues, String relationSelections, String replaceDeletedColumns)
+    {
         JSONObject root = new JSONObject();
         JSONObject fingerprint = new JSONObject();
         fingerprint.put("size", (long) fingerprintBytes.length);
@@ -828,6 +895,8 @@ class NoteDwtableExcelImportServiceImplTest
         baseline.put("missingColumns", JSONArray.parseArray(missingColumns == null ? "[]" : missingColumns));
         baseline.put("missNames", JSONArray.parseArray(missNames == null ? "[]" : missNames));
         baseline.put("ambiguity", JSONArray.parseArray(ambiguity == null ? "[]" : ambiguity));
+        baseline.put("replaceDeletedColumns",
+                JSONArray.parseArray(replaceDeletedColumns == null ? "[]" : replaceDeletedColumns));
         root.put("precheckBaseline", baseline);
         root.put("columnValues", JSONObject.parseObject(columnValues == null ? "{}" : columnValues));
         root.put("relationSelections",
@@ -878,7 +947,7 @@ class NoteDwtableExcelImportServiceImplTest
         return related;
     }
 
-    // ===== 三源合并（AE3 导入部分）+ 复选框映射 + sort/name 派生 =====
+    // ===== 三源合并（AE3 导入部分）+ 复选框映射 + sort/name 派生（替换式：未映射"完成"列删除） =====
 
     @Test
     void import_threeSourceMerge_andSortAndNameDerivation()
@@ -895,8 +964,10 @@ class NoteDwtableExcelImportServiceImplTest
                 new String[] {"b", "", "", "false"},
                 new String[] {"c", "3", "y", "xx"}));
 
+        // 基线含替换删除列"完成"（预检时已确认的删除）
         int count = runImport(bytes, paramsJson(bytes,
-                "[\"备注\",\"勾选\"]", null, null, "{\"备注\":\"待补充\",\"勾选\":\"false\"}", null));
+                "[\"备注\",\"勾选\"]", null, null, "{\"备注\":\"待补充\",\"勾选\":\"false\"}", null,
+                "[\"完成\"]"));
 
         assertEquals(3, count);
 
@@ -909,10 +980,12 @@ class NoteDwtableExcelImportServiceImplTest
             assertEquals(Arrays.asList("a", "b", "c").get(i), recordCaptor.getAllValues().get(i).getName());
         }
 
-        // 3 行 × 5 列 = 15 个 item（密集模型，含缺列"完成"）
+        // 替换式：未映射的"完成"列被删除（无默认值填充 item）→ 3 行 × 4 参与列 = 12 个 item
+        verify(noteColumnMapper).deleteNoteColumnById(110L);
+        verify(noteColumnMapper, never()).insertNoteColumn(any(NoteColumn.class));
         verify(noteDwtableItemMapper, times(1)).insertNoteDwtableItems(itemsCaptor.capture());
         List<NoteDwtableItem> items = itemsCaptor.getValue();
-        assertEquals(15, items.size());
+        assertEquals(12, items.size());
         // rowIndex → columnId → item 索引
         Map<Long, NoteDwtableItem> itemByColumnRow0 = new LinkedHashMap<>();
         Map<Long, NoteDwtableItem> itemByColumnRow1 = new LinkedHashMap<>();
@@ -937,19 +1010,18 @@ class NoteDwtableExcelImportServiceImplTest
         assertEquals("1", itemByColumnRow0.get(102L).getValue());
         assertEquals("x", itemByColumnRow0.get(107L).getValue());
         assertEquals("0", itemByColumnRow0.get(109L).getValue());
-        // 行2：数量空 → 默认值 "0"；备注空 → 用户补参 "待补充"；复选框 false→'1'；缺列"完成" → 默认 true→'0'
+        // 行2：数量空 → 默认值 "0"；备注空 → 用户补参 "待补充"；复选框 false→'1'
         assertEquals("b", itemByColumnRow1.get(101L).getValue());
         assertEquals("0", itemByColumnRow1.get(102L).getValue());
         assertEquals("待补充", itemByColumnRow1.get(107L).getValue());
         assertEquals("1", itemByColumnRow1.get(109L).getValue());
-        assertEquals("0", itemByColumnRow1.get(110L).getValue());
         // 行3：勾选 "xx" 类型违规 → 不用 Excel 值，用补参 "false"→'1'
         assertEquals("c", itemByColumnRow2.get(101L).getValue());
         assertEquals("3", itemByColumnRow2.get(102L).getValue());
         assertEquals("y", itemByColumnRow2.get(107L).getValue());
         assertEquals("1", itemByColumnRow2.get(109L).getValue());
 
-        // 全量最终 flush 单批（15 < 500）；无对称写入与选项追加
+        // 全量最终 flush 单批（12 < 500）；无对称写入与选项追加
         verify(noteDwtableItemMapper, never()).updateNoteDwtableItem(any(NoteDwtableItem.class));
         verify(noteColumnMapper, never()).updateNoteColumn(any(NoteColumn.class));
     }
@@ -1576,8 +1648,9 @@ class NoteDwtableExcelImportServiceImplTest
         when(noteDwtableItemMapper.selectNoteDwtableItemByRecordAndColumnForUpdate(any(NoteDwtableItem.class)))
                 .thenReturn(pairedItem(900L, 502L, null, null, null));
 
-        byte[] bytes = singleSheetBytes(new String[] {"名称", "关联_文本"},
-                Collections.singletonList(new String[] {"a", "B记录"}));
+        // 替换式语义：26/24 列须被同名表头引用（skip-referenced）才保留——否则将被删除且不重算
+        byte[] bytes = singleSheetBytes(new String[] {"名称", "关联_文本", "引用", "运算"},
+                Collections.singletonList(new String[] {"a", "B记录", "x", "y"}));
         runImport(bytes, paramsJson(bytes, null, null, null, null, null));
 
         // 编排清单与时序：最终 flush → 对称写入 → 目标表 lookup 两步级联 →
@@ -1637,22 +1710,34 @@ class NoteDwtableExcelImportServiceImplTest
         assertEquals(Arrays.asList("a", "x", "b", "补值"), values);
     }
 
-    // ===== #6：隐藏最左 type=1 列 → name 派生取首个可见 type=1 列 =====
+    // ===== #6（替换式改写）：隐藏最左 type=1 列出现在 Excel → 取消隐藏且可作 name 派生源 =====
 
     @Test
-    void import_hiddenFirstNameColumn_nameDerivedFromFirstVisibleType1()
+    void import_hiddenFirstNameColumn_nameDerivedFromHiddenColumnWhenMatched()
     {
+        NoteColumn hidden = column(150L, "隐藏名", 1L, null, 1L);
         when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
-                column(150L, "隐藏名", 1L, null, 1L),
+                hidden,
                 column(101L, "名称", 1L, null, 0L)));
+        when(noteColumnMapper.selectNoteColumnById(150L)).thenReturn(hidden);
 
-        byte[] bytes = singleSheetBytes(new String[] {"名称"},
-                Collections.singletonList(new String[] {"a"}));
+        byte[] bytes = singleSheetBytes(new String[] {"隐藏名", "名称"},
+                Collections.singletonList(new String[] {"h", "n"}));
 
         runImport(bytes, paramsJson(bytes, null, null, null, null, null));
 
+        // 隐藏列按列表序为首个保留 type=1 列 → name 从其本行值派生（含将被取消隐藏的隐藏列）
         verify(noteRecordMapper, times(1)).insertNoteRecord(recordCaptor.capture());
-        assertEquals("a", recordCaptor.getValue().getName());
+        assertEquals("h", recordCaptor.getValue().getName());
+
+        // 取消隐藏：isShow 1→0 且数据正常导入
+        verify(noteColumnMapper).updateNoteColumn(columnCaptor.capture());
+        assertEquals(Long.valueOf(150L), columnCaptor.getValue().getId());
+        assertEquals(Long.valueOf(0L), columnCaptor.getValue().getIsShow());
+        verify(noteDwtableItemMapper, times(1)).insertNoteDwtableItems(itemsCaptor.capture());
+        assertEquals(2, itemsCaptor.getValue().size());
+        assertEquals("h", itemsCaptor.getValue().get(0).getValue());
+        assertEquals("n", itemsCaptor.getValue().get(1).getValue());
     }
 
     // ===== #9：导入参数条目数超限（columnValues / relationSelections 各 10000）拒绝 =====
@@ -1815,24 +1900,25 @@ class NoteDwtableExcelImportServiceImplTest
         verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
     }
 
-    // ===== #16：relationSelections 列未映射（缺列关联列）→ "未参与本次导入"拒绝 =====
+    // ===== #16：relationSelections 列未映射（替换式语义下将删除的关联列）→ "未参与本次导入"拒绝 =====
 
     @Test
     void import_supplement_relationColumnNotImported_rejected()
     {
         when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
                 column(101L, "名称", 1L, null, 0L),
-                column(104L, "关联", 21L, "{\"table_id\":80}", 0L)));
+                column(104L, "关联", 21L, "{\"table_id\":80,\"back_field_id\":502}", 0L)));
         mockRelatedTable(relatedTable("被关联表", NOTE_ID));
         mockRelatedRecords(Collections.singletonList(record(100L, "张三", 1L)));
 
-        // 关联列不在 Excel 表头中（关联缺列）→ 不在 headerIndexByColumn
+        // 关联列不在 Excel 表头中（替换式语义下将删除）→ 不在 headerIndexByColumn；
+        // 基线含已确认的删除列"关联"（替换删除漂移通过后走到补参校验）
         byte[] bytes = singleSheetBytes(new String[] {"名称"},
                 Collections.singletonList(new String[] {"a"}));
 
         ServiceException ex = assertThrows(ServiceException.class,
                 () -> runImport(bytes, paramsJson(bytes, "[\"关联\"]", null, null, null,
-                        "[{\"columnName\":\"关联\",\"name\":\"张三\",\"recordId\":100}]")));
+                        "[{\"columnName\":\"关联\",\"name\":\"张三\",\"recordId\":100}]", "[\"关联\"]")));
         assertTrue(ex.getMessage().contains("未参与本次导入"));
         verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
     }
@@ -1938,5 +2024,455 @@ class NoteDwtableExcelImportServiceImplTest
         verify(noteDwtableItemMapper, never()).insertNoteDwtableItem(any(NoteDwtableItem.class));
         verify(noteDwtableItemMapper, never())
                 .selectNoteDwtableItemByRecordAndColumnForUpdate(any(NoteDwtableItem.class));
+    }
+
+    // ==================================================================
+    // 替换式导入（replace_）：全链路 / 配置保留 / 级联删除 / 跨表清空 / 取消隐藏 /
+    // 空表头 guard / 自引用 guard / pending 冲突 / name 派生 / 替换删除漂移
+    // ==================================================================
+
+    // ===== 全链路：2 列 3 行存量，表头 [A, C] → A 保留、B 删除、C 新建 =====
+
+    @Test
+    void replace_fullPath()
+    {
+        NoteColumn columnA = column(101L, "A", 1L, null, 0L);
+        columnA.setSort(3L);
+        NoteColumn columnB = column(102L, "B", 1L, null, 0L);
+        columnB.setSort(5L);
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class)))
+                .thenReturn(Arrays.asList(columnA, columnB));
+        mockTargetTableRecords(Arrays.asList(
+                record(1L, "旧1", 1L), record(2L, "旧2", 2L), record(3L, "旧3", 3L)));
+
+        byte[] bytes = singleSheetBytes(new String[] {"A", "C"}, Arrays.asList(
+                new String[] {"a1", "c1"},
+                new String[] {"a2", "c2"},
+                new String[] {"a3", "c3"}));
+
+        // 预检：删 3 行、删 B 列、新建 C 列
+        ExcelImportPrecheckResult precheck =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
+        assertEquals(3, precheck.getReplaceImpact().getDeletedRowCount());
+        assertEquals(1, precheck.getReplaceImpact().getDeletedColumns().size());
+        assertEquals("B", precheck.getReplaceImpact().getDeletedColumns().get(0).getColumnName());
+        assertEquals(Collections.singletonList("C"), precheck.getReplaceImpact().getNewColumnNames());
+
+        int count = runImport(bytes, paramsJson(bytes, null, null, null, null, null, "[\"B\"]"));
+        assertEquals(3, count);
+
+        // 旧数据全删（替换删除段）
+        verify(noteDwtableItemMapper).deleteNoteDwtableItemByDwtId(DWTABLE_ID);
+        verify(noteRecordMapper).deleteNoteRecordByDwtableId(DWTABLE_ID);
+        // B 列删除 + 孤儿 notelink 清理
+        verify(noteNotelinkMapper).deleteNoteNotelinkByColumnId(102L);
+        verify(noteColumnMapper).deleteNoteColumnById(102L);
+        // C 列新建：纯文本列（type=1 / isShow=0 / property null），sort 从现存最大值 5 递增为 6
+        verify(noteColumnMapper).insertNoteColumn(columnCaptor.capture());
+        NoteColumn created = columnCaptor.getValue();
+        assertEquals("C", created.getName());
+        assertEquals(Long.valueOf(1L), created.getType());
+        assertEquals(Long.valueOf(0L), created.getIsShow());
+        assertNull(created.getProperty());
+        assertEquals(DWTABLE_ID, created.getDwtableId());
+        assertEquals(Long.valueOf(6L), created.getSort());
+        // 新行 items 只含 A 与新建 C（B 已删，无任何 B 的 items）
+        verify(noteDwtableItemMapper, times(1)).insertNoteDwtableItems(itemsCaptor.capture());
+        List<NoteDwtableItem> items = itemsCaptor.getValue();
+        assertEquals(6, items.size());
+        Set<Long> itemColumnIds = new HashSet<>();
+        for (NoteDwtableItem item : items)
+        {
+            itemColumnIds.add(item.getColumnId());
+        }
+        assertEquals(new HashSet<>(Arrays.asList(101L, created.getId())), itemColumnIds);
+        // name 派生自保留的 A 列
+        verify(noteRecordMapper, times(3)).insertNoteRecord(recordCaptor.capture());
+        for (int i = 0; i < 3; i++)
+        {
+            assertEquals("a" + (i + 1), recordCaptor.getAllValues().get(i).getName());
+        }
+    }
+
+    // ===== 同名单选列保留配置：property 原样，仅数据替换 =====
+
+    @Test
+    void replace_sameNameColumn_configPreserved()
+    {
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Collections.singletonList(
+                column(103L, "状态", 3L, "{\"select\":\"进行中,已完成\"}", 0L)));
+        mockTargetTableRecords(Arrays.asList(record(1L, "旧1", 1L), record(2L, "旧2", 2L)));
+
+        byte[] bytes = singleSheetBytes(new String[] {"状态"}, Arrays.asList(
+                new String[] {"进行中"},
+                new String[] {"已完成"}));
+
+        ExcelImportPrecheckResult precheck =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
+        assertTrue(precheck.getReplaceImpact().getDeletedColumns().isEmpty());
+
+        int count = runImport(bytes, paramsJson(bytes, null, null, null, null, null));
+        assertEquals(2, count);
+
+        // 配置保留：该列的 updateNoteColumn 不被调用（无取消隐藏、无选项追加），也不删除/新建列
+        verify(noteColumnMapper, never()).updateNoteColumn(any(NoteColumn.class));
+        verify(noteColumnMapper, never()).deleteNoteColumnById(any(Long.class));
+        verify(noteColumnMapper, never()).insertNoteColumn(any(NoteColumn.class));
+        // 数据替换：旧行全删 + 新行 items 值为单元格文本
+        verify(noteRecordMapper).deleteNoteRecordByDwtableId(DWTABLE_ID);
+        verify(noteDwtableItemMapper).insertNoteDwtableItems(itemsCaptor.capture());
+        List<NoteDwtableItem> items = itemsCaptor.getValue();
+        assertEquals(2, items.size());
+        assertEquals("进行中", items.get(0).getValue());
+        assertEquals("已完成", items.get(1).getValue());
+    }
+
+    // ===== 本表 21 列被删 → 被关联表配对列级联删除（items + notelink + 列） =====
+
+    @Test
+    void replace_deletedDoubleLink_cascadePairedColumn()
+    {
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
+                column(101L, "名称", 1L, null, 0L),
+                column(104L, "关联", 21L, "{\"table_id\":80,\"back_field_id\":502}", 0L)));
+
+        byte[] bytes = singleSheetBytes(new String[] {"名称"},
+                Collections.singletonList(new String[] {"a"}));
+
+        // 预检：21 列删除且标记配对列级联删除
+        ExcelImportPrecheckResult precheck =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
+        assertEquals(1, precheck.getReplaceImpact().getDeletedColumns().size());
+        assertTrue(precheck.getReplaceImpact().getDeletedColumns().get(0).isCascadeDeletesPairedColumn());
+
+        runImport(bytes, paramsJson(bytes, null, null, null, null, null, "[\"关联\"]"));
+
+        // 被关联表配对列 502 级联删除（items + notelink + 列）
+        verify(noteDwtableItemMapper).deleteNoteDwtableItemByColumnId(502L);
+        verify(noteNotelinkMapper).deleteNoteNotelinkByColumnId(502L);
+        verify(noteColumnMapper).deleteNoteColumnById(502L);
+        // 源 21 列自身也删除
+        verify(noteNotelinkMapper).deleteNoteNotelinkByColumnId(104L);
+        verify(noteColumnMapper).deleteNoteColumnById(104L);
+    }
+
+    // ===== kept 21 列：配对列引用先清空，随后对称写入正常 =====
+
+    @Test
+    void replace_keptDoubleLink_clearsPairedItems()
+    {
+        mockDoubleLinkColumns();
+        mockRelatedTable(relatedTable("被关联表", NOTE_ID));
+        mockRelatedRecords(Collections.singletonList(record(100L, "B记录", 1L)));
+        when(noteColumnMapper.selectNoteColumnById(502L))
+                .thenReturn(relatedColumn(502L, "关联的双向链接"));
+        when(noteDwtableItemMapper.selectNoteDwtableItemByRecordAndColumnForUpdate(any(NoteDwtableItem.class)))
+                .thenReturn(pairedItem(900L, 502L, null, null, null));
+
+        byte[] bytes = singleSheetBytes(new String[] {"名称", "关联_文本"},
+                Collections.singletonList(new String[] {"a", "B记录"}));
+
+        // 预检：kept 21 列的配对列进 clearedLinkColumns
+        ExcelImportPrecheckResult precheck =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
+        assertEquals(1, precheck.getReplaceImpact().getClearedLinkColumns().size());
+        assertEquals(Long.valueOf(502L),
+                precheck.getReplaceImpact().getClearedLinkColumns().get(0).getColumnId());
+
+        int count = runImport(bytes, paramsJson(bytes, null, null, null, null, null));
+        assertEquals(1, count);
+
+        // 事务段：本表行全删后，配对列 502 的悬空引用被清空（先于新数据写入）
+        verify(noteDwtableItemMapper).clearLinkFieldsByColumnId(502L);
+        InOrder inOrder = inOrder(noteDwtableItemMapper);
+        inOrder.verify(noteDwtableItemMapper).clearLinkFieldsByColumnId(502L);
+        inOrder.verify(noteDwtableItemMapper).insertNoteDwtableItems(anyList());
+        // 随后对称写入正常执行（配对 item update + 源 item 回写）
+        verify(noteDwtableItemMapper, times(2)).updateNoteDwtableItem(any(NoteDwtableItem.class));
+    }
+
+    // ===== 新建列空单元格：不产生缺参，item 值为空串 =====
+
+    @Test
+    void replace_newColumn_emptyCells_noMissingParams()
+    {
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Collections.singletonList(
+                column(101L, "名称", 1L, null, 0L)));
+
+        byte[] bytes = singleSheetBytes(new String[] {"名称", "新列"}, Arrays.asList(
+                new String[] {"a", ""},
+                new String[] {"b", ""}));
+
+        ExcelImportPrecheckResult precheck =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
+        assertTrue(precheck.getMissingParams().isEmpty());
+        assertFalse(precheck.isHasBlockingIssues());
+        assertEquals(Collections.singletonList("新列"), precheck.getReplaceImpact().getNewColumnNames());
+
+        int count = runImport(bytes, paramsJson(bytes, null, null, null, null, null));
+        assertEquals(2, count);
+
+        verify(noteColumnMapper).insertNoteColumn(columnCaptor.capture());
+        Long newColumnId = columnCaptor.getValue().getId();
+        assertNotNull(newColumnId);
+        // 2 行 × (名称 + 新列) = 4 items，新列 item 值为空串
+        verify(noteDwtableItemMapper, times(1)).insertNoteDwtableItems(itemsCaptor.capture());
+        List<NoteDwtableItem> items = itemsCaptor.getValue();
+        assertEquals(4, items.size());
+        int newColumnItemCount = 0;
+        for (NoteDwtableItem item : items)
+        {
+            if (newColumnId.equals(item.getColumnId()))
+            {
+                newColumnItemCount++;
+                assertEquals("", item.getValue());
+            }
+        }
+        assertEquals(2, newColumnItemCount);
+    }
+
+    // ===== isShow=1 列被同名表头映射 → 取消隐藏（setIsShow(0)）并导入数据 =====
+
+    @Test
+    void replace_hiddenColumnMatched_unhiddenAndImported()
+    {
+        NoteColumn hidden = column(150L, "隐藏列", 1L, null, 1L);
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class)))
+                .thenReturn(Collections.singletonList(hidden));
+        when(noteColumnMapper.selectNoteColumnById(150L)).thenReturn(hidden);
+
+        byte[] bytes = singleSheetBytes(new String[] {"隐藏列"},
+                Collections.singletonList(new String[] {"v1"}));
+
+        ExcelImportPrecheckResult precheck =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
+        assertEquals(Collections.singletonList("隐藏列"), precheck.getReplaceImpact().getUnhiddenColumnNames());
+
+        runImport(bytes, paramsJson(bytes, null, null, null, null, null));
+
+        verify(noteColumnMapper).updateNoteColumn(columnCaptor.capture());
+        assertEquals(Long.valueOf(150L), columnCaptor.getValue().getId());
+        assertEquals(Long.valueOf(0L), columnCaptor.getValue().getIsShow());
+        verify(noteDwtableItemMapper, times(1)).insertNoteDwtableItems(itemsCaptor.capture());
+        assertEquals(1, itemsCaptor.getValue().size());
+        assertEquals("v1", itemsCaptor.getValue().get(0).getValue());
+    }
+
+    // ===== 他表 18 列 property.table_id 指向本表 → 进 clearedLinkColumns 且被清空 =====
+
+    @Test
+    void replace_otherTableSingleLink_cleared()
+    {
+        Long otherTableId = 90L;
+        NoteColumn otherLink = column(201L, "他表关联", 18L, "{\"table_id\":60}", 0L);
+        otherLink.setDwtableId(otherTableId);
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenAnswer(inv -> {
+            NoteColumn query = inv.getArgument(0);
+            if (DWTABLE_ID.equals(query.getDwtableId()))
+            {
+                return Collections.singletonList(column(101L, "名称", 1L, null, 0L));
+            }
+            if (otherTableId.equals(query.getDwtableId()))
+            {
+                return Collections.singletonList(otherLink);
+            }
+            return new ArrayList<NoteColumn>();
+        });
+        NoteDwtable otherTable = new NoteDwtable();
+        otherTable.setId(otherTableId);
+        otherTable.setNoteId(NOTE_ID);
+        otherTable.setName("他表");
+        when(noteDwtableMapper.selectNoteDwtableById(otherTableId)).thenReturn(otherTable);
+        when(noteDwtableMapper.selectDWTableList(NOTE_ID)).thenReturn(Collections.singletonList(otherTable));
+
+        byte[] bytes = singleSheetBytes(new String[] {"名称"},
+                Collections.singletonList(new String[] {"a"}));
+
+        // 预检：他表指向本表的 18 列进 clearedLinkColumns（含表名）
+        ExcelImportPrecheckResult precheck =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
+        assertEquals(1, precheck.getReplaceImpact().getClearedLinkColumns().size());
+        ClearedLinkColumn cleared = precheck.getReplaceImpact().getClearedLinkColumns().get(0);
+        assertEquals(Long.valueOf(201L), cleared.getColumnId());
+        assertEquals("他表关联", cleared.getColumnName());
+        assertEquals("他表", cleared.getTableName());
+
+        runImport(bytes, paramsJson(bytes, null, null, null, null, null));
+
+        // 事务段：他表 18 列的悬空引用被清空
+        verify(noteDwtableItemMapper).clearLinkFieldsByColumnId(201L);
+    }
+
+    // ===== 只有表头无数据行：删旧行列、0 记录、executeRecompute 仍执行 =====
+
+    @Test
+    void replace_headerOnlyExcel()
+    {
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
+                column(101L, "名称", 1L, null, 0L),
+                column(130L, "引用", 26L,
+                        "{\"double_link_column_id\":\"104\",\"source_column_id\":\"101\"}", 0L)));
+
+        // "引用"同名表头使 26 列被引用保留（skip-referenced），无数据行
+        byte[] bytes = singleSheetBytes(new String[] {"名称", "引用"}, Collections.emptyList());
+
+        ExcelImportPrecheckResult precheck =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
+        assertTrue(precheck.getMissingParams().isEmpty());
+        assertTrue(precheck.getReplaceImpact().getDeletedColumns().isEmpty());
+
+        int count = runImport(bytes, paramsJson(bytes, null, null, null, null, null));
+        assertEquals(0, count);
+
+        // 旧行列清理照常执行（rows 为空也执行删除段）
+        verify(noteDwtableItemMapper).deleteNoteDwtableItemByDwtId(DWTABLE_ID);
+        verify(noteRecordMapper).deleteNoteRecordByDwtableId(DWTABLE_ID);
+        verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
+        // executeRecompute 无条件执行：保留的 26 列仍被重算（不依赖新行）
+        verify(noteRecordService).recomputeLookupColumnValues(any(NoteColumn.class));
+        verify(noteRecordService).recomputeSetOperationsForLookup(any(NoteColumn.class));
+    }
+
+    // ===== 全部空表头 → 防误删 guard 拒绝（预检与导入两阶段） =====
+
+    @Test
+    void replace_blankSheet_rejected()
+    {
+        // 表头行存在但无任何单元格（无任何非空表头）
+        byte[] bytes = workbookBytes(workbook -> {
+            XSSFSheet sheet = workbook.createSheet("目标表");
+            sheet.createRow(0);
+            Row dataRow = sheet.createRow(1);
+            dataRow.createCell(0).setCellValue("a");
+        });
+
+        ServiceException precheckEx = assertThrows(ServiceException.class,
+                () -> precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID));
+        assertTrue(precheckEx.getMessage().contains("没有任何非空表头"));
+
+        ServiceException importEx = assertThrows(ServiceException.class,
+                () -> runImport(bytes, paramsJson(bytes, null, null, null, null, null)));
+        assertTrue(importEx.getMessage().contains("没有任何非空表头"));
+
+        // 零写入（含替换删除段不执行）
+        verify(noteRecordMapper, never()).deleteNoteRecordByDwtableId(any(Long.class));
+        verify(noteDwtableItemMapper, never()).deleteNoteDwtableItemByDwtId(any(Long.class));
+        verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
+    }
+
+    // ===== 自引用 21 列被删但配对列被表头保留 → 不级联删配对列 =====
+
+    @Test
+    void replace_selfReferencingDoubleLink_keptPairNotCascaded()
+    {
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
+                column(101L, "名称", 1L, null, 0L),
+                column(104L, "关联", 21L, "{\"table_id\":60,\"back_field_id\":502}", 0L),
+                column(502L, "配对列", 21L, "{\"table_id\":60,\"back_field_id\":104}", 0L)));
+
+        // "关联"不在 Excel（将删除）；"配对列"被同名表头保留（空单元格不建关联）
+        byte[] bytes = singleSheetBytes(new String[] {"名称", "配对列"},
+                Collections.singletonList(new String[] {"a", ""}));
+
+        ExcelImportPrecheckResult precheck =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
+        assertEquals(1, precheck.getReplaceImpact().getDeletedColumns().size());
+        assertEquals("关联", precheck.getReplaceImpact().getDeletedColumns().get(0).getColumnName());
+
+        runImport(bytes, paramsJson(bytes, null, null, null, null, null, "[\"关联\"]"));
+
+        // 源 21 列删除，配对列被 Excel 保留 → guard 跳过级联（pairId ∈ 存活列集）
+        verify(noteColumnMapper).deleteNoteColumnById(104L);
+        verify(noteColumnMapper, never()).deleteNoteColumnById(502L);
+        verify(noteDwtableItemMapper, never()).deleteNoteDwtableItemByColumnId(502L);
+        // 配对列数据正常导入（空单元格 → 空串 item）
+        verify(noteDwtableItemMapper, times(1)).insertNoteDwtableItems(itemsCaptor.capture());
+        List<NoteDwtableItem> items = itemsCaptor.getValue();
+        assertEquals(2, items.size());
+        for (NoteDwtableItem item : items)
+        {
+            if (Long.valueOf(502L).equals(item.getColumnId()))
+            {
+                assertEquals("", item.getValue());
+                assertNull(item.getLinkRecordId());
+            }
+        }
+    }
+
+    // ===== 事务段 pending 新列名与现存列冲突（TOCTOU 窗口内新建）→ drift 拒绝 =====
+
+    @Test
+    void replace_pendingNameConflict_rejected()
+    {
+        // 前置段首次列查询无"新列"；事务段重查含"新列"（模拟预检后用户新建同名列）
+        AtomicInteger targetColumnQueries = new AtomicInteger();
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenAnswer(inv -> {
+            NoteColumn query = inv.getArgument(0);
+            if (DWTABLE_ID.equals(query.getDwtableId()) && targetColumnQueries.incrementAndGet() > 1)
+            {
+                return Arrays.asList(
+                        column(101L, "名称", 1L, null, 0L),
+                        column(102L, "新列", 1L, null, 0L));
+            }
+            return Collections.singletonList(column(101L, "名称", 1L, null, 0L));
+        });
+
+        byte[] bytes = singleSheetBytes(new String[] {"名称", "新列"},
+                Collections.singletonList(new String[] {"a", "x"}));
+
+        ServiceException ex = assertThrows(ServiceException.class,
+                () -> runImport(bytes, paramsJson(bytes, null, null, null, null, null)));
+        assertTrue(ex.getMessage().contains("数据已变化，请重新预检"));
+        assertTrue(ex.getMessage().contains("新列"));
+        assertTrue(ex.getMessage().contains("无法新建同名列"));
+
+        // fail-fast 于任何写入之前（含替换删除段）
+        verify(noteRecordMapper, never()).deleteNoteRecordByDwtableId(any(Long.class));
+        verify(noteDwtableItemMapper, never()).deleteNoteDwtableItemByDwtId(any(Long.class));
+        verify(noteColumnMapper, never()).insertNoteColumn(any(NoteColumn.class));
+    }
+
+    // ===== 无 kept type=1 列 → name 从首个新建文本列的预解析值派生 =====
+
+    @Test
+    void replace_nameDerivedFromNewTextColumn()
+    {
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Collections.singletonList(
+                column(103L, "状态", 3L, "{\"select\":\"进行中,已完成\"}", 0L)));
+
+        byte[] bytes = singleSheetBytes(new String[] {"状态", "名字"}, Arrays.asList(
+                new String[] {"进行中", "张三"},
+                new String[] {"已完成", "李四"}));
+
+        runImport(bytes, paramsJson(bytes, null, null, null, null, null));
+
+        verify(noteRecordMapper, times(2)).insertNoteRecord(recordCaptor.capture());
+        assertEquals("张三", recordCaptor.getAllValues().get(0).getName());
+        assertEquals("李四", recordCaptor.getAllValues().get(1).getName());
+    }
+
+    // ===== 替换删除漂移：baseline.replaceDeletedColumns 不含某将删列 → 拒绝 =====
+
+    @Test
+    void replace_drift_extraDeletion_rejected()
+    {
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
+                column(101L, "名称", 1L, null, 0L),
+                column(102L, "旧列", 1L, null, 0L)));
+
+        byte[] bytes = singleSheetBytes(new String[] {"名称"},
+                Collections.singletonList(new String[] {"a"}));
+
+        // 基线 replaceDeletedColumns 为空（"旧列"为预检后出现）→ 本次将删它 → 漂移拒绝
+        ServiceException ex = assertThrows(ServiceException.class,
+                () -> runImport(bytes, paramsJson(bytes, null, null, null, null, null)));
+        assertTrue(ex.getMessage().contains("数据已变化，请重新预检"));
+        assertTrue(ex.getMessage().contains("旧列"));
+        assertTrue(ex.getMessage().contains("本次导入将删除它"));
+
+        // 前置段拒绝：零写入（含替换删除段不执行）
+        verify(noteRecordMapper, never()).deleteNoteRecordByDwtableId(any(Long.class));
+        verify(noteColumnMapper, never()).deleteNoteColumnById(any(Long.class));
+        verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
     }
 }

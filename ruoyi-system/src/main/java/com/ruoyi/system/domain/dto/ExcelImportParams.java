@@ -81,11 +81,11 @@ public class ExcelImportParams
 
     /**
      * 预检基线（KTD5 反向漂移比对基线）：阶段二重新匹配后，
-     * 出现基线之外的未命中名/歧义变化/缺参列即判定数据已变化，整体拒绝。
+     * 出现基线之外的未命中名/歧义变化/缺参列/替换删除列即判定数据已变化，整体拒绝。
      */
     public static class PrecheckBaseline
     {
-        /** 预检时缺参列名（含缺列/缺值/违规/关联缺列/关联未命中涉及的列） */
+        /** 预检时缺参列名（缺值/类型违规/关联未命中涉及的列） */
         private List<String> missingColumns = new ArrayList<>();
 
         /** 预检时全部未命中名（键=列名+名，KTD7 选择器分组口径） */
@@ -93,6 +93,12 @@ public class ExcelImportParams
 
         /** 预检时歧义项（键=列名+名，含预选记录 id，供阶段二比对预选变化） */
         private List<BaselineAmbiguity> ambiguity = new ArrayList<>();
+
+        /** 预检时将被删除的列名（替换式语义：阶段二出现基线之外的删除列即漂移拒绝） */
+        private List<String> replaceDeletedColumns = new ArrayList<>();
+
+        /** 预检时将新建的列名（信息性基线；阶段二超出不拒绝） */
+        private List<String> replaceNewColumns = new ArrayList<>();
 
         public List<String> getMissingColumns()
         {
@@ -122,6 +128,26 @@ public class ExcelImportParams
         public void setAmbiguity(List<BaselineAmbiguity> ambiguity)
         {
             this.ambiguity = ambiguity;
+        }
+
+        public List<String> getReplaceDeletedColumns()
+        {
+            return replaceDeletedColumns;
+        }
+
+        public void setReplaceDeletedColumns(List<String> replaceDeletedColumns)
+        {
+            this.replaceDeletedColumns = replaceDeletedColumns;
+        }
+
+        public List<String> getReplaceNewColumns()
+        {
+            return replaceNewColumns;
+        }
+
+        public void setReplaceNewColumns(List<String> replaceNewColumns)
+        {
+            this.replaceNewColumns = replaceNewColumns;
         }
     }
 

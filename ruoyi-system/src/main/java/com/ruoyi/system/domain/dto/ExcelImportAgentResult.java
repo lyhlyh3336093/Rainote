@@ -45,6 +45,9 @@ public class ExcelImportAgentResult
     /** 未覆盖缺参清单（仅失败态：columnValues 未覆盖的基础列缺参 + 无法覆盖的关联类缺参） */
     private List<ExcelImportPrecheckResult.MissingParam> missingParams = new ArrayList<>();
 
+    /** 替换式导入影响面（仅成功态：删除行/删除列/新建列/跨表引用清空摘要，供用户知悉） */
+    private ExcelImportPrecheckResult.ReplaceImpact replaceImpact;
+
     public boolean isSuccess()
     {
         return success;
@@ -123,5 +126,15 @@ public class ExcelImportAgentResult
     public void setMissingParams(List<ExcelImportPrecheckResult.MissingParam> missingParams)
     {
         this.missingParams = missingParams;
+    }
+
+    public ExcelImportPrecheckResult.ReplaceImpact getReplaceImpact()
+    {
+        return replaceImpact;
+    }
+
+    public void setReplaceImpact(ExcelImportPrecheckResult.ReplaceImpact replaceImpact)
+    {
+        this.replaceImpact = replaceImpact;
     }
 }
