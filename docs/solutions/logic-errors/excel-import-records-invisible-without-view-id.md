@@ -81,7 +81,7 @@ WHERE r.viewId IS NULL;
 
 - **任何写 `note_record` 的链路必须给 viewId 赋值**（UI 建行、Excel 导入、SQL 导入、agent record.create）——写完先过"网格能不能查到"这一关
 - 测试断言：`replace_recordsCarryDefaultViewId`（NoteDwtableExcelImportServiceImplTest）用 recordCaptor 断言每条 insert 的记录携带首视图 id
-- ⚠️ **SQL 导入（NoteDwtableImportServiceImpl.appendRecord）存在同样隐患未修**——其记录同样 viewId=null，下次 SQL 导入后同样不可见，修复方式相同（解析首视图 + setViewId）
+- SQL 导入（NoteDwtableImportServiceImpl.appendRecord）同源隐患已于 2026-09-22 修复：`ImportContext.defaultViewId` 携带首视图（`resolveDefaultViewId` 同模式），round-trip 用例断言 viewId=901、`importData_noView_fallsBackToNullViewId` 覆盖无视图退化
 - 排查"导入成功但不显示"类问题的证据链：先查 `note_record.viewId` 是否为 NULL → 再查 items/列完整性 → 最后才怀疑前端刷新
 
 ## Related Issues

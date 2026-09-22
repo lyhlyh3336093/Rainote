@@ -22,11 +22,13 @@ import com.ruoyi.system.domain.NoteColumn;
 import com.ruoyi.system.domain.NoteDwtable;
 import com.ruoyi.system.domain.NoteDwtableItem;
 import com.ruoyi.system.domain.NoteRecord;
+import com.ruoyi.system.domain.NoteView;
 import com.ruoyi.system.domain.dto.ParsedInsert;
 import com.ruoyi.system.mapper.NoteColumnMapper;
 import com.ruoyi.system.mapper.NoteDwtableItemMapper;
 import com.ruoyi.system.mapper.NoteDwtableMapper;
 import com.ruoyi.system.mapper.NoteRecordMapper;
+import com.ruoyi.system.mapper.NoteViewMapper;
 import com.ruoyi.system.service.INoteDwtableImportService;
 
 /**
@@ -37,7 +39,9 @@ import com.ruoyi.system.service.INoteDwtableImportService;
  *   <li>每行 {@code NoteRecord} 单条 insert 取自增 id（KTD5）</li>
  *   <li>同行 {@code NoteDwtableItem} 累积后通过 MyBatis {@code foreach} 批量 insert
  *       （单批上限 500 单元格，Deferred），全程 {@code #{}} 参数化禁 {@code ${}}</li>
- *   <li>默认值策略重新实现（KTD2）：dwtableId=目标表 id；viewId/property/linkRecordId/linkName=null；
+ *   <li>默认值策略重新实现（KTD2）：dwtableId=目标表 id；viewId=目标表首视图
+ *       （网格 dataList 按视图 viewId 过滤记录，无归属视图的记录不显示）；
+ *       property/linkRecordId/linkName=null；
  *       sort=当前最大 sort+1 递增（F2 追加语义，区别 UI 新路径 sort=null）；
  *       name 派生语义与 {@code deriveRecordName(dwtableId, null, items)} 等价（首个 type=1 列值），
  *       但在上下文预解析派生源列后内联取值，避免导入循环内每行重查列定义（N+1）；不调用整个 insertNoteRecord</li>
@@ -81,6 +85,10 @@ public class NoteDwtableImportServiceImpl implements INoteDwtableImportService
 
     @Autowired
     private NoteDwtableMapper noteDwtableMapper;
+
+    /** 导入记录的归属视图解析（网格 dataList 按视图 viewId 过滤记录） */
+    @Autowired
+    private NoteViewMapper noteViewMapper;
 
     @Autowired
     private AgentOwnershipChecker agentOwnershipChecker;
@@ -217,7 +225,24 @@ public class NoteDwtableImportServiceImpl implements INoteDwtableImportService
         // F2：导入 sort = 当前最大 sort + 1 递增（空表视为 0 → 从 1 开始）
         Long maxSort = noteRecordMapper.selectMaxSortByDwtableId(dwtableId);
         long firstSort = (maxSort == null ? 0L : maxSort) + 1;
-        return new ImportContext(noteId, dwtableId, userId, columnByName, nameColumnId, firstSort, BATCH_LIMIT);
+        return new ImportContext(noteId, dwtableId, userId, columnByName, nameColumnId,
+                firstSort, BATCH_LIMIT, resolveDefaultViewId(dwtableId));
+    }
+
+    /**
+     * 解析导入记录的目标视图 id：网格数据接口（{@code selectDataListByDwtableId}）按
+     * 视图 viewId 过滤记录——viewId 为空的记录不显示；UI 建行携带当前视图 id，
+     * 导入分配目标表首视图（dataList 为全视图并集，挂任一视图即可显示）。
+     * 表无视图（异常形态，dataList 本就返回空）返回 null，退化为不携带。
+     */
+    private Long resolveDefaultViewId(Long dwtableId)
+    {
+        List<NoteView> views = noteViewMapper.selectNoteViewListByDwtableId(dwtableId);
+        if (views == null || views.isEmpty() || views.get(0) == null)
+        {
+            return null;
+        }
+        return views.get(0).getId();
     }
 
     /**
@@ -271,7 +296,9 @@ public class NoteDwtableImportServiceImpl implements INoteDwtableImportService
         NoteRecord record = new NoteRecord();
         record.setDwtableId(ctx.dwtableId);
         record.setSort(ctx.allocateSort());
-        // viewId/property/linkRecordId/linkName 保持 null（KTD2 UI 新增路径默认值）
+        // 归属视图：网格 dataList 按视图 viewId 过滤记录，导入记录携带目标表首视图
+        //（与 UI 建行同语义；property/linkRecordId/linkName 保持 null）
+        record.setViewId(ctx.defaultViewId);
         // name 派生（KTD2 语义：首个 type=1 列值；内联实现避免行级 N+1 列查询）
         record.setName(deriveName(ctx, rowItems));
         noteRecordMapper.insertNoteRecord(record);

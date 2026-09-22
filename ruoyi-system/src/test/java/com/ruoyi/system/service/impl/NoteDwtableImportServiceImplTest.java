@@ -27,11 +27,13 @@ import com.ruoyi.system.domain.NoteColumn;
 import com.ruoyi.system.domain.NoteDwtable;
 import com.ruoyi.system.domain.NoteDwtableItem;
 import com.ruoyi.system.domain.NoteRecord;
+import com.ruoyi.system.domain.NoteView;
 import com.ruoyi.system.domain.dto.ParsedInsert;
 import com.ruoyi.system.mapper.NoteColumnMapper;
 import com.ruoyi.system.mapper.NoteDwtableItemMapper;
 import com.ruoyi.system.mapper.NoteDwtableMapper;
 import com.ruoyi.system.mapper.NoteRecordMapper;
+import com.ruoyi.system.mapper.NoteViewMapper;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -74,6 +76,10 @@ class NoteDwtableImportServiceImplTest
 
     @Mock
     private NoteDwtableMapper noteDwtableMapper;
+
+    /** 导入记录归属视图解析（service 新注入；网格 dataList 按视图 viewId 过滤记录） */
+    @Mock
+    private NoteViewMapper noteViewMapper;
 
     @Mock
     private AgentOwnershipChecker agentOwnershipChecker;
@@ -125,10 +131,22 @@ class NoteDwtableImportServiceImplTest
                 .thenReturn(Arrays.asList(column(101L, "名称", 1L), column(102L, "数量", 2L)));
     }
 
+    /** 目标表首视图（id=901"表格视图"）——导入记录的归属视图 */
+    private void mockFirstView()
+    {
+        NoteView view = new NoteView();
+        view.setId(901L);
+        view.setDwtableId(DWTABLE_ID);
+        view.setName("表格视图");
+        when(noteViewMapper.selectNoteViewListByDwtableId(DWTABLE_ID))
+                .thenReturn(Collections.singletonList(view));
+    }
+
     @Test
     void importData_roundTrip_createsRecordsAndItems()
     {
         mockStandardColumns();
+        mockFirstView();
         List<ParsedInsert> parsedList = Arrays.asList(
                 parsed(10L, "名称", "foo", "数量", "1"),
                 parsed(11L, "名称", "bar", "数量", "2"),
@@ -137,7 +155,8 @@ class NoteDwtableImportServiceImplTest
         int count = importService.importData(NOTE_ID, DWTABLE_ID, parsedList, USER_ID);
 
         assertEquals(3, count);
-        // AE1 + F2：3 条 NoteRecord，sort=max+1 起递增（6/7/8），name 由首个 type=1 列值派生，默认值 null
+        // AE1 + F2：3 条 NoteRecord，sort=max+1 起递增（6/7/8），name 由首个 type=1 列值派生，
+        // 携带归属视图 id（网格 dataList 按视图 viewId 过滤记录），其余默认值 null
         ArgumentCaptor<NoteRecord> recordCaptor = ArgumentCaptor.forClass(NoteRecord.class);
         verify(noteRecordMapper, times(3)).insertNoteRecord(recordCaptor.capture());
         List<NoteRecord> records = recordCaptor.getAllValues();
@@ -147,7 +166,8 @@ class NoteDwtableImportServiceImplTest
             assertEquals(Long.valueOf(6L + i), records.get(i).getSort());
             // name 派生语义：首个 type=1 列（名称）的本行值
             assertEquals(Arrays.asList("foo", "bar", "baz").get(i), records.get(i).getName());
-            assertNull(records.get(i).getViewId());
+            // 归属视图：目标表首视图（无 viewId 的记录在网格中不可见）
+            assertEquals(Long.valueOf(901L), records.get(i).getViewId());
             assertNull(records.get(i).getProperty());
             assertNull(records.get(i).getLinkRecordId());
             assertNull(records.get(i).getLinkName());
@@ -176,6 +196,23 @@ class NoteDwtableImportServiceImplTest
         assertEquals("foo", items.get(0).getValue());
         assertEquals("1", items.get(1).getValue());
         assertEquals("baz", items.get(4).getValue());
+    }
+
+    @Test
+    void importData_noView_fallsBackToNullViewId()
+    {
+        mockStandardColumns();
+        // 不打桩 noteViewMapper（LENIENT 默认返回空列表）= 目标表无视图的异常形态：
+        // viewId 退化为 null 不阻断导入（dataList 对无视图表本就返回空）
+        List<ParsedInsert> parsedList = Collections.singletonList(
+                parsed(10L, "名称", "foo", "数量", "1"));
+
+        int count = importService.importData(NOTE_ID, DWTABLE_ID, parsedList, USER_ID);
+
+        assertEquals(1, count);
+        ArgumentCaptor<NoteRecord> recordCaptor = ArgumentCaptor.forClass(NoteRecord.class);
+        verify(noteRecordMapper, times(1)).insertNoteRecord(recordCaptor.capture());
+        assertNull(recordCaptor.getValue().getViewId());
     }
 
     @Test

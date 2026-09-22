@@ -15,6 +15,8 @@ import com.ruoyi.system.domain.NoteColumn;
  *       匹配时区分大小写 {@code String.equals}，KTD4）</li>
  *   <li>sort 起点：目标表当前最大 sort + 1，逐行递增分配（F2 追加语义）</li>
  *   <li>batchLimit：NoteDwtableItem 批量 insert 单批单元格上限（Deferred 初始 500）</li>
+ *   <li>defaultViewId：导入记录的归属视图 id（目标表首视图；网格 dataList 按视图
+ *       viewId 过滤记录，无 viewId 的记录不显示；表无视图时为 null 退化为不携带）</li>
  * </ul>
  *
  * @author ruoyi
@@ -42,9 +44,12 @@ class ImportContext
     /** NoteDwtableItem 批量 insert 单批上限（单元格数） */
     final int batchLimit;
 
+    /** 导入记录的归属视图 id（目标表首视图；无视图时 null，退化为不携带） */
+    final Long defaultViewId;
+
     ImportContext(Long noteId, Long dwtableId, Long userId,
                   Map<String, NoteColumn> columnByName, Long nameColumnId,
-                  long firstSort, int batchLimit)
+                  long firstSort, int batchLimit, Long defaultViewId)
     {
         this.noteId = noteId;
         this.dwtableId = dwtableId;
@@ -53,6 +58,7 @@ class ImportContext
         this.nameColumnId = nameColumnId;
         this.nextSort = firstSort;
         this.batchLimit = batchLimit;
+        this.defaultViewId = defaultViewId;
     }
 
     /**
