@@ -40,6 +40,7 @@ import com.ruoyi.system.domain.NoteColumn;
 import com.ruoyi.system.domain.NoteDwtable;
 import com.ruoyi.system.domain.NoteDwtableItem;
 import com.ruoyi.system.domain.NoteRecord;
+import com.ruoyi.system.domain.NoteView;
 import com.ruoyi.system.domain.dto.ExcelImportAgentResult;
 import com.ruoyi.system.domain.dto.ExcelImportParams;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult;
@@ -62,6 +63,7 @@ import com.ruoyi.system.mapper.NoteDwtableItemMapper;
 import com.ruoyi.system.mapper.NoteDwtableMapper;
 import com.ruoyi.system.mapper.NoteNotelinkMapper;
 import com.ruoyi.system.mapper.NoteRecordMapper;
+import com.ruoyi.system.mapper.NoteViewMapper;
 import com.ruoyi.system.service.INoteDwtableExcelImportService;
 import com.ruoyi.system.service.INoteRecordService;
 import com.ruoyi.system.service.impl.ExcelColumnMatcher.ColumnMapping;
@@ -163,6 +165,10 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     /** 替换式导入：被删列的孤儿语义链接清理（byColumnId） */
     @Autowired
     private NoteNotelinkMapper noteNotelinkMapper;
+
+    /** 导入记录的目标视图解析（网格 dataList 按视图 viewId 过滤记录） */
+    @Autowired
+    private NoteViewMapper noteViewMapper;
 
     @Autowired
     private AgentOwnershipChecker agentOwnershipChecker;
@@ -2314,6 +2320,9 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         int recordCount = 0;
         if (!plan.rows.isEmpty())
         {
+            // 记录归属视图：网格数据接口按视图 viewId 过滤记录（无 viewId 的记录不显示），
+            // UI 建行携带当前视图 id，导入分配目标表首视图（dataList 为全视图并集，任一视图即可显示）
+            Long targetViewId = resolveDefaultViewId(plan.dwtableId);
             Long maxSort = noteRecordMapper.selectMaxSortByDwtableId(plan.dwtableId);
             long sort = (maxSort == null ? 0L : maxSort.longValue()) + 1L;
             List<NoteDwtableItem> batch = new ArrayList<>(BATCH_LIMIT);
@@ -2321,9 +2330,10 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             {
                 NoteRecord record = new NoteRecord();
                 record.setDwtableId(plan.dwtableId);
+                record.setViewId(targetViewId);
                 record.setSort(Long.valueOf(sort++));
                 record.setName(row.name);
-                // viewId/property/linkRecordId/linkName 保持 null（对齐 SQL 导入）
+                // property/linkRecordId/linkName 保持 null（对齐 SQL 导入）
                 noteRecordMapper.insertNoteRecord(record);
                 row.record = record;
                 for (NoteDwtableItem item : row.items)
@@ -2513,6 +2523,22 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             fresh.setIsShow(0L);
             noteColumnMapper.updateNoteColumn(fresh);
         }
+    }
+
+    /**
+     * 解析导入记录的目标视图 id：网格数据接口（{@code selectDataListByDwtableId}）按
+     * 视图 viewId 过滤记录——viewId 为空的记录不显示；UI 建行携带当前视图 id，
+     * 导入分配目标表首视图（dataList 为全视图并集，挂任一视图即可显示）。
+     * 表无视图（异常形态，dataList 本就返回空）返回 null，退化为不携带。
+     */
+    private Long resolveDefaultViewId(Long dwtableId)
+    {
+        List<NoteView> views = noteViewMapper.selectNoteViewListByDwtableId(dwtableId);
+        if (views == null || views.isEmpty() || views.get(0) == null)
+        {
+            return null;
+        }
+        return views.get(0).getId();
     }
 
     /**

@@ -43,6 +43,7 @@ import com.ruoyi.system.domain.NoteColumn;
 import com.ruoyi.system.domain.NoteDwtable;
 import com.ruoyi.system.domain.NoteDwtableItem;
 import com.ruoyi.system.domain.NoteRecord;
+import com.ruoyi.system.domain.NoteView;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.AmbiguityItem;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.ClearedLinkColumn;
@@ -60,6 +61,7 @@ import com.ruoyi.system.mapper.NoteDwtableItemMapper;
 import com.ruoyi.system.mapper.NoteDwtableMapper;
 import com.ruoyi.system.mapper.NoteNotelinkMapper;
 import com.ruoyi.system.mapper.NoteRecordMapper;
+import com.ruoyi.system.mapper.NoteViewMapper;
 import com.ruoyi.system.service.INoteRecordService;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -131,6 +133,10 @@ class NoteDwtableExcelImportServiceImplTest
     /** 替换式导入：被删列的孤儿语义链接清理（service 新注入，@InjectMocks 自动装配） */
     @Mock
     private NoteNotelinkMapper noteNotelinkMapper;
+
+    /** 导入记录归属视图解析（service 新注入；网格 dataList 按视图 viewId 过滤记录） */
+    @Mock
+    private NoteViewMapper noteViewMapper;
 
     @Mock
     private AgentOwnershipChecker agentOwnershipChecker;
@@ -2091,6 +2097,35 @@ class NoteDwtableExcelImportServiceImplTest
         for (int i = 0; i < 3; i++)
         {
             assertEquals("a" + (i + 1), recordCaptor.getAllValues().get(i).getName());
+        }
+    }
+
+    // ===== 导入记录携带归属视图：网格 dataList 按视图 viewId 过滤记录（无 viewId 不显示） =====
+
+    @Test
+    void replace_recordsCarryDefaultViewId()
+    {
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Collections.singletonList(
+                column(101L, "名称", 1L, null, 0L)));
+        NoteView view = new NoteView();
+        view.setId(901L);
+        view.setDwtableId(DWTABLE_ID);
+        view.setName("表格视图");
+        when(noteViewMapper.selectNoteViewListByDwtableId(DWTABLE_ID))
+                .thenReturn(Collections.singletonList(view));
+
+        byte[] bytes = singleSheetBytes(new String[] {"名称"}, Arrays.asList(
+                new String[] {"r1"},
+                new String[] {"r2"}));
+
+        int count = runImport(bytes, paramsJson(bytes, null, null, null, null, null));
+        assertEquals(2, count);
+
+        // 每条插入记录携带目标表首视图 id（UI 建行同语义；dataList 按视图过滤，无 viewId 的记录不显示）
+        verify(noteRecordMapper, times(2)).insertNoteRecord(recordCaptor.capture());
+        for (NoteRecord inserted : recordCaptor.getAllValues())
+        {
+            assertEquals(Long.valueOf(901L), inserted.getViewId());
         }
     }
 

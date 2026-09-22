@@ -42,6 +42,7 @@ import com.ruoyi.system.mapper.NoteDwtableItemMapper;
 import com.ruoyi.system.mapper.NoteDwtableMapper;
 import com.ruoyi.system.mapper.NoteNotelinkMapper;
 import com.ruoyi.system.mapper.NoteRecordMapper;
+import com.ruoyi.system.mapper.NoteViewMapper;
 import com.ruoyi.system.service.INoteRecordService;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -95,6 +96,10 @@ class NoteDwtableExcelImportAgentTest
     /** 替换式导入：被删列的孤儿语义链接清理（service 新注入，@InjectMocks 自动装配） */
     @Mock
     private NoteNotelinkMapper noteNotelinkMapper;
+
+    /** 导入记录归属视图解析（service 新注入；网格 dataList 按视图 viewId 过滤记录） */
+    @Mock
+    private NoteViewMapper noteViewMapper;
 
     @Mock
     private AgentOwnershipChecker agentOwnershipChecker;
