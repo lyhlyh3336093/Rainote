@@ -128,6 +128,7 @@ export default defineComponent({
   setup() {
     const store = useStore();
     const route = useRoute();
+    const router = useRouter();
     const height = computed(() => {
       return route.query?.code ? 370 : window.innerHeight - 250
     })
@@ -243,13 +244,11 @@ export default defineComponent({
         if (data?.value) {
           datasheet.state.list = data.value.data;
           if (!route.query?.code) {
-            const id = data.value?.data?.[0]?.id;
+            // 初始化以 URL 指定的表优先（/base/:noteId/:tableId，如语义链接跳转直达），否则默认第一张
+            const id = route.params.tableId ? Number(route.params.tableId) : data.value?.data?.[0]?.id;
             datasheet.state.selectedKeys = [id];
             store.datasheetChange(id);
             view.get(id);
-          }
-          if (route.params.tableId) {
-            datasheet.state.selectedKeys = [Number(route.params.tableId)];
           }
         }
       },
@@ -272,11 +271,17 @@ export default defineComponent({
         }
       },
       select(target) {
+        // antd 树重复点击已选中节点触发 deselect（target 为空数组）——直接忽略
+        if (!target || !target.length) return;
         if (datasheetID.value === target[0]) return;
         view.state.list = [];
         view.state.current = {}
         store.viewChange(false);
         store.datasheetChange(target[0]);
+        // 同步 URL 到当前表：刷新页面可恢复，且避免 view.get 被旧 URL 的 tableId 劫持
+        if (!route.query?.code) {
+          router.replace(`/base/${route.params.id}/${target[0]}`);
+        }
         nextTick(() => {
           view.get(target[0]);
         })
@@ -294,9 +299,6 @@ export default defineComponent({
       }),
       async get(id) {
         if (!id) return;
-        if (route.params.tableId) {
-          id = route.params.tableId
-        }
         store.datasheetID = id;
         const {data} = await useFetch(`/system/view/list?dwtableId=${id}`).get().json();
         if (data?.value) {
