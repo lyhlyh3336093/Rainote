@@ -880,8 +880,6 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         Map<String, TreeSet<Integer>> missRowsByName = new LinkedHashMap<>();
         // 歧义名 → 同名记录列表（匹配中才登记）
         Map<String, List<NoteRecord>> ambiguityByName = new LinkedHashMap<>();
-        // 命中的 distinct 记录 id（含歧义预选与整串/拆分命中的并集，R11 影响面）
-        Set<Long> matchedRecordIds = new LinkedHashSet<>();
 
         for (int r = 0; r < rows.size(); r++)
         {
@@ -899,7 +897,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                 List<NoteRecord> matched = recordsByName.get(name);
                 if (matched != null)
                 {
-                    collectMatch(name, matched, matchedRecordIds, ambiguityByName);
+                    collectMatch(name, matched, ambiguityByName);
                 }
                 else
                 {
@@ -938,15 +936,29 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             param.setMissNames(missNames);
             result.getMissingParams().add(param);
         }
-        // 对称写入影响：仅 21 双向关联列（16/R11）
-        if (type == ExcelColumnMatcher.TYPE_DOUBLE_LINK && !matchedRecordIds.isEmpty())
-        {
-            SymmetricWriteImpact impact = new SymmetricWriteImpact();
-            impact.setTableName(context.getTable().getName());
-            impact.setAffectedRecordCount(matchedRecordIds.size());
-            result.getSymmetricWriteImpact().add(impact);
-        }
         // 选择器候选（U6 内嵌数据源）：按 sort 升序前 CANDIDATE_LIMIT 条
+        emitRelationCandidates(result, column, context);
+    }
+
+    /**
+     * 收集一次命中：同名多条登记歧义（R14）。
+     */
+    private static void collectMatch(String name, List<NoteRecord> matched,
+            Map<String, List<NoteRecord>> ambiguityByName)
+    {
+        if (matched.size() > 1)
+        {
+            ambiguityByName.putIfAbsent(name, matched);
+        }
+    }
+
+    /**
+     * 发射关联列选择器候选（18/21 列预检共用，KTD7 内嵌数据源口径一致）：
+     * 按 sort 升序前 {@link #CANDIDATE_LIMIT} 条（21 列已无补选入口，仅供前端兼容）。
+     */
+    private static void emitRelationCandidates(ExcelImportPrecheckResult result, NoteColumn column,
+            LinkTableContext context)
+    {
         RelationCandidates relationCandidates = new RelationCandidates();
         relationCandidates.setColumnId(column.getId());
         List<RecordCandidate> candidates = new ArrayList<>(
@@ -964,16 +976,54 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     }
 
     /**
-     * 收集一次命中：预选记录（sort 靠前首条）计入影响面；同名多条登记歧义（R14）。
+     * 链接失败条目落地为预检 DTO（U3/U4 共用）：21/25 列单元格解析的失败条目按
+     * （列、行号）定位组装 {@link LinkFailure}（R8 新分组，与缺参清单并列阻断）。
      */
-    private static void collectMatch(String name, List<NoteRecord> matched, Set<Long> matchedRecordIds,
-            Map<String, List<NoteRecord>> ambiguityByName)
+    private static void appendLinkFailures(ExcelImportPrecheckResult result, NoteColumn column,
+            int rowNumber, List<LinkEntryFailure> failures)
     {
-        matchedRecordIds.add(matched.get(0).getId());
-        if (matched.size() > 1)
+        for (LinkEntryFailure failure : failures)
         {
-            ambiguityByName.putIfAbsent(name, matched);
+            LinkFailure item = new LinkFailure();
+            item.setColumnId(column.getId());
+            item.setColumnName(dtoColumnName(column));
+            item.setRowNumber(rowNumber);
+            item.setEntryText(failure.entryText);
+            item.setReason(failure.reason);
+            item.setExplanation(failure.explanation);
+            result.getLinkFailures().add(item);
         }
+    }
+
+    /**
+     * `_ID` 锚点列单元格的逐 id 解析（U3/U4 双轨制共用）：逗号拆分、trim、去空 token；
+     * 非法 token 记 null 占位（保留位置，按未命中走名称回退）。
+     */
+    private static List<Long> parseIdEntries(String idText)
+    {
+        List<Long> ids = new ArrayList<>();
+        if (idText != null && !idText.trim().isEmpty())
+        {
+            for (String part : idText.split(","))
+            {
+                String token = part.trim();
+                if (token.isEmpty())
+                {
+                    continue;
+                }
+                Long id;
+                try
+                {
+                    id = Long.valueOf(token);
+                }
+                catch (NumberFormatException e)
+                {
+                    id = null;
+                }
+                ids.add(id);
+            }
+        }
+        return ids;
     }
 
     // ==================== 21 列双轨解析（U3：ID 优先、名称回退） ====================
@@ -1013,17 +1063,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                 }
             }
             declaredPerRow.add(declared);
-            for (LinkEntryFailure failure : resolution.failures)
-            {
-                LinkFailure item = new LinkFailure();
-                item.setColumnId(column.getId());
-                item.setColumnName(dtoColumnName(column));
-                item.setRowNumber(row.getRowNumber());
-                item.setEntryText(failure.entryText);
-                item.setReason(failure.reason);
-                item.setExplanation(failure.explanation);
-                result.getLinkFailures().add(item);
-            }
+            appendLinkFailures(result, column, row.getRowNumber(), resolution.failures);
         }
         if (column.getId() != null)
         {
@@ -1039,20 +1079,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             result.getSymmetricWriteImpact().add(impact);
         }
         // 选择器候选（KTD7 发射口径与现状一致，供前端兼容）
-        RelationCandidates relationCandidates = new RelationCandidates();
-        relationCandidates.setColumnId(column.getId());
-        List<RecordCandidate> candidates = new ArrayList<>(
-                Math.min(CANDIDATE_LIMIT, context.getSortedRecords().size()));
-        for (int i = 0; i < context.getSortedRecords().size() && i < CANDIDATE_LIMIT; i++)
-        {
-            NoteRecord record = context.getSortedRecords().get(i);
-            RecordCandidate candidate = new RecordCandidate();
-            candidate.setRecordId(record.getId());
-            candidate.setName(record.getName() == null ? "" : record.getName());
-            candidates.add(candidate);
-        }
-        relationCandidates.setCandidates(candidates);
-        result.getRelationCandidates().add(relationCandidates);
+        emitRelationCandidates(result, column, context);
     }
 
     /**
@@ -1076,28 +1103,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         Map<String, List<NoteRecord>> recordsByName = context.getRecordsByName();
 
         // `_ID` 逐 id 解析（逗号拆分、trim、去空 token；非法 token 记 null 占位、按未命中走名称回退）
-        List<Long> ids = new ArrayList<>();
-        if (idText != null && !idText.trim().isEmpty())
-        {
-            for (String part : idText.split(","))
-            {
-                String token = part.trim();
-                if (token.isEmpty())
-                {
-                    continue;
-                }
-                Long id;
-                try
-                {
-                    id = Long.valueOf(token);
-                }
-                catch (NumberFormatException e)
-                {
-                    id = null;
-                }
-                ids.add(id);
-            }
-        }
+        List<Long> ids = parseIdEntries(idText);
 
         if (!ids.isEmpty())
         {
@@ -1219,17 +1225,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             String nameText = mapping.cellText(row, headerIndex);
             SemanticCellResolution resolution =
                     resolveSemanticLinkCell(idText, nameText, noteContext, notelinkById);
-            for (LinkEntryFailure failure : resolution.failures)
-            {
-                LinkFailure item = new LinkFailure();
-                item.setColumnId(column.getId());
-                item.setColumnName(dtoColumnName(column));
-                item.setRowNumber(row.getRowNumber());
-                item.setEntryText(failure.entryText);
-                item.setReason(failure.reason);
-                item.setExplanation(failure.explanation);
-                result.getLinkFailures().add(item);
-            }
+            appendLinkFailures(result, column, row.getRowNumber(), resolution.failures);
         }
     }
 
@@ -1279,28 +1275,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         SemanticCellResolution resolution = new SemanticCellResolution();
 
         // `_ID` 逐行 id 解析（逗号拆分、trim、去空 token；非法 token 记 null 占位、按未命中走名称回退）
-        List<Long> ids = new ArrayList<>();
-        if (idText != null && !idText.trim().isEmpty())
-        {
-            for (String part : idText.split(","))
-            {
-                String token = part.trim();
-                if (token.isEmpty())
-                {
-                    continue;
-                }
-                Long id;
-                try
-                {
-                    id = Long.valueOf(token);
-                }
-                catch (NumberFormatException e)
-                {
-                    id = null;
-                }
-                ids.add(id);
-            }
-        }
+        List<Long> ids = parseIdEntries(idText);
 
         if (!ids.isEmpty())
         {
@@ -3418,14 +3393,8 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             NoteColumn inboundColumn = context.inboundColumnById.get(inbound.getColumnId());
             // 互指判定前提：捕获条目所在列为 21 且 linkColumnId 指向本表 kept 21 参与列
             //（18 列单向无条件重指向；列属性/linkColumnId 残缺按 18 口径，不扩大破坏半径）
-            List<Set<Long>> declaredPerRow = null;
-            if (inboundColumn != null && inboundColumn.getType() != null
-                    && inboundColumn.getType() == ExcelColumnMatcher.TYPE_DOUBLE_LINK
-                    && inbound.getLinkColumnId() != null
-                    && declaredTargetsByColumnId.containsKey(inbound.getLinkColumnId()))
-            {
-                declaredPerRow = declaredTargetsByColumnId.get(inbound.getLinkColumnId());
-            }
+            List<Set<Long>> declaredPerRow = declaredTargetsForInbound(inboundColumn, inbound,
+                    declaredTargetsByColumnId);
             boolean cellRepointed = false;
             for (String part : splitCsvToList(inbound.getLinkRecordId()))
             {
@@ -3863,14 +3832,8 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             NoteColumn inboundColumn = context.inboundColumnById.get(inbound.getColumnId());
             // 互指判定前提：捕获条目所在列为 21 且 linkColumnId 指向本表 kept 21 参与列
             //（18 列单向无条件重指向；列属性/linkColumnId 残缺按 18 口径，不扩大破坏半径）
-            List<Set<Long>> declaredPerRow = null;
-            if (inboundColumn != null && inboundColumn.getType() != null
-                    && inboundColumn.getType() == ExcelColumnMatcher.TYPE_DOUBLE_LINK
-                    && inbound.getLinkColumnId() != null
-                    && plan.declaredTargetsByColumnId.containsKey(inbound.getLinkColumnId()))
-            {
-                declaredPerRow = plan.declaredTargetsByColumnId.get(inbound.getLinkColumnId());
-            }
+            List<Set<Long>> declaredPerRow = declaredTargetsForInbound(inboundColumn, inbound,
+                    plan.declaredTargetsByColumnId);
             // Set 去重保序合并（value 去重键=recordId，对齐对称写回的追加语义）
             Set<String> mergedRecordIds = new LinkedHashSet<>();
             Set<String> mergedItemIds = new LinkedHashSet<>();
@@ -3999,15 +3962,31 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         }
     }
 
+    /**
+     * 互指判定前提（U5，预检与执行两处共用）：捕获条目所在列为 21 且 linkColumnId 指向
+     * 本表 kept 21 参与列时返回其逐行声明集；否则返回 null（18 列单向无条件重指向；
+     * 列属性/linkColumnId 残缺按 18 口径，不扩大破坏半径）。
+     */
+    private static List<Set<Long>> declaredTargetsForInbound(NoteColumn inboundColumn,
+            NoteDwtableItem inbound, Map<Long, List<Set<Long>>> declaredTargetsByColumnId)
+    {
+        if (inboundColumn != null && inboundColumn.getType() != null
+                && inboundColumn.getType() == ExcelColumnMatcher.TYPE_DOUBLE_LINK
+                && inbound.getLinkColumnId() != null
+                && declaredTargetsByColumnId.containsKey(inbound.getLinkColumnId()))
+        {
+            return declaredTargetsByColumnId.get(inbound.getLinkColumnId());
+        }
+        return null;
+    }
+
     /** 清空条目的导入结果报告文本（他表定位 + 旧记录名 + 原因，供日志与 U6 呈现） */
     private static String repointReport(RepointContext context, NoteDwtableItem inbound,
             String legacyName, String reason)
     {
-        String tableName = context.tableNameByDwtId.containsKey(inbound.getDwtId())
-                ? context.tableNameByDwtId.get(inbound.getDwtId()) : String.valueOf(inbound.getDwtId());
+        String tableName = inboundTableName(context, inbound);
         NoteColumn column = context.inboundColumnById.get(inbound.getColumnId());
-        String columnName = column == null || column.getName() == null
-                ? String.valueOf(inbound.getColumnId()) : column.getName();
+        String columnName = inboundColumnName(inbound, column);
         return "他表“" + tableName + "”列“" + columnName + "”指向本表记录“"
                 + (legacyName == null || legacyName.isEmpty() ? "?" : legacyName) + "”的条目：" + reason;
     }
