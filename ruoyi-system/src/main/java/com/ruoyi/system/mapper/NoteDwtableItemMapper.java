@@ -66,6 +66,20 @@ public interface NoteDwtableItemMapper
 
 
     /**
+     * 按主键锁定查询单行数据（SELECT ... FOR UPDATE，Excel 导入 U5 入链重指向的写前锁读）。
+     * <p>
+     * {@link #updateLinkFieldsById} 前重读现值再合并落库（对齐
+     * {@link #selectNoteDwtableItemByRecordAndColumnForUpdate} 的锁读先例）：入链捕获
+     * （全删前快照）与重指向落库之间他表行可能被并发 UI 编辑，锁读取最新已提交值合并，
+     * 防丢失更新。须在导入事务内调用；行已被级联删除/并发删除时返回 null，调用方自然 no-op。
+     *
+     * @param id 行主键
+     * @return 锁定的行；不存在返回 null
+     */
+    public NoteDwtableItem selectNoteDwtableItemByIdForUpdate(Long id);
+
+
+    /**
      * 新增多维表格数据表内容
      *
      * @param noteDwtableItem 多维表格数据表内容

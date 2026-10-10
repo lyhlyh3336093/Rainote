@@ -28,6 +28,8 @@ import org.mockito.quality.Strictness;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -38,6 +40,8 @@ import static org.mockito.Mockito.when;
  *   <li>R1：21 列名称主列=目标记录名（多值逗号连接、CSV 风格转义），`列名_ID` 副列=linkRecordId 原样</li>
  *   <li>R2：25 列名称主列="引用笔记名（锚词）"条目串（全角括号、锚词空省略），`列名_ID` 副列=NoteNotelink 行 id（顺序一一对应）</li>
  *   <li>R4：悬空引用（目标记录已删/来源笔记已删）写空单元格，不报错不阻断</li>
+ *   <li>性能：25 列笔记标题/表级归属笔记解析走导出全程共享缓存（noteTitleCache，
+ *       对齐 recordNameCache 先例），times() 断言锁定 mapper 调用次数下降</li>
  *   <li>回归红线：18 列导出输出与现状逐字节一致（含 `列名_ID` 副列）</li>
  * </ul>
  * 行结构约定：每行 = [record_id, 每个双列类型的 (ID, 文本) 相邻两格, ...]，与列 sort 顺序对应。
@@ -400,6 +404,41 @@ public class NoteDwtableExportPivotServiceImplTest
 
         assertEquals("601", row.get(1), "悬空条目跳过后 `_ID` 仅含有效行 id");
         assertEquals("笔记甲（词甲）", row.get(2), "悬空条目跳过后名称仅含有效条目");
+    }
+
+    /**
+     * 场景14：25 列缓存命中断言——多行 notelink 指向同一来源笔记/同一目标表时，
+     * 标题查询（selectNoteNoteById）与表级归属查询（selectNoteDwtableById）均仅落库一次
+     * （noteTitleCache 导出全程共享、miss 才落库，对齐 recordNameCache 先例）。
+     */
+    @Test
+    public void testSemanticLinkTitleCacheSingleQueryPerNote()
+    {
+        NoteColumn col = column(203L, "语义关联", 25L, 1L);
+        // 3 行历史 notelink：noteId/linkNoteId 均 null，同 linkDwTableId=800 → 表级归属兜底
+        when(noteNotelinkMapper.selectNoteNotelinkByCell(203L, 501L)).thenReturn(Arrays.asList(
+                notelink(605L, null, "词一", "词一", null, 800L),
+                notelink(606L, null, "词二", "词二", null, 800L),
+                notelink(607L, null, "词三", "词三", null, 800L)));
+        NoteDwtable linkedTable = new NoteDwtable();
+        linkedTable.setId(800L);
+        linkedTable.setNoteId(900L);
+        when(noteDwtableMapper.selectNoteDwtableById(800L)).thenReturn(linkedTable);
+        when(noteNoteMapper.selectNoteNoteById(900L)).thenReturn(note(900L, "兜底笔记"));
+
+        List<String> row = pivotSingleTable(
+                Collections.singletonList(col),
+                Collections.singletonList(record(301L, "行一")),
+                Collections.singletonList(item(501L, 301L, 203L, "", null)),
+                null)
+                .getRows().get(0);
+
+        assertEquals("605,606,607", row.get(1), "3 行 notelink 的 `_ID` 应为行 id 串");
+        assertEquals("兜底笔记（词一）,兜底笔记（词二）,兜底笔记（词三）", row.get(2),
+                "3 行共享同一归属笔记，名称条目仍逐行产出");
+        // 缓存锁定：3 次引用/兜底仅 1 次落库查询（改造前为各查一次共 3 次）
+        verify(noteDwtableMapper, times(1)).selectNoteDwtableById(800L);
+        verify(noteNoteMapper, times(1)).selectNoteNoteById(900L);
     }
 
     // ---------- 18 列（单向关联）回归红线 ----------

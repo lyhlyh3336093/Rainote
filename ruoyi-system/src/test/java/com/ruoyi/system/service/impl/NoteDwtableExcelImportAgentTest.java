@@ -566,6 +566,9 @@ class NoteDwtableExcelImportAgentTest
         existing.setBlockId(701L);
         existing.setContextText("锚词");
         existing.setItemValue("锚词");
+        // 修复 #1：`_ID` 恢复须归属当前 25 列与本表（linkColumnId/linkDwTableId）
+        existing.setLinkDwTableId(DWTABLE_ID);
+        existing.setLinkColumnId(104L);
         when(noteNotelinkMapper.selectNoteNotelinkById(901L)).thenReturn(existing);
         // 25 列重建依赖 item 自增 id（行内坐标 linkItemId）——覆盖 setUp 桩补 useGeneratedKeys 回填
         java.util.concurrent.atomic.AtomicLong itemIdSequence = new java.util.concurrent.atomic.AtomicLong(5000L);
@@ -604,12 +607,13 @@ class NoteDwtableExcelImportAgentTest
         verify(noteNotelinkMapper, never()).insertNoteNotelink(any(NoteNotelink.class));
     }
 
-    /** 笔记桩构造（25 列名称回退的候选标题来源） */
+    /** 笔记桩构造（25 列名称回退的候选标题来源；R23 归属过滤——默认归属当前用户） */
     private NoteNote noteNote(Long id, String title)
     {
         NoteNote note = new NoteNote();
         note.setId(id);
         note.setTitle(title);
+        note.setAuth(USER_ID);
         return note;
     }
 

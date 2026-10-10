@@ -90,6 +90,14 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         where recordId = #{recordId} and columnId = #{columnId}
         for update
     </select>
+
+    <!-- Excel 导入 U5 入链重指向·写前锁读：updateLinkFieldsById 前 FOR UPDATE 重读现值再合并
+         （防"捕获-落库"间隙的并发 UI 编辑丢失更新；行已被级联删除时返回 null，自然 no-op） -->
+    <select id="selectNoteDwtableItemByIdForUpdate" parameterType="Long" resultMap="NoteDwtableItemResult">
+        <include refid="selectNoteDwtableItemVo"/>
+        where id = #{id}
+        for update
+    </select>
         
     <insert id="insertNoteDwtableItem" parameterType="NoteDwtableItem" useGeneratedKeys="true" keyProperty="id">
         insert into note_dwtable_item

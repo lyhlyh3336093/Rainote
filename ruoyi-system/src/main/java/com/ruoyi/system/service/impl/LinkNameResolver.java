@@ -22,13 +22,17 @@ import org.springframework.stereotype.Component;
  *   <li><b>CSV 转义还原</b>：按导出侧 {@code escapeCsvValue} 的逆操作拆分——双引号包裹段
  *       整体读入（段内逗号不拆分）、去包裹、内层双引号翻倍还原（{@code ""} → {@code "}），
  *       非包裹段按英文逗号拆分；</li>
- *   <li><b>逐条目</b>：trim 后空串跳过不计失败（对应"无链接"，R15 同口径）；
- *       按 25 列条目语法剥离锚词——条目以全角"）"结尾且含全角"（"时，首个"（"至末位"）"
- *       之间为锚词（不参与名称匹配），"（"之前为名称（R2）；锚词剥离后未命中则回退以
- *       <b>整条目</b>为名称再匹配（覆盖名称本身含全角括号后缀的形态，如 21 列记录名）；</li>
- *   <li><b>名称匹配四级容错</b>：精确（原名全等）→ 归一化（trim / 全角半角 / 大小写不敏感）→
+ *   <li><b>单条目解析</b>（{@link #resolveEntry}，resolve 逐条目委托——亦供 `_ID` 回退路径
+ *       直取单条目，不二次拆 CSV）：trim 后空串跳过不计失败（对应"无链接"，R15 同口径）；
+ *       条目含锚词语法（以全角"）"结尾且含全角"（"）时的匹配顺序——<b>整条目</b>精确/归一化
+ *       强匹配<b>优先</b>于剥离锚词名匹配（名称本身含全角括号后缀的形态，如 21 列记录名
+ *       "甲（乙）"——防被剥离名"甲"抢占错链），剥离名强匹配次之，其后整条目前缀容错、
+ *       剥离名前缀容错兜底（弱信号最后采信）；</li>
+ *   <li><b>名称匹配三级容错</b>：精确（原名全等）→ 归一化（trim / 全角半角 / 大小写不敏感）→
  *       唯一前缀（归一化形态、前缀长度 ≥2 才触发；多命中即歧义）。任一级命中 1 个即定；
- *       多命中即歧义（R7：歧义即失败，18 列"同名取 sort 最小"为 18 专属，不进本组件）。</li>
+ *       多命中即歧义（R7：歧义即失败，18 列"同名取 sort 最小"为 18 专属，不进本组件）。
+ *       候选池在解析入口<b>一次性预归一化</b>，各级比对直接取用；歧义的容错命中说明
+ *       <b>只报命中数</b>、不回显候选名原文（候选名属他表数据面，防经失败清单泄露）。</li>
  * </ol>
  * 输出为逐条目解析结果（{@link EntryResult}：命中候选 / 歧义（多命中）/ 未命中），
  * 每条附容错命中说明（各级尝试的命中数与来源），供失败清单呈现（R8）。
@@ -39,7 +43,8 @@ import org.springframework.stereotype.Component;
 public class LinkNameResolver
 {
     /**
-     * 单元格文本逐条目解析（预检与执行两阶段共用）。
+     * 单元格文本逐条目解析（预检与执行两阶段共用）。候选池在入口一次性预归一化
+     * （整串级与全部条目共享），各级比对直接取用。
      *
      * @param cellText       单元格文本（null / 纯空白 → 无条目，对应"无链接"）
      * @param candidateNames 候选名列表（调用方传入，可含重复——重复名视为同名多条、判歧义）
@@ -51,7 +56,7 @@ public class LinkNameResolver
         {
             return Collections.emptyList();
         }
-        List<String> candidates = candidateNames == null ? Collections.emptyList() : candidateNames;
+        CandidatePool pool = buildPool(candidateNames);
         String trimmed = cellText.trim();
 
         // 第一级：整串优先——仅当文本含英文逗号（分隔符歧义）时，整条文本先对候选名
@@ -59,64 +64,125 @@ public class LinkNameResolver
         // 避免抢占 25 列锚词剥离（条目"笔记名（锚词）"不应被同名的整名候选抢先命中）
         if (trimmed.contains(","))
         {
-            MatchOutcome whole = matchWhole(trimmed, candidates);
+            MatchOutcome whole = matchWhole(trimmed, pool);
             if (whole.status != Status.NOT_FOUND)
             {
                 return Collections.singletonList(new EntryResult(trimmed, trimmed, null, whole));
             }
         }
 
-        // 第二级：CSV 转义还原 + 按英文逗号拆分，逐条目解析
+        // 第二级：CSV 转义还原 + 按英文逗号拆分，逐条目解析（委托单条目管线）
         List<EntryResult> results = new ArrayList<>();
         for (String rawEntry : splitCsvEntries(trimmed))
         {
-            String entry = rawEntry.trim();
-            if (entry.isEmpty())
+            EntryResult result = resolveEntry(rawEntry, pool);
+            if (result != null)
             {
-                // 空串条目跳过不计失败（对应"无链接"）
-                continue;
-            }
-            AnchorStrip strip = stripAnchor(entry);
-            if (strip.anchor != null)
-            {
-                // 25 列条目语法：先以剥离锚词后的名称做强匹配（精确/归一化——锚词语法明确时的可信命中）
-                MatchOutcome strippedStrong = matchName(strip.name, candidates, false);
-                if (strippedStrong.status != Status.NOT_FOUND)
-                {
-                    results.add(new EntryResult(entry, strip.name, strip.anchor, strippedStrong));
-                    continue;
-                }
-                // 强匹配未命中 → 整条目完整管线回退（名称本身含全角括号后缀的形态，如 21 列记录名，
-                // 整条精确/归一化命中的信号强于剥离名的前缀容错）
-                MatchOutcome fallback = matchName(entry, candidates, true);
-                if (fallback.status != Status.NOT_FOUND)
-                {
-                    fallback.explanation = "锚词剥离后未命中，整条目回退：" + fallback.explanation;
-                    results.add(new EntryResult(entry, entry, null, fallback));
-                    continue;
-                }
-                // 整条目也未命中 → 剥离名的前缀容错兜底（弱信号，最后采信）
-                MatchOutcome strippedPrefix = matchName(strip.name, candidates, true);
-                results.add(new EntryResult(entry, strip.name, strip.anchor, strippedPrefix));
-            }
-            else
-            {
-                results.add(new EntryResult(entry, entry, null, matchName(entry, candidates, true)));
+                results.add(result);
             }
         }
         return results;
     }
 
-    // ==================== 名称匹配（四级容错） ====================
+    /**
+     * 单条目解析入口（<b>不拆 CSV</b>）——`_ID` 回退路径的名称条目已是 CSV 拆分后的
+     * 单条产物，条目本身含逗号时不得被二次拆散（如 21 列记录名/25 列笔记标题含逗号：
+     * 拆散会把一个名称错配成多条链接或误报未命中）。管线与 {@link #resolve} 的条目级
+     * 一致：trim → 空串返回 null（对应"无链接"，调用方跳过不计失败）→ 锚词剥离与
+     * 四级匹配（整条目强匹配优先）。候选池在本方法入口一次性预归一化。
+     *
+     * @param entry          单条目文本（null / 纯空白 → null，对应"无链接"）
+     * @param candidateNames 候选名列表（可含重复——重复名视为同名多条、判歧义）
+     * @return 单条目解析结果；空串条目返回 null（不计失败）
+     */
+    public EntryResult resolveEntry(String entry, List<String> candidateNames)
+    {
+        return resolveEntry(entry, buildPool(candidateNames));
+    }
+
+    /**
+     * 单条目解析（共享预归一化候选池）：含锚词语法的条目按"整条目强匹配 → 剥离名强匹配 →
+     * 整条目前缀 → 剥离名前缀"顺序匹配（整条目强匹配优先——防剥离名抢占错链）。
+     */
+    private EntryResult resolveEntry(String rawEntry, CandidatePool pool)
+    {
+        String entry = rawEntry == null ? "" : rawEntry.trim();
+        if (entry.isEmpty())
+        {
+            // 空串条目跳过不计失败（对应"无链接"）
+            return null;
+        }
+        AnchorStrip strip = stripAnchor(entry);
+        if (strip.anchor == null)
+        {
+            return new EntryResult(entry, entry, null, matchName(entry, pool, true));
+        }
+        // 整条目精确/归一化强匹配优先：名称本身含全角括号后缀的形态（如 21 列记录名"甲（乙）"），
+        // 与剥离名"甲"并存为候选时命中整条目——剥离名强匹配不得抢占错链
+        MatchOutcome wholeStrong = matchName(entry, pool, false);
+        if (wholeStrong.status != Status.NOT_FOUND)
+        {
+            return new EntryResult(entry, entry, null, wholeStrong);
+        }
+        // 剥离锚词名强匹配次之（25 列"笔记名（锚词）"语法明确时的可信命中）
+        MatchOutcome strippedStrong = matchName(strip.name, pool, false);
+        if (strippedStrong.status != Status.NOT_FOUND)
+        {
+            return new EntryResult(entry, strip.name, strip.anchor, strippedStrong);
+        }
+        // 两级强匹配均未命中 → 整条目前缀容错（信号强于剥离名前缀容错）
+        MatchOutcome wholePrefix = matchName(entry, pool, true);
+        if (wholePrefix.status != Status.NOT_FOUND)
+        {
+            wholePrefix.explanation = "锚词剥离后未命中，整条目回退：" + wholePrefix.explanation;
+            return new EntryResult(entry, entry, null, wholePrefix);
+        }
+        // 剥离名前缀容错兜底（弱信号，最后采信）
+        MatchOutcome strippedPrefix = matchName(strip.name, pool, true);
+        return new EntryResult(entry, strip.name, strip.anchor, strippedPrefix);
+    }
+
+    // ==================== 名称匹配（三级容错 + 预归一化候选池） ====================
+
+    /**
+     * 候选池（预归一化产物）：原名与归一化形态按下标对齐——resolve/resolveEntry 入口
+     * 一次性构建，精确/归一化/前缀各级比对直接取用（消除每层×每次的重复归一化）。
+     */
+    private static final class CandidatePool
+    {
+        /** 候选名原样列表（含 null/空白项，与归一化形态按位对齐） */
+        final List<String> names;
+
+        /** 与 {@link #names} 按位对齐的归一化形态（null 候选占位 null，比对时跳过） */
+        final List<String> normalizedNames;
+
+        CandidatePool(List<String> names, List<String> normalizedNames)
+        {
+            this.names = names;
+            this.normalizedNames = normalizedNames;
+        }
+    }
+
+    /** 构建预归一化候选池（null 候选的归一化形态占位 null，与原 null 守卫口径一致） */
+    private static CandidatePool buildPool(List<String> candidateNames)
+    {
+        List<String> candidates = candidateNames == null ? Collections.emptyList() : candidateNames;
+        List<String> normalized = new ArrayList<>(candidates.size());
+        for (String candidate : candidates)
+        {
+            normalized.add(candidate == null ? null : normalize(candidate));
+        }
+        return new CandidatePool(candidates, normalized);
+    }
 
     /**
      * 整串优先匹配：仅含英文逗号的文本启用——整条文本对候选名整体匹配
      * （精确 → 归一化，不做前缀——拆分前的前缀匹配会把合法多值误合为单条目）。
      * 命中/歧义的级别统一标记为整串优先。
      */
-    private MatchOutcome matchWhole(String wholeText, List<String> candidates)
+    private MatchOutcome matchWhole(String wholeText, CandidatePool pool)
     {
-        MatchOutcome outcome = matchName(wholeText, candidates, false);
+        MatchOutcome outcome = matchName(wholeText, pool, false);
         if (outcome.status != Status.NOT_FOUND)
         {
             if (outcome.status == Status.MATCHED)
@@ -130,15 +196,16 @@ public class LinkNameResolver
 
     /**
      * 名称匹配（R7 容错链）：精确（原名全等）→ 归一化（trim / 全角半角 / 大小写不敏感）→
-     * 唯一前缀（归一化形态、长度 ≥2 才触发；多命中即歧义）。
+     * 唯一前缀（归一化形态、长度 ≥2 才触发；多命中即歧义）。归一化/前缀级直接取候选池
+     * 预归一化形态。歧义说明只报命中数、不回显候选名原文（防他表数据面经失败清单泄露）。
      *
      * @param allowPrefix 是否启用唯一前缀级（整串优先不启用，条目级启用）
      */
-    private MatchOutcome matchName(String name, List<String> candidates, boolean allowPrefix)
+    private MatchOutcome matchName(String name, CandidatePool pool, boolean allowPrefix)
     {
         // 级别一：精确匹配（原名全等；候选名重复出现=同名多条 → 歧义）
         int exactHits = 0;
-        for (String candidate : candidates)
+        for (String candidate : pool.names)
         {
             if (name.equals(candidate))
             {
@@ -158,11 +225,12 @@ public class LinkNameResolver
         // 级别二：归一化匹配（trim / 全角半角 / 大小写归一后比较；同名多条或多名归一后相同 → 歧义）
         String normalizedName = normalize(name);
         Map<String, Integer> normalizedHits = new LinkedHashMap<>();
-        for (String candidate : candidates)
+        for (int i = 0; i < pool.names.size(); i++)
         {
-            if (candidate != null && normalizedName.equals(normalize(candidate)))
+            String normalized = pool.normalizedNames.get(i);
+            if (normalized != null && normalizedName.equals(normalized))
             {
-                normalizedHits.merge(candidate, 1, Integer::sum);
+                normalizedHits.merge(pool.names.get(i), 1, Integer::sum);
             }
         }
         int normalizedTotal = 0;
@@ -179,7 +247,7 @@ public class LinkNameResolver
         if (normalizedTotal > 1)
         {
             return ambiguous(new ArrayList<>(normalizedHits.keySet()),
-                    "归一化 " + normalizedTotal + " 命中（" + String.join("、", normalizedHits.keySet()) + "）");
+                    "归一化 " + normalizedTotal + " 命中");
         }
 
         // 级别三：唯一前缀（≥2 字符才触发；多命中即歧义；1 字符不触发、按未命中）
@@ -187,11 +255,12 @@ public class LinkNameResolver
         if (allowPrefix && normalizedName.length() >= 2)
         {
             Map<String, Integer> prefixHits = new LinkedHashMap<>();
-            for (String candidate : candidates)
+            for (int i = 0; i < pool.names.size(); i++)
             {
-                if (candidate != null && normalize(candidate).startsWith(normalizedName))
+                String normalized = pool.normalizedNames.get(i);
+                if (normalized != null && normalized.startsWith(normalizedName))
                 {
-                    prefixHits.merge(candidate, 1, Integer::sum);
+                    prefixHits.merge(pool.names.get(i), 1, Integer::sum);
                 }
             }
             int prefixTotal = 0;
@@ -207,7 +276,7 @@ public class LinkNameResolver
             if (prefixTotal > 1)
             {
                 return ambiguous(new ArrayList<>(prefixHits.keySet()),
-                        "唯一前缀 " + prefixTotal + " 命中（" + String.join("、", prefixHits.keySet()) + "）");
+                        "唯一前缀 " + prefixTotal + " 命中");
             }
             prefixNote = "唯一前缀 0 命中";
         }

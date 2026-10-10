@@ -29,7 +29,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *   <li>归一化：全角/半角、大小写、首尾空格（含全角空格）差异归一后命中</li>
  *   <li>空串条目跳过不计失败（对应"无链接"）；null/纯空白单元格无条目</li>
  *   <li>25 列条目语法：锚词剥离后命中笔记名、锚词正确返回（含空锚词、锚词内全角括号）；
- *       剥离名未命中回退整条目（21 列名称含全角括号后缀形态）；剥离名与整条目同时为候选时剥离名优先</li>
+ *       剥离名未命中回退整条目（21 列名称含全角括号后缀形态）；整条目与剥离名同时为候选时
+ *       <b>整条目强匹配优先</b>（修复"甲（乙）"被剥离名"甲"抢占错链）</li>
  * </ul>
  *
  * @author ruoyi
@@ -307,16 +308,39 @@ class LinkNameResolverTest
     }
 
     @Test
-    void resolveShouldPreferAnchorStrippedNameWhenBothAreCandidates()
+    void resolveShouldPreferWholeEntryWhenBothAreCandidates()
     {
-        // 剥离名与整条目同时为候选：剥离名优先（25 列语义），锚词保留
+        // 整条目与剥离名同时为候选：整条目强匹配优先（"笔记（红）"是真实候选名时
+        // 不得被剥离名"笔记"抢占错链），锚词置空（命中整条目=名称本身含括号后缀）
         List<EntryResult> results = resolver.resolve("笔记（红）", Arrays.asList("笔记", "笔记（红）"));
 
         assertEquals(1, results.size());
         EntryResult result = results.get(0);
         assertTrue(result.isMatched());
-        assertEquals("笔记", result.getMatchedName());
-        assertEquals("红", result.getAnchor());
+        assertEquals("笔记（红）", result.getMatchedName());
+        assertNull(result.getAnchor());
+        assertEquals("笔记（红）", result.getName());
+    }
+
+    @Test
+    void resolveShouldPreferWholeEntryOverStrippedNameWhenBothCoexist()
+    {
+        // "甲"与"甲（乙）"并存为候选、条目为"甲（乙）"：命中整条目"甲（乙）"——
+        // 剥离名"甲"仅当整条目强匹配未命中时才接管（锚词语法的可信回退）
+        List<EntryResult> results = resolver.resolve("甲（乙）", Arrays.asList("甲", "甲（乙）"));
+
+        assertEquals(1, results.size());
+        EntryResult result = results.get(0);
+        assertTrue(result.isMatched());
+        assertEquals("甲（乙）", result.getMatchedName());
+        assertNull(result.getAnchor());
+
+        // 整条目不是候选时剥离名接管（25 列"笔记名（锚词）"语义不变，锚词保留）
+        List<EntryResult> strippedOnly = resolver.resolve("甲（乙）", Collections.singletonList("甲"));
+        assertEquals(1, strippedOnly.size());
+        assertTrue(strippedOnly.get(0).isMatched());
+        assertEquals("甲", strippedOnly.get(0).getMatchedName());
+        assertEquals("乙", strippedOnly.get(0).getAnchor());
     }
 
     @Test

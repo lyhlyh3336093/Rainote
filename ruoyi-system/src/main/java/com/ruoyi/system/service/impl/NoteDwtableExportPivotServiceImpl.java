@@ -31,7 +31,8 @@ import org.springframework.stereotype.Service;
  * </ul>
  * 隐藏列（isShow=1）不导出（R5）。空表仍产出列定义（R20）。
  * <p>
- * 性能：构建 recordId→(columnId→item) 内存索引避免 N+1；关联列文本批量预取。
+ * 性能：构建 recordId→(columnId→item) 内存索引避免 N+1；关联列文本批量预取；
+ * 25 列引用笔记标题与表级归属笔记解析走导出全程共享缓存（miss 才落库，对齐 recordNameCache 先例）。
  *
  * @author ruoyi
  */
@@ -107,9 +108,15 @@ public class NoteDwtableExportPivotServiceImpl implements INoteDwtableExportPivo
         {
             return matrices;
         }
+        // 笔记标题缓存（对齐 recordNameCache 先例）：25 列逐行解析引用笔记标题改为缓存
+        // miss 才落库，导出全程（跨表）共享——同一来源笔记只查一次，悬空笔记以空串负缓存
+        Map<Long, String> noteTitleCache = new HashMap<>();
+        // 表级归属笔记缓存：resolveSemanticSourceNoteId 的 linkDwTableId→NoteDwtable.noteId
+        // 兜底查询同样导出全程共享（含 null 负缓存），多行链接指向同一目标表时只查一次
+        Map<Long, Long> tableOwnerNoteIdCache = new HashMap<>();
         for (NoteDwtable table : tables)
         {
-            ExportMatrix matrix = pivotTable(table);
+            ExportMatrix matrix = pivotTable(table, noteTitleCache, tableOwnerNoteIdCache);
             matrices.add(matrix);
         }
         return matrices;
@@ -117,8 +124,12 @@ public class NoteDwtableExportPivotServiceImpl implements INoteDwtableExportPivo
 
     /**
      * 把单张数据表 pivot 成导出矩阵。
+     *
+     * @param noteTitleCache 笔记标题缓存（导出全程共享，跨表复用）
+     * @param tableOwnerNoteIdCache 表级归属笔记缓存（导出全程共享，跨表复用）
      */
-    private ExportMatrix pivotTable(NoteDwtable table)
+    private ExportMatrix pivotTable(NoteDwtable table, Map<Long, String> noteTitleCache,
+            Map<Long, Long> tableOwnerNoteIdCache)
     {
         ExportMatrix matrix = new ExportMatrix();
         matrix.setDwtableId(table.getId());
@@ -154,7 +165,8 @@ public class NoteDwtableExportPivotServiceImpl implements INoteDwtableExportPivo
         {
             for (NoteRecord record : records)
             {
-                List<String> row = buildRow(record, visibleColumns, itemIndex, recordNameCache, table);
+                List<String> row = buildRow(record, visibleColumns, itemIndex, recordNameCache, table,
+                        noteTitleCache, tableOwnerNoteIdCache);
                 rows.add(row);
             }
         }
@@ -278,7 +290,7 @@ public class NoteDwtableExportPivotServiceImpl implements INoteDwtableExportPivo
      */
     private List<String> buildRow(NoteRecord record, List<NoteColumn> visibleColumns,
             Map<Long, Map<Long, NoteDwtableItem>> itemIndex, Map<Long, String> recordNameCache,
-            NoteDwtable table)
+            NoteDwtable table, Map<Long, String> noteTitleCache, Map<Long, Long> tableOwnerNoteIdCache)
     {
         List<String> row = new ArrayList<>();
         // 记录 id 列（R6）
@@ -303,7 +315,8 @@ public class NoteDwtableExportPivotServiceImpl implements INoteDwtableExportPivo
             else if (DUAL_TYPES.contains(type))
             {
                 // 关联/派生类列：双列（ID + 文本）
-                resolveDualColumn(col, record, rowItems, row, recordNameCache, table);
+                resolveDualColumn(col, record, rowItems, row, recordNameCache, table,
+                        noteTitleCache, tableOwnerNoteIdCache);
             }
             else
             {
@@ -320,7 +333,8 @@ public class NoteDwtableExportPivotServiceImpl implements INoteDwtableExportPivo
      */
     private void resolveDualColumn(NoteColumn col, NoteRecord record,
             Map<Long, NoteDwtableItem> rowItems, List<String> row,
-            Map<Long, String> recordNameCache, NoteDwtable table)
+            Map<Long, String> recordNameCache, NoteDwtable table,
+            Map<Long, String> noteTitleCache, Map<Long, Long> tableOwnerNoteIdCache)
     {
         Long type = col.getType();
         if (type == TYPE_DOUBLE_LINK)
@@ -358,7 +372,8 @@ public class NoteDwtableExportPivotServiceImpl implements INoteDwtableExportPivo
         else if (type == TYPE_SEMANTIC_LINK)
         {
             // 语义关联(25)：ID=NoteNotelink 行 id，文本="引用笔记名（锚词）"条目串（R2/R4）
-            resolveSemanticLinkColumn(col, record, rowItems, row, table);
+            resolveSemanticLinkColumn(col, record, rowItems, row, table,
+                    noteTitleCache, tableOwnerNoteIdCache);
         }
     }
 
@@ -461,10 +476,13 @@ public class NoteDwtableExportPivotServiceImpl implements INoteDwtableExportPivo
      * （noteId 为 null 的历史行经 COALESCE 式兜底解析），锚词=contextText（空则回退 itemValue），
      * 锚词为空省略全角括号；多值逗号连接、CSV 风格转义（R2）；
      * ID 列 = NoteNotelink 行 id 串，与名称条目顺序一一对应（R2）。
+     * 标题解析走导出全程共享 noteTitleCache（miss 才落库）：同一来源笔记被多行链接
+     * 引用时只查一次库，表级归属兜底解析同样共享缓存。
      * 悬空引用（来源笔记已删/无法解析）整体跳过该条目（名称与行 id 均不写），不报错不阻断（R4）。
      */
     private void resolveSemanticLinkColumn(NoteColumn col, NoteRecord record,
-            Map<Long, NoteDwtableItem> rowItems, List<String> row, NoteDwtable table)
+            Map<Long, NoteDwtableItem> rowItems, List<String> row, NoteDwtable table,
+            Map<Long, String> noteTitleCache, Map<Long, Long> tableOwnerNoteIdCache)
     {
         String idValue = "";
         String textValue = "";
@@ -491,13 +509,15 @@ public class NoteDwtableExportPivotServiceImpl implements INoteDwtableExportPivo
             for (NoteNotelink link : links)
             {
                 // 引用来源笔记：noteId 侧；历史 null 行经 COALESCE 式兜底解析
-                Long sourceNoteId = resolveSemanticSourceNoteId(link);
+                Long sourceNoteId = resolveSemanticSourceNoteId(link, tableOwnerNoteIdCache);
                 if (sourceNoteId == null)
                 {
                     continue;
                 }
-                NoteNote sourceNote = noteNoteMapper.selectNoteNoteById(sourceNoteId);
-                if (sourceNote == null || sourceNote.getTitle() == null || sourceNote.getTitle().isEmpty())
+                // 标题走导出全程共享缓存（miss 才落库，对齐 recordNameCache 先例）：
+                // 同一笔记被多行链接引用只查一次，悬空笔记以空串负缓存
+                String sourceTitle = resolveNoteTitle(sourceNoteId, noteTitleCache);
+                if (sourceTitle == null || sourceTitle.isEmpty())
                 {
                     // 悬空引用：来源笔记已删，跳过条目不阻断（R4）
                     continue;
@@ -509,8 +529,8 @@ public class NoteDwtableExportPivotServiceImpl implements INoteDwtableExportPivo
                     anchor = link.getItemValue();
                 }
                 String entry = (anchor != null && !anchor.isEmpty())
-                        ? sourceNote.getTitle() + "（" + anchor + "）"
-                        : sourceNote.getTitle();
+                        ? sourceTitle + "（" + anchor + "）"
+                        : sourceTitle;
                 entries.add(escapeCsvValue(entry));
                 linkIds.add(String.valueOf(link.getId()));
             }
@@ -534,8 +554,10 @@ public class NoteDwtableExportPivotServiceImpl implements INoteDwtableExportPivo
      * 优先 NoteNotelink.noteId（引用来源）；为 null 的历史行经 COALESCE 式兜底——
      * 先取 linkNoteId（目标表归属笔记），仍为 null 时从 linkDwTableId→NoteDwtable.noteId 取
      * （对齐 selectNoteNotelinkByNoteId 的 COALESCE 兜底模式）。
+     * 表级归属笔记查询走导出全程共享缓存（miss 才落库，含 null 负缓存）——
+     * 多行链接指向同一目标表时只查一次。
      */
-    private Long resolveSemanticSourceNoteId(NoteNotelink link)
+    private Long resolveSemanticSourceNoteId(NoteNotelink link, Map<Long, Long> tableOwnerNoteIdCache)
     {
         if (link.getNoteId() != null)
         {
@@ -547,13 +569,32 @@ public class NoteDwtableExportPivotServiceImpl implements INoteDwtableExportPivo
         }
         if (link.getLinkDwTableId() != null)
         {
-            NoteDwtable linkedTable = noteDwtableMapper.selectNoteDwtableById(link.getLinkDwTableId());
-            if (linkedTable != null && linkedTable.getNoteId() != null)
+            Long dwTableId = link.getLinkDwTableId();
+            if (!tableOwnerNoteIdCache.containsKey(dwTableId))
             {
-                return linkedTable.getNoteId();
+                NoteDwtable linkedTable = noteDwtableMapper.selectNoteDwtableById(dwTableId);
+                tableOwnerNoteIdCache.put(dwTableId,
+                        linkedTable != null ? linkedTable.getNoteId() : null);
             }
+            return tableOwnerNoteIdCache.get(dwTableId);
         }
         return null;
+    }
+
+    /**
+     * 解析来源笔记标题（25 列文本列用）：导出全程共享缓存 miss 才落库
+     * （对齐 recordNameCache 先例）；悬空笔记（已删/无标题）以空串负缓存，
+     * 避免同一悬空引用被多行链接重复查询。
+     */
+    private String resolveNoteTitle(Long noteId, Map<Long, String> noteTitleCache)
+    {
+        if (!noteTitleCache.containsKey(noteId))
+        {
+            NoteNote note = noteNoteMapper.selectNoteNoteById(noteId);
+            noteTitleCache.put(noteId,
+                    note != null && note.getTitle() != null ? note.getTitle() : "");
+        }
+        return noteTitleCache.get(noteId);
     }
 
     /**

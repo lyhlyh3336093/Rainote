@@ -86,13 +86,18 @@
           链接解析失败（{{ linkFailures.length }} 项，须修正文件后重新预检）
         </a-divider>
       </template>
-      <div v-for="(f, i) in linkFailures" :key="`lf-${i}`" class="precheck-form-row">
+      <div v-for="(f, i) in visibleLinkFailures" :key="`lf-${i}`" class="precheck-form-row">
         <div class="precheck-label">
           <span class="precheck-name">{{ f.columnName }}{{ f.rowNumber > 0 ? ` · 第 ${f.rowNumber} 行` : '' }}</span>
           <span class="precheck-hint">{{ f.entryText }}</span>
         </div>
         <div class="precheck-error">{{ f.reason }}</div>
         <div v-if="f.explanation" class="precheck-hint">{{ f.explanation }}</div>
+      </div>
+      <!-- #14 同模式渲染上限：linkFailures 为只读清单、无逐条处理交互，超长时截断防拖垮弹框，
+           超出部分以计数行折叠（不可展开；阻断语义不损失——计数行仍在，确认按钮仍禁用） -->
+      <div v-if="hiddenLinkFailureCount > 0" class="precheck-hint" style="margin-bottom: 8px">
+        其余 {{ hiddenLinkFailureCount }} 条
       </div>
 
       <!-- 歧义项：预选 sort 靠前可改选（R14/KTD7） -->
@@ -155,6 +160,13 @@ const COLLAPSE_THRESHOLD = 20;
  * 或"全部留空"批量处理。
  */
 const UNHANDLED_RENDER_LIMIT = 50;
+
+/**
+ * linkFailures 渲染上限（#14 UNHANDLED_RENDER_LIMIT 同模式）：失败清单为只读呈现、
+ * 无逐条处理交互，数千条强失败时无上限渲染会拖垮弹框；50 条兼顾滚动定位与首屏开销，
+ * 超出部分以"其余 N 条"计数行折叠（不可展开，须修正文件后重新预检）。
+ */
+const LINK_FAILURE_RENDER_LIMIT = 50;
 
 /** 基础列/违规列缺参输入分组 */
 interface BasicGroup {
@@ -420,6 +432,14 @@ export default defineComponent({
     const linkFailures = computed<ExcelLinkFailure[]>(() =>
       (props.precheck?.linkFailures || []) as ExcelLinkFailure[]);
 
+    /** 渲染上限内的失败条目（#14 同模式截断，只读清单无展开交互） */
+    const visibleLinkFailures = computed<ExcelLinkFailure[]>(() =>
+      linkFailures.value.slice(0, LINK_FAILURE_RENDER_LIMIT));
+
+    /** 超出渲染上限的失败条目数（"其余 N 条"折叠计数行） */
+    const hiddenLinkFailureCount = computed(() =>
+      linkFailures.value.length - visibleLinkFailures.value.length);
+
     /** 替换式导入警示：有删除（行/列）或跨表入链影响（重指向/清空）即必显（数据变更不可无提示发生） */
     const hasReplace = computed(() => {
       const p = props.precheck;
@@ -601,6 +621,8 @@ export default defineComponent({
       relationColumns,
       ambiguityGroups,
       linkFailures,
+      visibleLinkFailures,
+      hiddenLinkFailureCount,
       COLLAPSE_THRESHOLD,
       unhandledCount,
       visibleGroups,
