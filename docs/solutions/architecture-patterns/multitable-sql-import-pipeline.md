@@ -95,7 +95,7 @@ if (nameColumnId == null && column.getType() != null && column.getType() == 1L) 
 record.setName(deriveName(ctx, rowItems));
 ```
 
-NULL→空串（与 `insertNoteRecord` 的 setValue 契约一致）；link 字段不导入；排除类型 18/20/21/23/24/25/26 不进列映射 → SQL 侧与目标表侧统一跳过。
+NULL→空串（与 `insertNoteRecord` 的 setValue 契约一致）；link 字段不导入；排除类型 18/20/21/23/24/25/26 不进列映射 → SQL 侧与目标表侧统一跳过（该排除集为 **SQL 链路专属**口径——Excel 链路 25 列已于 2026-10-10 移出排除集、21/25 列 `列名_ID` 副列被导入消费，见 Related 中链接列往返纪律篇）。
 
 ### 5. sort=max+1 追加语义（有意 diverge）
 
@@ -134,7 +134,7 @@ INSERT INTO `note_dwtable_1` (`record_id`, `col_a`, `col_b`) VALUES (1, 'It''s a
 ```
 
 - 导入端：首列 `record_id`=1 识别为锚点（不进数据列）；`''`→`'`、`\n`→LF 还原；`NULL`→Java null→落库空串；多元组展开为 2 行。
-- 排除列（如 type=21 双向链接列）导出时展开为 `关联_ID`/`关联_文本` 两列（值为 linkRecordId 与关联记录名）；导入时目标表映射排除该类型（且无同名普通列）→ 双端一致跳过，link 数据不回写（R16）。
+- 排除列（如 type=21 双向链接列）导出时展开为 `关联_ID`/`关联_文本` 两列（值为 linkRecordId 与关联记录名）；导入时目标表映射排除该类型（且无同名普通列）→ 双端一致跳过，link 数据不回写（R16）。**链路限定（2026-10-10）**：此"排除即跳过"语义仅限 SQL 导入链路；Excel 导入链路已双轨分化——21/25 列 `_ID` 副列被消费精确重建、25 列参与 NoteNotelink 行保活重建，纪律见 `docs/solutions/design-patterns/excel-link-column-round-trip-disciplines.md`。
 - 分片 zip：`T_p1.sql`…`T_p10.sql` 自然序解压合并，`T_p2` 先于 `T_p10` 处理，行序=导出序。
 
 ## Related

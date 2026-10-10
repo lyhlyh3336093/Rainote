@@ -114,6 +114,7 @@ jumpToTableCell({
 - **跨实体导航 URL 在数据源校验参数**：跨标签页跳转依赖的参数（`linkNoteId` 等）应在 SQL 查询层就保证非空，而非只靠前端 UI 守卫。前端守卫只能提示「缺失」，无法修复数据；数据源补全才能让守卫真正只对异常情况触发。
 - **用历史数据测试跨标签页跳转**：跨实体导航功能验收时，除新建记录外，必须用功能上线前就存在的记录回归一遍——新记录走的是新创建路径（字段齐全），掩盖了历史记录的 null 问题。
 - **可空字段的查询接口写明兜底策略**：在 Mapper 注释里标注「历史记录 linkNoteId 为 null，用 COALESCE 从 note_dwtable.noteId 兜底」（本例已在 XML 注释中写明），避免后续维护者误以为该字段恒非空而省略 JOIN。
+- **写入侧写规范值，兜底仅限查询侧**：新建/重建 NoteNotelink 行（含 2026-10 新增的 Excel 导入 25 列重建路径）必须显式写入 `linkNoteId` = 目标表归属笔记 id 的规范值，不得依赖 COALESCE——兜底是历史数据的读取策略，不是写入许可。重建纪律见 [excel-link-column-round-trip-disciplines.md](file:///d:/WorkSpace/RuoYi-Vue/docs/solutions/design-patterns/excel-link-column-round-trip-disciplines.md)（纪律 6：行 id 保活重建）。
 
 ## Related Issues
 
