@@ -79,6 +79,22 @@
         </div>
       </template>
 
+      <!-- 链接解析失败（U6，R8）：21/25 列（及入链重指向名称歧义）强失败——只读呈现，
+           无法补参，须修正 Excel 文件后重新预检（确认导入已禁用，零写入门禁） -->
+      <template v-if="linkFailures.length > 0">
+        <a-divider orientation="left" class="precheck-divider">
+          链接解析失败（{{ linkFailures.length }} 项，须修正文件后重新预检）
+        </a-divider>
+      </template>
+      <div v-for="(f, i) in linkFailures" :key="`lf-${i}`" class="precheck-form-row">
+        <div class="precheck-label">
+          <span class="precheck-name">{{ f.columnName }}{{ f.rowNumber > 0 ? ` · 第 ${f.rowNumber} 行` : '' }}</span>
+          <span class="precheck-hint">{{ f.entryText }}</span>
+        </div>
+        <div class="precheck-error">{{ f.reason }}</div>
+        <div v-if="f.explanation" class="precheck-hint">{{ f.explanation }}</div>
+      </div>
+
       <!-- 歧义项：预选 sort 靠前可改选（R14/KTD7） -->
       <template v-if="ambiguityGroups.length > 0">
         <a-divider orientation="left" class="precheck-divider">同名记录歧义（已预选，可改选）</a-divider>
@@ -125,6 +141,7 @@ import { importExcelData } from '@/api/import';
 import type {
   ExcelImportParamsPayload,
   ExcelImportPrecheckResult,
+  ExcelLinkFailure,
   ExcelRecordCandidate,
 } from '@/api/import';
 
@@ -179,7 +196,9 @@ interface RelationColumn {
 /**
  * Excel 导入预检弹框（U6，R12/R13）——一个组件两种模式：
  * <ul>
- *   <li>补参模式（hasBlockingIssues）：缺参逐列补值 + 关联列逐值记录选择器（KTD7）；</li>
+ *   <li>补参模式（hasBlockingIssues）：缺参逐列补值 + 关联列逐值记录选择器（KTD7）；
+ *       21/25 列链接解析失败（R8 强失败，无法补参）以只读分组呈现并禁用确认导入
+ *       （零写入门禁），须修正文件后重新预检；</li>
  *   <li>只读确认模式（无缺参无歧义但有影响面信息）：仅影响面摘要 + 确认/取消（R13 轻量确认）。</li>
  * </ul>
  * 候选数据源仅用预检响应内嵌的 relationCandidates（已过后端归属校验），
@@ -397,17 +416,23 @@ export default defineComponent({
       }
     };
 
-    /** 替换式导入警示：有删除（行/列/跨表关联引用）即必显（数据删除不可无提示发生） */
+    /** 链接解析失败清单（U6，R8）：21/25 列强失败 + 入链重指向名称歧义——只读呈现，不参与补参 */
+    const linkFailures = computed<ExcelLinkFailure[]>(() =>
+      (props.precheck?.linkFailures || []) as ExcelLinkFailure[]);
+
+    /** 替换式导入警示：有删除（行/列）或跨表入链影响（重指向/清空）即必显（数据变更不可无提示发生） */
     const hasReplace = computed(() => {
       const p = props.precheck;
       if (!p) return false;
       const r = p.replaceImpact;
       return !!r && ((r.deletedRowCount || 0) > 0
         || (r.deletedColumns || []).length > 0
-        || (r.clearedLinkColumns || []).length > 0);
+        || (r.repointedLinkColumns || []).length > 0
+        || (r.willClearLinkEntries || []).length > 0);
     });
 
-    /** 替换警示分句（只列删除类影响；新建列/取消隐藏在影响面摘要中呈现） */
+    /** 替换警示分句（只列删除类与跨表入链影响；新建列/取消隐藏在影响面摘要中呈现）。
+     *  跨表入链按重指向口径（U6 语义迁移，取代旧"将清空关联列"整列清空警示） */
     const replaceLines = computed<string[]>(() => {
       const p = props.precheck;
       const r = p?.replaceImpact;
@@ -421,10 +446,18 @@ export default defineComponent({
         const names = deleted.map((c) => c.columnName).join('、');
         lines.push(`删除 ${deleted.length} 列：${names.length > 60 ? `${names.slice(0, 60)}…` : names}`);
       }
-      const cleared = r.clearedLinkColumns || [];
-      if (cleared.length > 0) {
-        const names = cleared.map((c) => `${c.tableName}.${c.columnName}`).join('、');
-        lines.push(`其他表指向本表的关联将被清空（${names.length > 60 ? `${names.slice(0, 60)}…` : names}）`);
+      const repointed = r.repointedLinkColumns || [];
+      if (repointed.length > 0) {
+        const totalEntries = repointed.reduce((sum, c) => sum + (c.repointedEntryCount || 0), 0);
+        const names = repointed.map((c) => `${c.tableName}.${c.columnName}`).join('、');
+        lines.push(`其他表指向本表的 ${totalEntries} 条链接将重指向新记录（${
+          names.length > 60 ? `${names.slice(0, 60)}…` : names}）`);
+      }
+      const willClear = r.willClearLinkEntries || [];
+      if (willClear.length > 0) {
+        const names = [...new Set(willClear.map((c) => `${c.tableName}.${c.columnName}`))].join('、');
+        lines.push(`将清空 ${willClear.length} 条他表链接条目（指向未保留的记录：${
+          names.length > 60 ? `${names.slice(0, 60)}…` : names}）`);
       }
       return lines;
     });
@@ -465,8 +498,10 @@ export default defineComponent({
       return items;
     });
 
-    /** 确认可用：全部基础列校验通过（空=接受） */
-    const canConfirm = computed(() => basicGroups.every((g) => !g.error));
+    /** 确认可用：全部基础列校验通过（空=接受）且无链接解析失败（强失败零写入门禁：
+     *  21/25 列失败无法补参，须取消并修正文件后重新预检） */
+    const canConfirm = computed(() => basicGroups.every((g) => !g.error)
+      && linkFailures.value.length === 0);
 
     /** 组装阶段二补参 JSON（按 ExcelImportParams 契约与 KTD5 发射规则） */
     const buildParamsPayload = (): ExcelImportParamsPayload => {
@@ -565,6 +600,7 @@ export default defineComponent({
       basicGroups,
       relationColumns,
       ambiguityGroups,
+      linkFailures,
       COLLAPSE_THRESHOLD,
       unhandledCount,
       visibleGroups,

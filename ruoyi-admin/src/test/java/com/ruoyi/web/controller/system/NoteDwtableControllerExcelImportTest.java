@@ -105,6 +105,22 @@ class NoteDwtableControllerExcelImportTest
         deletedColumn.setCascadeDeletesPairedColumn(false);
         sampleResult.getReplaceImpact().getDeletedColumns().add(deletedColumn);
         sampleResult.getReplaceImpact().getNewColumnNames().add("新列");
+        // U6：跨表入链重指向口径（将重指向的列 + 将单元格级清空并报告的条目）
+        ExcelImportPrecheckResult.RepointedLinkColumn repointedColumn =
+                new ExcelImportPrecheckResult.RepointedLinkColumn();
+        repointedColumn.setTableName("他表");
+        repointedColumn.setColumnName("他表关联");
+        repointedColumn.setColumnId(201L);
+        repointedColumn.setAffectedCellCount(2);
+        repointedColumn.setRepointedEntryCount(3);
+        sampleResult.getReplaceImpact().getRepointedLinkColumns().add(repointedColumn);
+        ExcelImportPrecheckResult.WillClearLinkEntry willClearEntry =
+                new ExcelImportPrecheckResult.WillClearLinkEntry();
+        willClearEntry.setTableName("他表");
+        willClearEntry.setColumnName("他表关联");
+        willClearEntry.setRecordName("已删记录");
+        willClearEntry.setReason("目标记录未出现在导入文件中");
+        sampleResult.getReplaceImpact().getWillClearLinkEntries().add(willClearEntry);
         when(noteDwtableExcelImportService.precheck(eq(NOTE_ID), eq(DWTABLE_ID),
                 any(MultipartFile.class), eq(USER_ID))).thenReturn(sampleResult);
     }
@@ -140,6 +156,15 @@ class NoteDwtableControllerExcelImportTest
         assertEquals(Long.valueOf(102L), replaceImpact.getDeletedColumns().get(0).getColumnId());
         assertFalse(replaceImpact.getDeletedColumns().get(0).isCascadeDeletesPairedColumn());
         assertEquals(java.util.Collections.singletonList("新列"), replaceImpact.getNewColumnNames());
+        // U6：跨表入链重指向口径随 data 透传（将重指向的列 + 将单元格级清空并报告的条目）
+        assertEquals(1, replaceImpact.getRepointedLinkColumns().size());
+        assertEquals("他表", replaceImpact.getRepointedLinkColumns().get(0).getTableName());
+        assertEquals("他表关联", replaceImpact.getRepointedLinkColumns().get(0).getColumnName());
+        assertEquals(2, replaceImpact.getRepointedLinkColumns().get(0).getAffectedCellCount());
+        assertEquals(3, replaceImpact.getRepointedLinkColumns().get(0).getRepointedEntryCount());
+        assertEquals(1, replaceImpact.getWillClearLinkEntries().size());
+        assertEquals("已删记录", replaceImpact.getWillClearLinkEntries().get(0).getRecordName());
+        assertTrue(replaceImpact.getWillClearLinkEntries().get(0).getReason().contains("未出现在导入文件"));
         verify(noteDwtableExcelImportService, times(1))
                 .precheck(eq(NOTE_ID), eq(DWTABLE_ID), any(MultipartFile.class), eq(USER_ID));
         // 归属校验先行（照 importData 模式）

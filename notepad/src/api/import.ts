@@ -142,38 +142,72 @@ export interface ExcelRelationCandidates {
 
 /** 将被删除的列（替换式导入影响面） */
 export interface ExcelDeletedColumnInfo {
-    /** 列 id */
-    columnId: number;
-    /** 列名 */
-    columnName: string;
-    /** 列类型 */
-    columnType: number | null;
-    /** 21 双向关联列：其在被关联表中的配对列将被级联删除 */
-    cascadeDeletesPairedColumn: boolean;
+  /** 列 id */
+  columnId: number;
+  /** 列名 */
+  columnName: string;
+  /** 列类型 */
+  columnType: number | null;
+  /** 21 双向关联列：其在被关联表中的配对列将被级联删除 */
+  cascadeDeletesPairedColumn: boolean;
 }
 
-/** 其他表中引用将被清空的关联列（替换式导入影响面） */
-export interface ExcelClearedLinkColumn {
-    /** 关联列所在表名 */
-    tableName: string;
-    /** 关联列名 */
-    columnName: string;
-    /** 关联列 id */
-    columnId: number;
+/** 将重指向的关联列（他表指向本表旧记录的入链，导入后按"旧 item→新 item"映射三字段精准重写） */
+export interface ExcelRepointedLinkColumn {
+  /** 入链所在表名 */
+  tableName: string;
+  /** 入链列名 */
+  columnName: string;
+  /** 入链列 id */
+  columnId: number;
+  /** 涉及单元格数（含至少一个将重指向条目的入链单元格数） */
+  affectedCellCount: number;
+  /** 将重指向的条目数（多值单元格按条目计数） */
+  repointedEntryCount: number;
 }
 
-/** 替换式导入影响面（删除类字段任一非空/非零 → 必须弹框确认后才执行导入） */
+/** 将单元格级清空并报告的入链条目（目标记录未出现在导入文件/互指声明消失，不阻断导入） */
+export interface ExcelWillClearLinkEntry {
+  /** 入链所在表名 */
+  tableName: string;
+  /** 入链列名 */
+  columnName: string;
+  /** 被清空条目指向的本表旧记录名 */
+  recordName: string;
+  /** 清空原因（中文） */
+  reason: string;
+}
+
+/** 链接解析失败条目（21/25 列 `_ID` 未命中且名称歧义/未命中；与缺参并列阻断，修正文件后重试） */
+export interface ExcelLinkFailure {
+  /** 链接列 id */
+  columnId: number;
+  /** 链接列名（重指向歧义为"他表表名.列名"复合定位） */
+  columnName: string;
+  /** 失败条目所在 Excel 物理行号（重指向歧义无行号语义，为 0） */
+  rowNumber: number;
+  /** 失败条目文本 */
+  entryText: string;
+  /** 失败原因（中文） */
+  reason: string;
+  /** 容错命中说明（各级尝试的命中数与来源，供修正参考） */
+  explanation: string | null;
+}
+
+/** 替换式导入影响面（删除类/跨表入链影响字段任一非空/非零 → 必须弹框确认后才执行导入） */
 export interface ExcelReplaceImpact {
-    /** 将被删除的现有数据行数（目标表全部记录） */
-    deletedRowCount: number;
-    /** 将被删除的列（非系统列且不被任何 Excel 表头引用） */
-    deletedColumns: ExcelDeletedColumnInfo[];
-    /** 将新建的列名（Excel 独有表头 → 纯文本列，同名去重） */
-    newColumnNames: string[];
-    /** 其他表中引用将被清空的关联列（kept 21 配对列 + 指向本表的 18 列） */
-    clearedLinkColumns: ExcelClearedLinkColumn[];
-    /** 匹配到隐藏列将取消隐藏（isShow 1→0）并导入数据的列名 */
-    unhiddenColumnNames: string[];
+  /** 将被删除的现有数据行数（目标表全部记录） */
+  deletedRowCount: number;
+  /** 将被删除的列（非系统列且不被任何 Excel 表头引用） */
+  deletedColumns: ExcelDeletedColumnInfo[];
+  /** 将新建的列名（Excel 独有表头 → 纯文本列，同名去重） */
+  newColumnNames: string[];
+  /** 将重指向的关联列（kept 21 配对列 + 指向本表的 18 列，重指向口径） */
+  repointedLinkColumns: ExcelRepointedLinkColumn[];
+  /** 将单元格级清空并报告的入链条目（目标未保留/互指声明消失） */
+  willClearLinkEntries: ExcelWillClearLinkEntry[];
+  /** 匹配到隐藏列将取消隐藏（isShow 1→0）并导入数据的列名 */
+  unhiddenColumnNames: string[];
 }
 
 /** Excel 导入预检结果（阶段一，R9/R11，替换式语义，对齐后端 ExcelImportPrecheckResult） */
@@ -196,9 +230,11 @@ export interface ExcelImportPrecheckResult {
     skippedHeaders: ExcelSkippedHeader[];
     /** 关联列选择器候选清单 */
     relationCandidates: ExcelRelationCandidates[];
+    /** 链接解析失败清单（21/25 列强失败，与缺参并列阻断，确认导入前零写入） */
+    linkFailures: ExcelLinkFailure[];
     /** 替换式导入影响面 */
     replaceImpact: ExcelReplaceImpact;
-    /** 是否存在阻断性问题（缺参或歧义非空） */
+    /** 是否存在阻断性问题（缺参/歧义/链接失败任一非空） */
     hasBlockingIssues: boolean;
 }
 

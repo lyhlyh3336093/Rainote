@@ -49,13 +49,14 @@ import com.ruoyi.system.domain.NoteRecord;
 import com.ruoyi.system.domain.NoteView;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.AmbiguityItem;
-import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.ClearedLinkColumn;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.DefaultValueFill;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.DeletedColumnInfo;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.LinkFailure;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.MissingParam;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.MissName;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.NewOption;
+import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.RepointedLinkColumn;
+import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.WillClearLinkEntry;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.RelationCandidates;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.SkippedHeader;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.SymmetricWriteImpact;
@@ -436,7 +437,8 @@ class NoteDwtableExcelImportServiceImplTest
         assertEquals(Long.valueOf(302L), candidates.getCandidates().get(1).getRecordId());
 
         // 替换影响面：目标表现有 2 行将全删；数量/隐藏列/公式列不被任何表头引用 → 删除；
-        // 未知列无同名列 → 新建；kept 21 列的配对列（被关联表 502）引用将被清空
+        // 未知列无同名列 → 新建；跨表入链影响按重指向口径（U6 语义迁移）——本场景无他表入链
+        // 数据（selectDWTableList 空表清单），重指向列与清空条目均为空
         ExcelImportPrecheckResult.ReplaceImpact replace = result.getReplaceImpact();
         assertNotNull(replace);
         assertEquals(2, replace.getDeletedRowCount());
@@ -448,11 +450,8 @@ class NoteDwtableExcelImportServiceImplTest
         assertEquals(Long.valueOf(105L), replace.getDeletedColumns().get(1).getColumnId());
         assertEquals(Long.valueOf(106L), replace.getDeletedColumns().get(2).getColumnId());
         assertEquals(Collections.singletonList("未知列"), replace.getNewColumnNames());
-        assertEquals(1, replace.getClearedLinkColumns().size());
-        ClearedLinkColumn cleared = replace.getClearedLinkColumns().get(0);
-        assertEquals(Long.valueOf(502L), cleared.getColumnId());
-        assertEquals("关联的双向链接", cleared.getColumnName());
-        assertEquals("被关联表", cleared.getTableName());
+        assertTrue(replace.getRepointedLinkColumns().isEmpty());
+        assertTrue(replace.getWillClearLinkEntries().isEmpty());
         assertTrue(replace.getUnhiddenColumnNames().isEmpty());
 
         // 文件指纹（KTD5）
@@ -2305,12 +2304,18 @@ class NoteDwtableExcelImportServiceImplTest
                 new String[] {"record_id", "名称", "关联_ID", "关联_文本"},
                 Collections.singletonList(new String[] {"1", "a", "100", "B记录"}));
 
-        // 预检：kept 21 列的配对列仍在预检报告清单（ReplaceImpact 口径迁移归 U6），无链接失败
+        // 预检（U6 新口径）：kept 21 列的配对列按"将重指向"呈现——1 列/1 单元格/1 条目，
+        // 无单元格级清空条目、无链接失败
         ExcelImportPrecheckResult precheck =
                 precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
-        assertEquals(1, precheck.getReplaceImpact().getClearedLinkColumns().size());
-        assertEquals(Long.valueOf(502L),
-                precheck.getReplaceImpact().getClearedLinkColumns().get(0).getColumnId());
+        List<RepointedLinkColumn> repointed = precheck.getReplaceImpact().getRepointedLinkColumns();
+        assertEquals(1, repointed.size());
+        assertEquals(Long.valueOf(502L), repointed.get(0).getColumnId());
+        assertEquals("关联的双向链接", repointed.get(0).getColumnName());
+        assertEquals("被关联表", repointed.get(0).getTableName());
+        assertEquals(1, repointed.get(0).getAffectedCellCount());
+        assertEquals(1, repointed.get(0).getRepointedEntryCount());
+        assertTrue(precheck.getReplaceImpact().getWillClearLinkEntries().isEmpty());
         assertTrue(precheck.getLinkFailures().isEmpty());
 
         int count = runImport(bytes, paramsJson(bytes, null, null, null, null, null));
@@ -2443,14 +2448,17 @@ class NoteDwtableExcelImportServiceImplTest
         byte[] bytes = singleSheetBytes(new String[] {"record_id", "名称"},
                 Collections.singletonList(new String[] {"2", "新名"}));
 
-        // 预检：他表指向本表的 18 列仍在预检报告清单（ReplaceImpact 口径迁移归 U6）
+        // 预检（U6 新口径）：他表指向本表的 18 列按"将重指向"呈现——1 列/1 单元格/1 条目
         ExcelImportPrecheckResult precheck =
                 precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
-        assertEquals(1, precheck.getReplaceImpact().getClearedLinkColumns().size());
-        ClearedLinkColumn cleared = precheck.getReplaceImpact().getClearedLinkColumns().get(0);
-        assertEquals(Long.valueOf(201L), cleared.getColumnId());
-        assertEquals("他表关联", cleared.getColumnName());
-        assertEquals("他表", cleared.getTableName());
+        List<RepointedLinkColumn> repointed = precheck.getReplaceImpact().getRepointedLinkColumns();
+        assertEquals(1, repointed.size());
+        assertEquals(Long.valueOf(201L), repointed.get(0).getColumnId());
+        assertEquals("他表关联", repointed.get(0).getColumnName());
+        assertEquals("他表", repointed.get(0).getTableName());
+        assertEquals(1, repointed.get(0).getAffectedCellCount());
+        assertEquals(1, repointed.get(0).getRepointedEntryCount());
+        assertTrue(precheck.getReplaceImpact().getWillClearLinkEntries().isEmpty());
 
         runImport(bytes, paramsJson(bytes, null, null, null, null, null));
 
@@ -3357,6 +3365,114 @@ class NoteDwtableExcelImportServiceImplTest
         verify(noteDwtableItemMapper, never()).clearLinkFieldsByColumnId(any(Long.class));
     }
 
+    // ===== U6：clearedLinkColumns 新口径（R11-R13）——record_id 精确映射下重指向与清空条目并存 =====
+
+    @Test
+    void precheck_inboundRepoint_repointedAndClearedEntry_newImpactSemantics()
+    {
+        // 捕获 900 多值（"1,2"——记录 1 保留（record_id 映射 + 互指声明覆盖）→ 重指向；
+        // 记录 2 被用户从 Excel 删除 → 单元格级清空并报告）
+        NoteDwtableItem multi = inboundItem(900L, RELATED_TABLE_ID, 100L, 502L, "1,2", "4000,4001", "a,b");
+        multi.setLinkColumnId(104L);
+        mockInboundRepointDoubleLink(multi);
+
+        byte[] bytes = singleSheetBytes(
+                new String[] {"record_id", "名称", "关联_ID", "关联_文本"},
+                Collections.singletonList(new String[] {"1", "a", "100", "B记录"}));
+
+        ExcelImportPrecheckResult precheck =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
+
+        // 将重指向的列：被关联表 502——1 单元格 / 1 条目（仅记录 1 的条目）
+        List<RepointedLinkColumn> repointed = precheck.getReplaceImpact().getRepointedLinkColumns();
+        assertEquals(1, repointed.size());
+        assertEquals(Long.valueOf(502L), repointed.get(0).getColumnId());
+        assertEquals("关联的双向链接", repointed.get(0).getColumnName());
+        assertEquals("被关联表", repointed.get(0).getTableName());
+        assertEquals(1, repointed.get(0).getAffectedCellCount());
+        assertEquals(1, repointed.get(0).getRepointedEntryCount());
+        // 将单元格级清空并报告的条目：记录 2 未出现在导入文件中（定位 + 旧记录名 + 原因）
+        List<WillClearLinkEntry> willClear = precheck.getReplaceImpact().getWillClearLinkEntries();
+        assertEquals(1, willClear.size());
+        assertEquals("被关联表", willClear.get(0).getTableName());
+        assertEquals("关联的双向链接", willClear.get(0).getColumnName());
+        assertEquals("b", willClear.get(0).getRecordName());
+        assertTrue(willClear.get(0).getReason().contains("未出现在导入文件"));
+        // 清空报告不阻断（R12 裁决：仅歧义进失败清单阻断）
+        assertFalse(precheck.isHasBlockingIssues());
+        assertTrue(precheck.getLinkFailures().isEmpty());
+    }
+
+    // ===== U6：互指声明消失的预检呈现——行存活但正向链接被删 → 清空条目（无重指向） =====
+
+    @Test
+    void precheck_inboundRepoint_noMutualDeclaration_willClearEntry()
+    {
+        // 背链条目指向本表记录 1；Excel 中记录 1 的行存活但正向链接被删（关联_文本 空）
+        NoteDwtableItem back = inboundItem(900L, RELATED_TABLE_ID, 100L, 502L, "1", "4000", "a");
+        back.setLinkColumnId(104L);
+        mockInboundRepointDoubleLink(back);
+
+        byte[] bytes = singleSheetBytes(
+                new String[] {"record_id", "名称", "关联_文本"},
+                Collections.singletonList(new String[] {"1", "a", ""}));
+
+        ExcelImportPrecheckResult precheck =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
+
+        // 行存活的 21 列声明集为空 → 背链条目按"无对侧互指声明"清空并报告；无重指向条目
+        List<WillClearLinkEntry> willClear = precheck.getReplaceImpact().getWillClearLinkEntries();
+        assertEquals(1, willClear.size());
+        assertEquals("a", willClear.get(0).getRecordName());
+        assertTrue(willClear.get(0).getReason().contains("互指"));
+        assertTrue(precheck.getReplaceImpact().getRepointedLinkColumns().isEmpty());
+        assertFalse(precheck.isHasBlockingIssues());
+    }
+
+    // ===== U6（R8/R10）：链接失败与缺参并存的混合预检——两类分组同现、确认前零写入 =====
+
+    @Test
+    void precheck_mixedLinkFailureAndMissingParams_bothGroupsPresent_zeroWrites()
+    {
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenAnswer(inv -> {
+            NoteColumn query = inv.getArgument(0);
+            if (RELATED_TABLE_ID.equals(query.getDwtableId()))
+            {
+                return Collections.singletonList(relatedColumn(502L, "关联的双向链接"));
+            }
+            return Arrays.asList(
+                    column(101L, "名称", 1L, null, 0L),
+                    column(102L, "数量", 2L, null, 0L),
+                    column(104L, "关联", 21L, "{\"table_id\":80,\"back_field_id\":502}", 0L));
+        });
+        mockRelatedTable(relatedTable("被关联表", NOTE_ID));
+        mockRelatedRecords(Collections.singletonList(record(100L, "B记录", 1L)));
+
+        // 数量空单元格（缺值缺参）+ 21 列名称未命中（链接失败）并存
+        byte[] bytes = singleSheetBytes(
+                new String[] {"record_id", "名称", "数量", "关联_文本"},
+                Collections.singletonList(new String[] {"1", "a", "", "错名"}));
+
+        ExcelImportPrecheckResult result =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
+
+        // 两类分组并存：链接失败清单（定位/原因/容错说明）+ 缺参清单，hasBlockingIssues 置位
+        assertEquals(1, result.getLinkFailures().size());
+        assertEquals("错名", result.getLinkFailures().get(0).getEntryText());
+        assertEquals(2, result.getLinkFailures().get(0).getRowNumber());
+        assertEquals(1, result.getMissingParams().size());
+        assertEquals("数量", result.getMissingParams().get(0).getColumnName());
+        assertTrue(result.isHasBlockingIssues());
+
+        // 导入（阶段二防御）：21 列解析失败先于任何写入 fail-fast，整表零写入
+        ServiceException ex = assertThrows(ServiceException.class,
+                () -> runImport(bytes, paramsJson(bytes, null, null, null, null, null)));
+        assertTrue(ex.getMessage().contains("解析失败"));
+        verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
+        verify(noteDwtableItemMapper, never()).insertNoteDwtableItems(anyList());
+        verify(noteRecordMapper, never()).deleteNoteRecordByDwtableId(any(Long.class));
+    }
+
     // ===== 名称回退歧义（外部手写无 record_id 列）：预检失败清单 + 整表零写入 =====
 
     @Test
@@ -3390,6 +3506,9 @@ class NoteDwtableExcelImportServiceImplTest
         assertTrue(failure.getReason().contains("入链重指向名称歧义"));
         assertTrue(failure.getReason().contains("record_id"));
         assertTrue(precheck.isHasBlockingIssues());
+        // 歧义条目不进重指向/清空影响面（导入将被整体拒绝，不呈现假想影响）
+        assertTrue(precheck.getReplaceImpact().getRepointedLinkColumns().isEmpty());
+        assertTrue(precheck.getReplaceImpact().getWillClearLinkEntries().isEmpty());
 
         // 导入：事务段兜底 fail-fast（预检-导入间隙数据变化防御），整表零写入
         ServiceException ex = assertThrows(ServiceException.class,

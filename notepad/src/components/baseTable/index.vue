@@ -675,8 +675,8 @@ export default defineComponent({
       relationSelections: [],
     });
     // 是否有须弹框确认的影响面信息(无缺参无歧义时的分流判据,R13)
-    // 替换式语义(决策:有删除即弹框):将删除任何行/列/跨表关联引用 → 必须弹框确认,不走干净直导;
-    // 新建列/取消隐藏为信息性展示(弹框因其他原因打开时在影响面摘要中呈现)
+    // 替换式语义(决策:有删除即弹框):将删除任何行/列或跨表入链影响(重指向/清空条目,U6 重指向口径)
+    // → 必须弹框确认,不走干净直导; 新建列/取消隐藏为信息性展示(弹框因其他原因打开时在影响面摘要中呈现)
     const hasImpactInfo = (p: ExcelImportPrecheckResult): boolean =>
       (p.defaultValueFills?.length || 0) > 0
       || (p.newOptions?.length || 0) > 0
@@ -685,7 +685,8 @@ export default defineComponent({
       || (p.skippedHeaders?.length || 0) > 0
       || (p.replaceImpact?.deletedRowCount || 0) > 0
       || (p.replaceImpact?.deletedColumns?.length || 0) > 0
-      || (p.replaceImpact?.clearedLinkColumns?.length || 0) > 0;
+      || (p.replaceImpact?.repointedLinkColumns?.length || 0) > 0
+      || (p.replaceImpact?.willClearLinkEntries?.length || 0) > 0;
     const importState = reactive({
       loading: false,
       pick() {

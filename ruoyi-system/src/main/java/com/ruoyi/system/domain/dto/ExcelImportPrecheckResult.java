@@ -10,8 +10,9 @@ import java.util.List;
  * <ul>
  *   <li>缺参项（{@link MissingParam}）：缺值/类型违规/关联未命中（替换式语义下表头未映射
  *       一律新建列、未出现的列一律删除，缺列/关联缺列两类已消失）；</li>
- *   <li>替换影响面（{@link ReplaceImpact}）：将删除的行/列、将新建的列、跨表引用清空与
- *       取消隐藏清单——删除类字段非空/非零即必须经弹框确认；</li>
+ *   <li>替换影响面（{@link ReplaceImpact}）：将删除的行/列、将新建的列、跨表入链重指向
+ *       （{@link RepointedLinkColumn}）与单元格级清空报告（{@link WillClearLinkEntry}）、
+ *       取消隐藏清单——删除类与跨表入链影响字段非空/非零即必须经弹框确认；</li>
  *   <li>歧义项（{@link AmbiguityItem}）：同名多记录，预选 sort 靠前；</li>
  *   <li>默认值填充项（{@link DefaultValueFill}）：有默认值的列不进缺参弹框（R10 填充优先级）；</li>
  *   <li>新选项创建项（{@link NewOption}）：单选/多选未命中选项自动追加（R19）；</li>
@@ -718,8 +719,11 @@ public class ExcelImportPrecheckResult
     /**
      * 替换式导入影响面：本次导入成功后目标表现有数据行全部删除、列集合对齐 Excel。
      * <ul>
-     *   <li>删除类字段（{@link #deletedRowCount}/{@link #deletedColumns}/{@link #clearedLinkColumns}）
-     *       任一非空/非零，前端即必须经预检弹框确认后才执行导入（数据删除不可无提示发生）；</li>
+     *   <li>删除类字段（{@link #deletedRowCount}/{@link #deletedColumns}）与跨表入链影响
+     *       （{@link #repointedLinkColumns}/{@link #willClearLinkEntries}）任一非空/非零，
+     *       前端即必须经预检弹框确认后才执行导入（数据删除/跨表改写不可无提示发生）；
+     *       跨表入链影响按重指向口径呈现（U6 语义迁移，取代旧"将清空的关联列"整列清空口径——
+     *       导入路径已由 U5 入链重指向取代整列清空）；</li>
      *   <li>新建列（{@link #newColumnNames}）与取消隐藏（{@link #unhiddenColumnNames}）为信息性
      *       展示，不单独强制弹框。</li>
      * </ul>
@@ -735,8 +739,11 @@ public class ExcelImportPrecheckResult
         /** 将新建的列名（Excel 独有表头 → 纯文本列，按出现顺序，同名去重） */
         private List<String> newColumnNames = new ArrayList<>();
 
-        /** 其他表中引用将被清空的关联列（kept 21 列的配对列 + 指向本表的 18 列） */
-        private List<ClearedLinkColumn> clearedLinkColumns = new ArrayList<>();
+        /** 将重指向的关联列（他表指向本表旧记录的入链，导入后按"旧 item→新 item"映射三字段精准重写） */
+        private List<RepointedLinkColumn> repointedLinkColumns = new ArrayList<>();
+
+        /** 将单元格级清空并报告的入链条目（目标记录未出现在导入文件中 / 21 配对列互指声明消失） */
+        private List<WillClearLinkEntry> willClearLinkEntries = new ArrayList<>();
 
         /** 匹配到隐藏列将取消隐藏（isShow 1→0）并导入数据的列名 */
         private List<String> unhiddenColumnNames = new ArrayList<>();
@@ -771,14 +778,24 @@ public class ExcelImportPrecheckResult
             this.newColumnNames = newColumnNames;
         }
 
-        public List<ClearedLinkColumn> getClearedLinkColumns()
+        public List<RepointedLinkColumn> getRepointedLinkColumns()
         {
-            return clearedLinkColumns;
+            return repointedLinkColumns;
         }
 
-        public void setClearedLinkColumns(List<ClearedLinkColumn> clearedLinkColumns)
+        public void setRepointedLinkColumns(List<RepointedLinkColumn> repointedLinkColumns)
         {
-            this.clearedLinkColumns = clearedLinkColumns;
+            this.repointedLinkColumns = repointedLinkColumns;
+        }
+
+        public List<WillClearLinkEntry> getWillClearLinkEntries()
+        {
+            return willClearLinkEntries;
+        }
+
+        public void setWillClearLinkEntries(List<WillClearLinkEntry> willClearLinkEntries)
+        {
+            this.willClearLinkEntries = willClearLinkEntries;
         }
 
         public List<String> getUnhiddenColumnNames()
@@ -851,19 +868,26 @@ public class ExcelImportPrecheckResult
     }
 
     /**
-     * 其他表中引用将被清空的关联列：本表记录全删后，kept 21 列的配对列与
-     * 指向本表的 18 列的 items 旧引用全部悬空，link 字段将被清空。
+     * 将重指向的关联列（U6 语义迁移）：他表中指向本表旧记录的入链列（kept 21 列的配对列 +
+     * 指向本表的 18 列，按 linkRecordId 数据面捕获），替换导入重建记录后将按
+     * "旧 item→新 item"映射三字段精准重写（linkRecordId/linkItemId/value）。
      */
-    public static class ClearedLinkColumn
+    public static class RepointedLinkColumn
     {
-        /** 关联列所在表名 */
+        /** 入链所在表名 */
         private String tableName;
 
-        /** 关联列名 */
+        /** 入链列名 */
         private String columnName;
 
-        /** 关联列 id */
+        /** 入链列 id */
         private Long columnId;
+
+        /** 涉及单元格数（含至少一个将重指向条目的入链单元格数） */
+        private int affectedCellCount;
+
+        /** 将重指向的条目数（多值单元格按条目计数） */
+        private int repointedEntryCount;
 
         public String getTableName()
         {
@@ -893,6 +917,86 @@ public class ExcelImportPrecheckResult
         public void setColumnId(Long columnId)
         {
             this.columnId = columnId;
+        }
+
+        public int getAffectedCellCount()
+        {
+            return affectedCellCount;
+        }
+
+        public void setAffectedCellCount(int affectedCellCount)
+        {
+            this.affectedCellCount = affectedCellCount;
+        }
+
+        public int getRepointedEntryCount()
+        {
+            return repointedEntryCount;
+        }
+
+        public void setRepointedEntryCount(int repointedEntryCount)
+        {
+            this.repointedEntryCount = repointedEntryCount;
+        }
+    }
+
+    /**
+     * 将单元格级清空并报告的入链条目（U6 语义迁移，R12 裁决）：目标记录未出现在导入文件中
+     * （确已不存在），或 21 配对列的导入计划已无对侧互指声明——该条目链接字段与显示值
+     * 将被单元格级清空，并随导入结果报告（不阻断导入）。
+     */
+    public static class WillClearLinkEntry
+    {
+        /** 入链所在表名 */
+        private String tableName;
+
+        /** 入链列名 */
+        private String columnName;
+
+        /** 被清空条目指向的本表旧记录名 */
+        private String recordName;
+
+        /** 清空原因（中文：目标记录未出现在导入文件中 / 导入计划已无对侧互指声明） */
+        private String reason;
+
+        public String getTableName()
+        {
+            return tableName;
+        }
+
+        public void setTableName(String tableName)
+        {
+            this.tableName = tableName;
+        }
+
+        public String getColumnName()
+        {
+            return columnName;
+        }
+
+        public void setColumnName(String columnName)
+        {
+            this.columnName = columnName;
+        }
+
+        public String getRecordName()
+        {
+            return recordName;
+        }
+
+        public void setRecordName(String recordName)
+        {
+            this.recordName = recordName;
+        }
+
+        public String getReason()
+        {
+            return reason;
+        }
+
+        public void setReason(String reason)
+        {
+            this.reason = reason;
         }
     }
 

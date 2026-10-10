@@ -56,7 +56,8 @@ import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.NewOption;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.RecordCandidate;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.ReplaceImpact;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.DeletedColumnInfo;
-import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.ClearedLinkColumn;
+import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.RepointedLinkColumn;
+import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.WillClearLinkEntry;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.RelationCandidates;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.SkippedHeader;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.SymmetricWriteImpact;
@@ -99,8 +100,9 @@ import com.ruoyi.system.service.impl.ExcelWorkbookReader.RowData;
  *       name → 有序记录列表，同名多条保留全部：首条=预选，size&gt;1=歧义）；</li>
  *   <li>逐行汇总：缺参项（缺值/类型违规/关联未命中）、歧义项、默认值填充项、新选项创建项、
  *       对称写入影响、忽略提示；</li>
- *   <li>替换影响面（{@link ReplaceImpact}）：将删除的行/列、将新建的列、跨表引用清空与
- *       取消隐藏清单——删除类字段非空/非零即前端必须弹框确认；</li>
+ *   <li>替换影响面（{@link ReplaceImpact}）：将删除的行/列、将新建的列、跨表入链重指向
+ *       （将重指向的列/单元格数 + 将单元格级清空并报告的条目，U6 语义迁移）与取消隐藏清单
+ *       ——删除类与跨表入链影响字段非空/非零即前端必须弹框确认；</li>
  *   <li>文件指纹（KTD5：size + md5）随结果返回，供阶段二比对。</li>
  * </ol>
  * 文本匹配（KTD4 整串优先）：单元格文本（trim）先整串匹配记录名，命中即用（不拆逗号）；
@@ -254,7 +256,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
      *   <li>歧义（同名多条，18 列）：按 sort 靠前预选建立关联（与界面预检默认一致），不阻断，
      *       成功结果中报告歧义处理清单；</li>
      *   <li>列默认值/新选项/对称写入等静默变更与<b>替换影响</b>（删除行/删除列/新建列/
-     *       跨表引用清空）在成功结果中报告（与界面预检清单对齐）。</li>
+     *     跨表入链重指向与单元格级清空报告）在成功结果中报告（与界面预检清单对齐）。</li>
      * </ul>
      * 事务：本方法不加 {@code @Transactional}（对齐 HTTP 控制器直调 {@code importExcelData}，
      * 非事务前置段 + 写入段经自注入代理进入事务）；归属校验 + noteId 匹配断言自带（KTD6 对称）。
@@ -360,7 +362,8 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     }
 
     /**
-     * agent 成功消息的替换摘要（为 0/空的分句省略）。
+     * agent 成功消息的替换摘要（为 0/空的分句省略）。跨表入链影响按重指向口径
+     * （U6 语义迁移）：重指向条目数按列聚合、清空条目逐条计数。
      */
     private static String replaceSummary(ReplaceImpact replace)
     {
@@ -376,6 +379,19 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         if (!replace.getNewColumnNames().isEmpty())
         {
             summary.append("，新建 ").append(replace.getNewColumnNames().size()).append(" 列");
+        }
+        int repointedEntries = 0;
+        for (RepointedLinkColumn repointed : replace.getRepointedLinkColumns())
+        {
+            repointedEntries += repointed.getRepointedEntryCount();
+        }
+        if (repointedEntries > 0)
+        {
+            summary.append("，他表入链重指向 ").append(repointedEntries).append(" 条");
+        }
+        if (!replace.getWillClearLinkEntries().isEmpty())
+        {
+            summary.append("，清空他表悬空链接 ").append(replace.getWillClearLinkEntries().size()).append(" 条");
         }
         return summary.toString();
     }
@@ -605,25 +621,28 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         result.setFileFingerprint(fp);
         result.setIgnoredSheets(new ArrayList<>(selection.getIgnoredSheetNames()));
         appendSkippedHeaders(result, mapping, noteId, dwtableId);
-        analyzeColumns(result, noteId, dwtableId, userId, selection.getRows(), columns, mapping);
+        // U5 互指声明集（预检口径）：kept 21 列逐行解析目标，入链重指向影响面分类消费
+        Map<Long, List<Set<Long>>> declaredTargetsByColumnId =
+                analyzeColumns(result, noteId, dwtableId, userId, selection.getRows(), columns, mapping);
         buildReplaceImpact(result, noteId, dwtableId, columns, mapping);
-        // U5（R12 裁决）：入链重指向名称回退歧义预判（外部手写文件无 record_id 首列场景；
-        // 歧义进链接失败清单并列阻断，确认前零写入）
-        analyzeInboundRepointAmbiguity(result, noteId, dwtableId, selection, columns, mapping);
+        // U5（R12 裁决）+ U6：入链重指向预检分析——名称回退歧义进链接失败清单（与缺参并列
+        // 阻断，确认前零写入）；重指向/单元格级清空影响面进 ReplaceImpact（呈现口径）
+        analyzeInboundRepoint(result, noteId, dwtableId, selection, columns, mapping, declaredTargetsByColumnId);
         // U3（R8）：链接失败清单与缺参清单并列阻断（21 列强失败，确认前零写入）
         result.setHasBlockingIssues(!result.getMissingParams().isEmpty()
                 || !result.getAmbiguityItems().isEmpty()
                 || !result.getLinkFailures().isEmpty());
 
         log.info("[EXCEL-PRECHECK] 预检完成 noteId={}, dwtableId={}, userId={}, totalRows={}, missingParams={}, "
-                        + "ambiguityItems={}, linkFailures={}, replaceImpact{{}行/{}删列/{}新列/{}清空/{}取消隐藏}, defaultValueFills={}, "
-                        + "newOptions={}, symmetricWriteImpact={}, ignoredSheets={}, skippedHeaders={}",
+                        + "ambiguityItems={}, linkFailures={}, replaceImpact{{}行/{}删列/{}新列/{}重指向列/{}清空条目/{}取消隐藏}, "
+                        + "defaultValueFills={}, newOptions={}, symmetricWriteImpact={}, ignoredSheets={}, skippedHeaders={}",
                 noteId, dwtableId, userId, selection.getRows().size(),
                 result.getMissingParams().size(), result.getAmbiguityItems().size(),
                 result.getLinkFailures().size(),
                 result.getReplaceImpact().getDeletedRowCount(), result.getReplaceImpact().getDeletedColumns().size(),
                 result.getReplaceImpact().getNewColumnNames().size(),
-                result.getReplaceImpact().getClearedLinkColumns().size(),
+                result.getReplaceImpact().getRepointedLinkColumns().size(),
+                result.getReplaceImpact().getWillClearLinkEntries().size(),
                 result.getReplaceImpact().getUnhiddenColumnNames().size(),
                 result.getDefaultValueFills().size(), result.getNewOptions().size(),
                 result.getSymmetricWriteImpact().size(), result.getIgnoredSheets().size(),
@@ -658,9 +677,12 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
      * 21 走 ID 优先 + 名称回退（{@link #analyzeDoubleLinkColumn}，失败进链接失败清单强阻断）；
      * 25 走行 id 优先 + 笔记名回退（{@link #analyzeSemanticLinkColumn}，候选=库内全部笔记标题，
      * 失败同清单强阻断）。
+     *
+     * @return kept 21 列 id → 逐行声明的目标记录 id 集（U5 互指声明集预检口径，
+     *         入链重指向影响面分类消费；与 buildImportPlan 的 declaredTargetsByColumnId 同构）
      */
-    private void analyzeColumns(ExcelImportPrecheckResult result, Long noteId, Long dwtableId, Long userId,
-            List<RowData> rows, List<NoteColumn> columns, ColumnMapping mapping)
+    private Map<Long, List<Set<Long>>> analyzeColumns(ExcelImportPrecheckResult result, Long noteId,
+            Long dwtableId, Long userId, List<RowData> rows, List<NoteColumn> columns, ColumnMapping mapping)
     {
         // 已映射列实例 → headerIndex（matcher 保证一个列至多被一个表头映射）
         Map<NoteColumn, Integer> headerIndexByColumn = new IdentityHashMap<>();
@@ -668,6 +690,9 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         {
             headerIndexByColumn.put(entry.getColumn(), Integer.valueOf(entry.getHeaderIndex()));
         }
+
+        // U5 互指声明集（kept 21 列 id → 逐行声明目标记录 id 集，analyzeDoubleLinkColumn 填充）
+        Map<Long, List<Set<Long>>> declaredTargetsByColumnId = new LinkedHashMap<>();
 
         // 被关联表上下文缓存（同表多列共享一次 KTD4 批量预解析）
         Map<Long, LinkTableContext> contextByTableId = new HashMap<>();
@@ -701,7 +726,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                 {
                     // U3：21 列双轨制（ID 优先 + 名称回退，失败进链接失败清单）
                     analyzeDoubleLinkColumn(result, noteId, userId, column, headerIndex.intValue(),
-                            mapping, rows, contextByTableId);
+                            mapping, rows, contextByTableId, declaredTargetsByColumnId);
                 }
                 else
                 {
@@ -724,6 +749,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                 analyzeBasicColumn(result, column, type, headerIndex.intValue(), mapping, rows);
             }
         }
+        return declaredTargetsByColumnId;
     }
 
     /**
@@ -958,10 +984,11 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
      * 按同位名称条目经 {@link LinkNameResolver} 回退，歧义/未命中进<b>链接失败清单</b>
      * （R8 新分组，与缺参清单并列阻断，确认前零写入；多值任一条目失败整表零写入，R9）。
      * 对称写入影响与选择器候选的发射口径与 18 列现状一致（候选仅供前端兼容，21 列已无补选入口）。
+     * 逐行解析目标同步登记互指声明集（U5：配对列旧条目存活 ⇔ 对侧行声明含该条目所在记录）。
      */
     private void analyzeDoubleLinkColumn(ExcelImportPrecheckResult result, Long noteId, Long userId,
             NoteColumn column, int headerIndex, ColumnMapping mapping, List<RowData> rows,
-            Map<Long, LinkTableContext> contextByTableId)
+            Map<Long, LinkTableContext> contextByTableId, Map<Long, List<Set<Long>>> declaredTargetsByColumnId)
     {
         LinkTableContext context = linkTableContext(column, noteId, userId, contextByTableId);
         int idHeaderIndex = mapping.linkIdHeaderIndex(column);
@@ -969,15 +996,23 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
 
         // 命中的 distinct 记录 id（R11 影响面；ID 命中与名称回退命中并集）
         Set<Long> matchedRecordIds = new LinkedHashSet<>();
+        // U5 互指声明集：逐行解析目标记录 id 集（与 buildImportPlan 的 declaredPerRow 同构）
+        List<Set<Long>> declaredPerRow = new ArrayList<>(rows.size());
         for (RowData row : rows)
         {
             String idText = idHeaderIndex >= 0 ? mapping.cellText(row, idHeaderIndex) : "";
             String nameText = mapping.cellText(row, headerIndex);
             DoubleLinkCellResolution resolution = resolveDoubleLinkCell(idText, nameText, context, candidateNames);
+            Set<Long> declared = new LinkedHashSet<>();
             for (NoteRecord record : resolution.records())
             {
                 matchedRecordIds.add(record.getId());
+                if (record != null && record.getId() != null)
+                {
+                    declared.add(record.getId());
+                }
             }
+            declaredPerRow.add(declared);
             for (LinkEntryFailure failure : resolution.failures)
             {
                 LinkFailure item = new LinkFailure();
@@ -989,6 +1024,10 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                 item.setExplanation(failure.explanation);
                 result.getLinkFailures().add(item);
             }
+        }
+        if (column.getId() != null)
+        {
+            declaredTargetsByColumnId.put(column.getId(), declaredPerRow);
         }
 
         // 对称写入影响（16/R11，口径与现状一致：命中的 distinct 记录数）
@@ -1493,9 +1532,10 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
      *   <li>deletedColumns——不被任何表头引用的非系统列（mapped 列 ∪ 同名排除类型跳过列之外的列），
      *       21 列标记配对列级联删除；</li>
      *   <li>newColumnNames——未匹配表头（同名去重，按出现顺序）；</li>
-     *   <li>clearedLinkColumns——kept 21 列的配对列 + 同 note 他表指向本表的 18 列
-     *       （本表行全删后其 items 旧引用悬空，link 字段将被清空）；</li>
-     *   <li>unhiddenColumnNames——映射到的隐藏列（导入时取消隐藏并导数据）。</li>
+     *   <li>unhiddenColumnNames——映射到的隐藏列（导入时取消隐藏并导数据）；</li>
+     *   <li>repointedLinkColumns / willClearLinkEntries——跨表入链重指向影响面由
+     *       {@link #analyzeInboundRepoint} 按 linkRecordId 数据面口径产出（U6 语义迁移，
+     *       取代旧"将清空的关联列"列扫描口径），不在此组装。</li>
      * </ul>
      */
     private void buildReplaceImpact(ExcelImportPrecheckResult result, Long noteId, Long dwtableId,
@@ -1553,25 +1593,15 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             impact.getNewColumnNames().add(entry.getHeaderName());
         }
 
-        // 跨表引用清空列（kept 21 配对列 + 他表指向本表的 18 列）
-        for (NoteColumn cleared : collectClearedLinkColumns(noteId, dwtableId, mapping))
-        {
-            ClearedLinkColumn item = new ClearedLinkColumn();
-            item.setColumnId(cleared.getId());
-            item.setColumnName(cleared.getName() == null ? "" : cleared.getName().trim());
-            NoteDwtable owner = cleared.getDwtableId() == null ? null
-                    : noteDwtableMapper.selectNoteDwtableById(cleared.getDwtableId());
-            item.setTableName(owner == null || owner.getName() == null ? "" : owner.getName());
-            impact.getClearedLinkColumns().add(item);
-        }
-
         result.setReplaceImpact(impact);
     }
 
     /**
-     * 收集其他表中引用将被清空的关联列：kept（映射到的）21 列在被关联表的配对列
-     * + 同 note 其他表 type=18 且 property.table_id 指向本表的列。
-     * 自引用表的配对列也在收集范围（其 items 已随本表全删，清空为 no-op，报告口径统一）。
+     * 收集其他表中涉及跨表重算的关联列（kept 21 列在被关联表的配对列
+     * + 同 note 其他表 type=18 且 property.table_id 指向本表的列）——仅作
+     * {@code buildRecomputeTargets} 的重算编排扫描输入（导入路径已由 U5 入链重指向
+     * 取代整列清空，预检呈现已迁移至 repointedLinkColumns/willClearLinkEntries 数据面口径）。
+     * 自引用表的配对列也在收集范围（其 items 已随本表全删，重算覆盖为 no-op，口径统一）。
      */
     private List<NoteColumn> collectClearedLinkColumns(Long noteId, Long dwtableId, ColumnMapping mapping)
     {
@@ -2281,14 +2311,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         plan.recordIdColumnPresent = recordIdHeaderPresent(selection);
         if (plan.recordIdColumnPresent)
         {
-            for (int r = 0; r < rowCount; r++)
-            {
-                Long legacyRecordId = parseLongSafe(mapping.cellText(rows.get(r), 0).trim());
-                if (legacyRecordId != null)
-                {
-                    plan.rowIndexByLegacyRecordId.putIfAbsent(legacyRecordId, Integer.valueOf(r));
-                }
-            }
+            plan.rowIndexByLegacyRecordId.putAll(rowIndexByLegacyRecordId(rows, mapping));
         }
 
         // ===== U5 互指声明集：kept 21 列逐行解析目标（配对列旧条目存活 ⇔ 对侧行声明含该记录；
@@ -3291,58 +3314,221 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     // ==================== 入链重指向（U5，R11-R13，取代整列清空） ====================
 
     /**
-     * 入链重指向的名称回退歧义预判（U5，R12 裁决：预检阶段即完成解析判定）。
+     * 入链重指向的预检分析（U5，R12 裁决：预检阶段即完成解析判定；U6：影响面呈现）——
+     * 歧义预判 + 重指向/清空影响面分类。
      * <p>
      * 仅外部手写文件（Excel 无 record_id 首列）走名称回退（KTD 裁决：重指向以
      * record_id+回填新 id 的 ID 精确映射为主路径，名称回退是外部编辑场景的兜底）；
-     * record_id 列存在时旧记录要么映射命中、要么"确已不存在"，无歧义可判，直接跳过。
+     * record_id 列存在时旧记录要么映射命中、要么"确已不存在"，无歧义可判。
      * 候选名为导入后新记录名的近似派生（名称列单元格文本 ∪ 默认值；补参值待阶段二按
      * {@link RowPlan#name} 权威判定——此处未命中仅降级为清空报告，不误放行歧义）。
-     * 歧义进链接失败清单（与 U3/U4 同机制并列阻断，确认前零写入）；未命中/空名为
-     * "目标确已不存在"的清空+报告项（不阻断，R12 裁决）。
+     * <ul>
+     *   <li>名称回退歧义 → 链接失败清单（与 U3/U4 同机制并列阻断，确认前零写入）；</li>
+     *   <li>影响面分类（对齐 {@link #executeInboundRepoint} 的执行口径，U6 语义迁移）：
+     *       行定位命中且互指声明覆盖 → {@link RepointedLinkColumn}（将重指向的列/单元格数/
+     *       条目数）；目标确已不存在（未出现在导入文件中）或互指声明消失 →
+     *       {@link WillClearLinkEntry}（将单元格级清空并报告的条目，不阻断，R12 裁决）。</li>
+     * </ul>
      */
-    private void analyzeInboundRepointAmbiguity(ExcelImportPrecheckResult result, Long noteId, Long dwtableId,
-            SheetSelection selection, List<NoteColumn> columns, ColumnMapping mapping)
+    private void analyzeInboundRepoint(ExcelImportPrecheckResult result, Long noteId, Long dwtableId,
+            SheetSelection selection, List<NoteColumn> columns, ColumnMapping mapping,
+            Map<Long, List<Set<Long>>> declaredTargetsByColumnId)
     {
-        // record_id 首列存在 → ID 精确映射主路径，无名称回退、无歧义可判
-        if (recordIdHeaderPresent(selection))
-        {
-            return;
-        }
         RepointContext context = captureInboundLinks(noteId, dwtableId);
         if (context.involvedLegacyRecordIds.isEmpty())
         {
             return;
         }
-        List<String> candidateNames = deriveRowNameCandidates(selection, columns, mapping);
-        if (candidateNames.isEmpty())
+        List<RowData> rows = selection.getRows();
+        boolean recordIdPresent = recordIdHeaderPresent(selection);
+        // 逐行新记录名近似派生 + 名称→行索引（对齐执行段 rowNameCandidates/rowIndexByName：
+        // 全行名含空串、同名首行生效；空名不进索引——空旧记录名按"确已不存在"处理）
+        List<String> rowNames = deriveRowNames(selection, columns, mapping);
+        Map<String, Integer> rowIndexByName = new HashMap<>();
+        for (int r = 0; r < rowNames.size(); r++)
         {
-            // 无候选（无文本列/全空名）→ 全部按"确已不存在"清空+报告，无歧义可判
-            return;
-        }
-        for (Long legacyId : context.involvedLegacyRecordIds)
-        {
-            String legacyName = context.legacyRecordNameById.get(legacyId);
-            if (legacyName == null || legacyName.trim().isEmpty())
+            String name = rowNames.get(r);
+            if (name != null && !name.isEmpty())
             {
-                // 空名记录无法按名称回退 → 按"确已不存在"清空+报告（不阻断）
-                continue;
+                rowIndexByName.putIfAbsent(name, Integer.valueOf(r));
             }
-            for (LinkNameResolver.EntryResult entryResult : linkNameResolver.resolve(legacyName, candidateNames))
+        }
+        // record_id 精确映射（主路径；record_id 列缺失时为空表，全部走名称回退）
+        Map<Long, Integer> exactRowIndex = recordIdPresent
+                ? rowIndexByLegacyRecordId(rows, mapping) : Collections.emptyMap();
+
+        // ===== 名称回退歧义预判（仅外部手写文件）+ 名称回退定位缓存（三态：歧义/命中/未命中） =====
+        Set<Long> ambiguousLegacyIds = new HashSet<>();
+        Map<Long, Integer> nameFallbackRowIndex = new HashMap<>();
+        if (!recordIdPresent)
+        {
+            for (Long legacyId : context.involvedLegacyRecordIds)
             {
-                if (entryResult.isAmbiguous())
+                String legacyName = context.legacyRecordNameById.get(legacyId);
+                if (legacyName == null || legacyName.trim().isEmpty())
                 {
-                    result.getLinkFailures().add(
-                            repointAmbiguityFailure(context, legacyId, legacyName, entryResult));
+                    // 空名记录无法按名称回退 → 按"确已不存在"清空+报告（不阻断）
+                    continue;
+                }
+                List<LinkNameResolver.EntryResult> entryResults = linkNameResolver.resolve(legacyName, rowNames);
+                boolean ambiguous = false;
+                for (LinkNameResolver.EntryResult entryResult : entryResults)
+                {
+                    if (entryResult.isAmbiguous())
+                    {
+                        ambiguous = true;
+                        result.getLinkFailures().add(
+                                repointAmbiguityFailure(context, legacyId, legacyName, entryResult));
+                    }
+                }
+                // 定位口径对齐 resolveRepointRowByName：唯一结果且非歧义才命中；
+                // 多条目拆分形态不可信，按未命中（=目标确已不存在，清空+报告）
+                if (!ambiguous && entryResults.size() == 1 && entryResults.get(0).isMatched())
+                {
+                    Integer located = rowIndexByName.get(entryResults.get(0).getMatchedName());
+                    if (located != null)
+                    {
+                        nameFallbackRowIndex.put(legacyId, located);
+                    }
+                }
+                else if (ambiguous)
+                {
+                    ambiguousLegacyIds.add(legacyId);
                 }
             }
         }
+
+        // ===== 影响面分类（预检呈现口径；被级联删除的配对列条目随列消亡，不进影响面） =====
+        Set<Long> cascadeDeletedSourceIds = new HashSet<>();
+        for (DeletedColumnInfo deleted : result.getReplaceImpact().getDeletedColumns())
+        {
+            if (deleted != null && deleted.isCascadeDeletesPairedColumn() && deleted.getColumnId() != null)
+            {
+                cascadeDeletedSourceIds.add(deleted.getColumnId());
+            }
+        }
+        Map<Long, RepointedLinkColumn> repointedByColumnId = new LinkedHashMap<>();
+        for (NoteDwtableItem inbound : context.inboundItems)
+        {
+            if (inbound.getLinkColumnId() != null && cascadeDeletedSourceIds.contains(inbound.getLinkColumnId()))
+            {
+                // 配对列将随被删 21 列级联删除（条目随列消亡）——重指向 update 为 no-op，不呈现
+                continue;
+            }
+            NoteColumn inboundColumn = context.inboundColumnById.get(inbound.getColumnId());
+            // 互指判定前提：捕获条目所在列为 21 且 linkColumnId 指向本表 kept 21 参与列
+            //（18 列单向无条件重指向；列属性/linkColumnId 残缺按 18 口径，不扩大破坏半径）
+            List<Set<Long>> declaredPerRow = null;
+            if (inboundColumn != null && inboundColumn.getType() != null
+                    && inboundColumn.getType() == ExcelColumnMatcher.TYPE_DOUBLE_LINK
+                    && inbound.getLinkColumnId() != null
+                    && declaredTargetsByColumnId.containsKey(inbound.getLinkColumnId()))
+            {
+                declaredPerRow = declaredTargetsByColumnId.get(inbound.getLinkColumnId());
+            }
+            boolean cellRepointed = false;
+            for (String part : splitCsvToList(inbound.getLinkRecordId()))
+            {
+                Long legacyId = parseLongSafe(part.trim());
+                // 异常成员（非本表旧记录的脏数据）原样保留、歧义成员已进失败清单——均不进影响面
+                if (legacyId == null || !context.legacyRecordNameById.containsKey(legacyId)
+                        || ambiguousLegacyIds.contains(legacyId))
+                {
+                    continue;
+                }
+                String legacyName = context.legacyRecordNameById.get(legacyId);
+                Integer rowIndex = exactRowIndex.get(legacyId);
+                if (rowIndex == null)
+                {
+                    rowIndex = nameFallbackRowIndex.get(legacyId);
+                }
+                if (rowIndex == null)
+                {
+                    // 目标确已不存在（旧记录未出现在 Excel 中）→ 单元格级清空并报告
+                    addWillClearLinkEntry(result.getReplaceImpact(), context, inbound, inboundColumn,
+                            legacyName, "目标记录未出现在导入文件中");
+                    continue;
+                }
+                if (declaredPerRow != null && !declaredPerRow.get(rowIndex.intValue()).contains(inbound.getRecordId()))
+                {
+                    // 21 互指一致性：对侧行的声明集不含本条目所在记录 → 条目级清空并报告
+                    addWillClearLinkEntry(result.getReplaceImpact(), context, inbound, inboundColumn,
+                            legacyName, "导入计划已无对侧互指声明（互指一致性）");
+                    continue;
+                }
+                RepointedLinkColumn repointed = repointedByColumnId.computeIfAbsent(inbound.getColumnId(), k ->
+                        newRepointedLinkColumn(context, inbound, inboundColumn));
+                repointed.setRepointedEntryCount(repointed.getRepointedEntryCount() + 1);
+                cellRepointed = true;
+            }
+            if (cellRepointed)
+            {
+                RepointedLinkColumn repointed = repointedByColumnId.get(inbound.getColumnId());
+                repointed.setAffectedCellCount(repointed.getAffectedCellCount() + 1);
+            }
+        }
+        result.getReplaceImpact().getRepointedLinkColumns().addAll(repointedByColumnId.values());
+    }
+
+    /** 新建"将重指向的关联列"条目（表名/列名定位与 repointReport 同口径） */
+    private static RepointedLinkColumn newRepointedLinkColumn(RepointContext context, NoteDwtableItem inbound,
+            NoteColumn inboundColumn)
+    {
+        RepointedLinkColumn item = new RepointedLinkColumn();
+        item.setColumnId(inbound.getColumnId());
+        item.setTableName(inboundTableName(context, inbound));
+        item.setColumnName(inboundColumnName(inbound, inboundColumn));
+        return item;
+    }
+
+    /** 追加"将单元格级清空并报告"条目（表名/列名定位与 repointReport 同口径） */
+    private static void addWillClearLinkEntry(ReplaceImpact impact, RepointContext context,
+            NoteDwtableItem inbound, NoteColumn inboundColumn, String legacyName, String reason)
+    {
+        WillClearLinkEntry entry = new WillClearLinkEntry();
+        entry.setTableName(inboundTableName(context, inbound));
+        entry.setColumnName(inboundColumnName(inbound, inboundColumn));
+        entry.setRecordName(legacyName == null || legacyName.isEmpty() ? "?" : legacyName);
+        entry.setReason(reason);
+        impact.getWillClearLinkEntries().add(entry);
+    }
+
+    /** 入链条目所在表名（查不到表定义时退化为表 id 字符串，与 repointReport 同口径） */
+    private static String inboundTableName(RepointContext context, NoteDwtableItem inbound)
+    {
+        return context.tableNameByDwtId.containsKey(inbound.getDwtId())
+                ? context.tableNameByDwtId.get(inbound.getDwtId()) : String.valueOf(inbound.getDwtId());
+    }
+
+    /** 入链条目所在列名（查不到列定义时退化为列 id 字符串，与 repointReport 同口径） */
+    private static String inboundColumnName(NoteDwtableItem inbound, NoteColumn inboundColumn)
+    {
+        return inboundColumn == null || inboundColumn.getName() == null
+                ? String.valueOf(inbound.getColumnId()) : inboundColumn.getName();
+    }
+
+    /**
+     * record_id 首列的"旧记录 id → 行索引"精确映射（重复 id 首行生效；
+     * 空/非法单元格值不进映射，该行视为无旧 id 的新增行——预检与执行段共用口径）。
+     */
+    private static Map<Long, Integer> rowIndexByLegacyRecordId(List<RowData> rows, ColumnMapping mapping)
+    {
+        Map<Long, Integer> index = new LinkedHashMap<>();
+        for (int r = 0; r < rows.size(); r++)
+        {
+            Long legacyRecordId = parseLongSafe(mapping.cellText(rows.get(r), 0).trim());
+            if (legacyRecordId != null)
+            {
+                index.putIfAbsent(legacyRecordId, Integer.valueOf(r));
+            }
+        }
+        return index;
     }
 
     /**
      * 重指向名称歧义的失败清单条目（复用 {@link LinkFailure} 载体）：定位取首个指向该旧记录
      * 的捕获条目（他表表名.列名——重指向条目不在本表 Excel 中，rowNumber 无行号语义置 0，
-     * 呈现细化归 U6）；原因说明外部手写文件缺 record_id 列的回退场景与修正建议。
+     * 前端呈现按"表名.列名"定位文本）；原因说明外部手写文件缺 record_id 列的回退场景与修正建议。
      */
     private static LinkFailure repointAmbiguityFailure(RepointContext context, Long legacyId, String legacyName,
             LinkNameResolver.EntryResult entryResult)
@@ -3377,12 +3563,14 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     }
 
     /**
-     * 导入后新记录名候选（预检近似派生，名称回退歧义预判用）：与 {@code buildImportPlan}
+     * 导入后逐行新记录名（预检近似派生，入链重指向名称回退用）：与 {@code buildImportPlan}
      * 的 name 派生同源选择——kept（被表头引用）中首个 type=1 列，无则首个未匹配表头
-     * （新建文本列）；值为单元格文本 trim，空单元格取列默认值，仍空不进候选
-     * （三源合并的补参终值由阶段二按 {@link RowPlan#name} 权威判定）。
+     * （新建文本列）；值为单元格文本 trim，空单元格取列默认值，仍空保留空串占位
+     * （行位与 selection.getRows() 一一对应，供名称→行索引定位；对齐执行段
+     * rowNameCandidates 含空串的口径。三源合并的补参终值由阶段二按
+     * {@link RowPlan#name} 权威判定）。
      */
-    private static List<String> deriveRowNameCandidates(SheetSelection selection, List<NoteColumn> columns,
+    private static List<String> deriveRowNames(SheetSelection selection, List<NoteColumn> columns,
             ColumnMapping mapping)
     {
         List<RowData> rows = selection.getRows();
@@ -3431,7 +3619,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             if (headerIndex < 0)
             {
                 // 防御：被引用的 type=1 列未映射（形态不可达——排除类型不含 1）
-                return Collections.emptyList();
+                return Collections.nCopies(rows.size(), "");
             }
         }
         else
@@ -3440,7 +3628,8 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             List<HeaderEntry> unmatched = mapping.getUnmatchedEntries();
             if (unmatched.isEmpty())
             {
-                return Collections.emptyList();
+                // 无名称派生源：全部行名为空（名称回退必然未命中 → 清空+报告口径）
+                return Collections.nCopies(rows.size(), "");
             }
             headerIndex = unmatched.get(0).getHeaderIndex();
         }
@@ -3452,10 +3641,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             {
                 name = defaultValue;
             }
-            if (!name.isEmpty())
-            {
-                names.add(name);
-            }
+            names.add(name);
         }
         return names;
     }
@@ -3630,7 +3816,8 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
      * 异常成员（id 非数字或不在本表旧记录全集——CSV 混入的脏数据）原样保留，不扩大
      * 破坏半径。被 (d) 级联删除的配对列条目按主键 update 影响 0 行，自然 no-op。
      * rows 为空的纯清空场景同样执行（捕获条目全部走单元格级清空+报告，全删后他表
-     * 旧引用不残留）。清空与重指向计数随导入结果日志报告（界面/agent 呈现归 U6）。
+     * 旧引用不残留）。清空与重指向计数随导入结果日志报告（用户可见呈现由预检
+     * ReplaceImpact.repointedLinkColumns/willClearLinkEntries 承载，U6；本日志为执行实绩审计）。
      */
     private void executeInboundRepoint(ImportPlan plan, RepointContext context)
     {
@@ -4161,8 +4348,9 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         /** 本表存活列 id 集（mapped ∪ 排除类型同名列；级联删除 guard 用） */
         final Set<Long> survivingColumnIds = new HashSet<>();
 
-        /** 其他表中涉及跨表清理的关联列清单（预检报告口径；导入路径已由入链重指向取代
-         *  整列清空，事务段不再按此清空——语义迁移呈现归 U6） */
+        /** 其他表中涉及跨表重算的关联列清单（buildRecomputeTargets 扫描口径；导入路径已由
+         *  入链重指向取代整列清空，事务段不再按此清空——预检呈现走 repointedLinkColumns/
+         *  willClearLinkEntries 数据面口径，U6 语义迁移完成） */
         final List<NoteColumn> clearedLinkColumns = new ArrayList<>();
 
         /** U5 入链重指向：record_id 首列存在（true=旧记录 id 精确映射主路径；

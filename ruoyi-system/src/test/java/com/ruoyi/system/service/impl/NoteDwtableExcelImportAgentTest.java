@@ -69,6 +69,7 @@ import static org.mockito.Mockito.when;
  * 表头未映射列的删除/新建 replaceImpact 行为（不再产生缺参）、成功结果替换摘要
  * （"替换：删除原 N 行"）与 agent 基线 replaceDeletedColumns、18 列关联未命中失败清单
  * （零写入 + 结构化清单）、21 列链接解析失败结构化清单（U3/R10：与界面共用 DTO、零写入）、
+ * 链接失败与缺参并存的混合导入（U6/R10：链接失败优先结构化返回、无半写入）、
  * 25 列语义链接失败清单与 round-trip 行恢复（U4/R10：同 DTO、行 id 保留零写入）、
  * 歧义预选成功报告、路径穿越拒绝、非 profile 前缀拒绝、
  * 文件不存在、归属失败穿透。
@@ -472,6 +473,40 @@ class NoteDwtableExcelImportAgentTest
         verify(noteDwtableItemMapper, never()).insertNoteDwtableItems(anyList());
         verify(noteDwtableItemMapper, never()).updateNoteDwtableItem(any(NoteDwtableItem.class));
         verify(noteDwtableItemMapper, never()).insertNoteDwtableItem(any(NoteDwtableItem.class));
+    }
+
+    // ===== U6（R8/R10）：链接失败与缺参并存的混合导入——链接失败优先结构化返回、无半写入 =====
+
+    @Test
+    void importExcelShouldReturnLinkFailuresFirstWhenMixedWithMissingParams() throws IOException
+    {
+        // 数量列空单元格（缺值缺参）+ 21 列名称未命中（链接失败）并存
+        mockRelatedTable();
+        mockRelatedRecords(Collections.singletonList(record(814L, "家", 1L)));
+        byte[] bytes = singleSheetBytes(new String[] {"名称", "数量", "关联_文本"},
+                Collections.singletonList(new String[] {"张三", "", "公司"}));
+        String filePath = writeUploadFile("2026/09/16/混合失败.xlsx", bytes);
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(java.util.Arrays.asList(
+                column(101L, "名称", 1L, null),
+                column(102L, "数量", 2L, null),
+                column(104L, "关联", 21L, "{\"table_id\":80,\"back_field_id\":502}")));
+
+        ExcelImportAgentResult result = service.importExcel(
+                NOTE_ID, DWTABLE_ID, filePath, null, USER_ID);
+
+        // 链接失败优先返回（强失败无法补参覆盖）：结构化清单（单元格定位/原因/容错说明）
+        // + 零写入指引；缺参清单不随本次返回（修正文件后如仍有缺参再单独返回）
+        assertFalse(result.isSuccess());
+        assertEquals(1, result.getLinkFailures().size());
+        assertEquals("公司", result.getLinkFailures().get(0).getEntryText());
+        assertEquals(2, result.getLinkFailures().get(0).getRowNumber());
+        assertTrue(result.getMissingParams().isEmpty());
+        assertTrue(result.getMessage().contains("链接解析失败"));
+        assertTrue(result.getMessage().contains("零写入"));
+        // 无半写入：零记录/零 item 落库、零跨表修改
+        verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
+        verify(noteDwtableItemMapper, never()).insertNoteDwtableItems(anyList());
+        verify(noteDwtableItemMapper, never()).updateNoteDwtableItem(any(NoteDwtableItem.class));
     }
 
     // ===== U4（R8/R10）：25 列（语义关联）链接解析失败 → 结构化清单返回、零写入（同 DTO） =====
