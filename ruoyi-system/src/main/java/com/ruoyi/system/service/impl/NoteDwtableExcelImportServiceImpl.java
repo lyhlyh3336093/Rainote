@@ -47,6 +47,7 @@ import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.AmbiguityItem;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.DefaultValueFill;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.FileFingerprint;
+import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.LinkFailure;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.MissingParam;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.MissName;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.NewOption;
@@ -101,6 +102,12 @@ import com.ruoyi.system.service.impl.ExcelWorkbookReader.RowData;
  * 文本匹配（KTD4 整串优先）：单元格文本（trim）先整串匹配记录名，命中即用（不拆逗号）；
  * 未命中再按英文逗号拆分逐个（trim）匹配。每个未命中的名字（distinct）收集行号集。
  * 空单元格不建立关联、不算缺参不算未命中（R15）。
+ * <p>
+ * 21 列双轨制（U3，R5/R7-R9）：{@code 列名_ID} 锚点列参与消费——单元格先按 `_ID` 逐 id 校验
+ * 目标记录存在性，全命中即按 ID 精确重建（名称被外部改写以 ID 为准）；`_ID` 缺失/未命中位置
+ * 按同位名称条目经 {@link LinkNameResolver} 回退（空名称条目=U1 悬空导出回读的死链，跳过
+ * 不失败）；歧义/未命中进链接失败清单（与缺参清单并列阻断，确认前零写入）。18 列的
+ * `列名_文本` 机制、缺参记录选择器与同名取 sort 最小维持不变（回归红线）。
  * <p>
  * 预检不触碰任何写路径（零 insert/update mapper 调用）；
  * 日志只记录列名/行号/跳过原因等元数据，不含单元格值（R25）。
@@ -177,6 +184,10 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     @Autowired
     private INoteRecordService noteRecordService;
 
+    /** 共享名称解析组件（U2，R7：21 列名称回退的转义还原/整串优先/归一化/唯一前缀/歧义判定） */
+    @Autowired
+    private LinkNameResolver linkNameResolver;
+
     /**
      * 自注入代理引用：导入入口（非事务前置段）完成后经代理进入 {@code @Transactional}
      * 写入段（同类自调用不经代理，事务由本字段承载；注入具体类依赖 CGLIB 代理，
@@ -208,7 +219,9 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
      *       提供补值后由 LLM 生成带 {@code columnValues} 的第二次调用；</li>
      *   <li>关联列未命中无法文本补值（须选择被关联表记录 id），一律进失败清单，
      *       提示用户改走界面导入；</li>
-     *   <li>歧义（同名多条）：按 sort 靠前预选建立关联（与界面预检默认一致），不阻断，
+     *   <li>21 列链接解析失败（U3，R10）：ID 未命中且名称歧义/未命中为强失败，
+     *       零写入返回结构化失败清单（与界面共用 DTO），修正文件后重导；</li>
+     *   <li>歧义（同名多条，18 列）：按 sort 靠前预选建立关联（与界面预检默认一致），不阻断，
      *       成功结果中报告歧义处理清单；</li>
      *   <li>列默认值/新选项/对称写入等静默变更与<b>替换影响</b>（删除行/删除列/新建列/
      *       跨表引用清空）在成功结果中报告（与界面预检清单对齐）。</li>
@@ -230,7 +243,9 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                     + "文件须先经 /common/upload 上传，filePath 传其返回的 fileName（/profile/upload/... 路径）。"
                     + "有基础列缺参（缺值/类型违规）时仅当 columnValues 全部覆盖才执行导入，否则零写入并返回缺参清单"
                     + "（将清单告知用户，用户补充补值后带 columnValues 再次调用）。"
-                    + "关联列未命中无法文本补值，须改走界面导入。")
+                    + "关联列未命中无法文本补值，须改走界面导入。"
+                    + "双向关联(21)列链接解析失败（_ID 未命中且名称歧义/未命中）同样零写入，返回结构化失败清单"
+                    + "（单元格定位/原因），修正 Excel 文件中的链接名称或 _ID 后重新导入。")
     public ExcelImportAgentResult importExcel(
             @AgentParam(value = "noteId", type = "long", required = true, description = "目标笔记 id")
             Long noteId,
@@ -249,6 +264,21 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         MultipartFile file = readUploadedFile(filePath);
         // 同请求内预检即导入：文件指纹天然一致，无需两阶段回传
         ExcelImportPrecheckResult precheck = precheck(noteId, dwtableId, file, userId);
+
+        // U3（R8/R10）：21 列链接解析失败为强失败（无法补参覆盖）→ 结构化清单返回，零写入。
+        // 清单与界面预检共用 DTO（单元格定位/原因/容错命中说明），修正文件后重导
+        if (!precheck.getLinkFailures().isEmpty())
+        {
+            ExcelImportAgentResult result = new ExcelImportAgentResult();
+            result.setSuccess(false);
+            result.setLinkFailures(precheck.getLinkFailures());
+            result.setMessage("导入未执行（零写入）：有 " + precheck.getLinkFailures().size()
+                    + " 项双向关联列链接解析失败（目标记录无法唯一确定），请按清单修正 Excel 文件中的"
+                    + "链接名称或 _ID 后重新导入");
+            log.info("[EXCEL-AGENT] 链接解析失败拒绝导入 noteId={}, dwtableId={}, userId={}, linkFailures={}",
+                    noteId, dwtableId, userId, precheck.getLinkFailures().size());
+            return result;
+        }
 
         Map<String, String> fills = normalizeColumnValues(columnValues);
         List<MissingParam> uncovered = new ArrayList<>();
@@ -547,13 +577,17 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         appendSkippedHeaders(result, mapping, noteId, dwtableId);
         analyzeColumns(result, noteId, dwtableId, userId, selection.getRows(), columns, mapping);
         buildReplaceImpact(result, noteId, dwtableId, columns, mapping);
-        result.setHasBlockingIssues(!result.getMissingParams().isEmpty() || !result.getAmbiguityItems().isEmpty());
+        // U3（R8）：链接失败清单与缺参清单并列阻断（21 列强失败，确认前零写入）
+        result.setHasBlockingIssues(!result.getMissingParams().isEmpty()
+                || !result.getAmbiguityItems().isEmpty()
+                || !result.getLinkFailures().isEmpty());
 
         log.info("[EXCEL-PRECHECK] 预检完成 noteId={}, dwtableId={}, userId={}, totalRows={}, missingParams={}, "
-                        + "ambiguityItems={}, replaceImpact{{}行/{}删列/{}新列/{}清空/{}取消隐藏}, defaultValueFills={}, "
+                        + "ambiguityItems={}, linkFailures={}, replaceImpact{{}行/{}删列/{}新列/{}清空/{}取消隐藏}, defaultValueFills={}, "
                         + "newOptions={}, symmetricWriteImpact={}, ignoredSheets={}, skippedHeaders={}",
                 noteId, dwtableId, userId, selection.getRows().size(),
                 result.getMissingParams().size(), result.getAmbiguityItems().size(),
+                result.getLinkFailures().size(),
                 result.getReplaceImpact().getDeletedRowCount(), result.getReplaceImpact().getDeletedColumns().size(),
                 result.getReplaceImpact().getNewColumnNames().size(),
                 result.getReplaceImpact().getClearedLinkColumns().size(),
@@ -586,6 +620,9 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
      * 遍历参与导入的列（已映射到表头 且 类型 ∈ 六类基础 1/2/3/4/5/7 + 关联 18/21），
      * 逐列汇总预检清单。替换式语义：隐藏列映射即参与（导入时取消隐藏）；
      * 表头未映射的列将删除（进 replaceImpact），不再产生缺列/关联缺列缺参。
+     * <p>
+     * 关联列分流（U3 双轨制）：18 走既有文本匹配（弹框补选救援不变）；
+     * 21 走 ID 优先 + 名称回退（{@link #analyzeDoubleLinkColumn}，失败进链接失败清单强阻断）。
      */
     private void analyzeColumns(ExcelImportPrecheckResult result, Long noteId, Long dwtableId, Long userId,
             List<RowData> rows, List<NoteColumn> columns, ColumnMapping mapping)
@@ -621,8 +658,17 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             }
             if (link)
             {
-                analyzeLinkColumn(result, noteId, userId, column, type, headerIndex.intValue(),
-                        mapping, rows, contextByTableId);
+                if (type == ExcelColumnMatcher.TYPE_DOUBLE_LINK)
+                {
+                    // U3：21 列双轨制（ID 优先 + 名称回退，失败进链接失败清单）
+                    analyzeDoubleLinkColumn(result, noteId, userId, column, headerIndex.intValue(),
+                            mapping, rows, contextByTableId);
+                }
+                else
+                {
+                    analyzeLinkColumn(result, noteId, userId, column, type, headerIndex.intValue(),
+                            mapping, rows, contextByTableId);
+                }
             }
             else
             {
@@ -744,7 +790,8 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     }
 
     /**
-     * 关联列（18/21）逐行分析（KTD4 整串优先）：命中收集歧义与对称写入影响，
+     * 单向关联列（18）逐行分析（KTD4 整串优先；U3 起 18 专属——21 列走
+     * {@link #analyzeDoubleLinkColumn} 双轨制）：命中收集歧义与对称写入影响，
      * 未命中名（distinct）收集行号集供 U6 逐值选择器；附选择器候选首批。
      */
     private void analyzeLinkColumn(ExcelImportPrecheckResult result, Long noteId, Long userId, NoteColumn column,
@@ -852,6 +899,214 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         {
             ambiguityByName.putIfAbsent(name, matched);
         }
+    }
+
+    // ==================== 21 列双轨解析（U3：ID 优先、名称回退） ====================
+
+    /**
+     * 双向关联列（21）逐行预检分析（U3，R5/R7-R9）：单元格先按 {@code _ID} 逐 id 校验
+     * 目标记录存在性——全命中即通过（名称不参与，ID 为准）；{@code _ID} 缺失/未命中位置
+     * 按同位名称条目经 {@link LinkNameResolver} 回退，歧义/未命中进<b>链接失败清单</b>
+     * （R8 新分组，与缺参清单并列阻断，确认前零写入；多值任一条目失败整表零写入，R9）。
+     * 对称写入影响与选择器候选的发射口径与 18 列现状一致（候选仅供前端兼容，21 列已无补选入口）。
+     */
+    private void analyzeDoubleLinkColumn(ExcelImportPrecheckResult result, Long noteId, Long userId,
+            NoteColumn column, int headerIndex, ColumnMapping mapping, List<RowData> rows,
+            Map<Long, LinkTableContext> contextByTableId)
+    {
+        LinkTableContext context = linkTableContext(column, noteId, userId, contextByTableId);
+        int idHeaderIndex = mapping.linkIdHeaderIndex(column);
+        List<String> candidateNames = candidateNameList(context);
+
+        // 命中的 distinct 记录 id（R11 影响面；ID 命中与名称回退命中并集）
+        Set<Long> matchedRecordIds = new LinkedHashSet<>();
+        for (RowData row : rows)
+        {
+            String idText = idHeaderIndex >= 0 ? mapping.cellText(row, idHeaderIndex) : "";
+            String nameText = mapping.cellText(row, headerIndex);
+            DoubleLinkCellResolution resolution = resolveDoubleLinkCell(idText, nameText, context, candidateNames);
+            for (NoteRecord record : resolution.records())
+            {
+                matchedRecordIds.add(record.getId());
+            }
+            for (LinkEntryFailure failure : resolution.failures)
+            {
+                LinkFailure item = new LinkFailure();
+                item.setColumnId(column.getId());
+                item.setColumnName(dtoColumnName(column));
+                item.setRowNumber(row.getRowNumber());
+                item.setEntryText(failure.entryText);
+                item.setReason(failure.reason);
+                item.setExplanation(failure.explanation);
+                result.getLinkFailures().add(item);
+            }
+        }
+
+        // 对称写入影响（16/R11，口径与现状一致：命中的 distinct 记录数）
+        if (!matchedRecordIds.isEmpty())
+        {
+            SymmetricWriteImpact impact = new SymmetricWriteImpact();
+            impact.setTableName(context.getTable().getName());
+            impact.setAffectedRecordCount(matchedRecordIds.size());
+            result.getSymmetricWriteImpact().add(impact);
+        }
+        // 选择器候选（KTD7 发射口径与现状一致，供前端兼容）
+        RelationCandidates relationCandidates = new RelationCandidates();
+        relationCandidates.setColumnId(column.getId());
+        List<RecordCandidate> candidates = new ArrayList<>(
+                Math.min(CANDIDATE_LIMIT, context.getSortedRecords().size()));
+        for (int i = 0; i < context.getSortedRecords().size() && i < CANDIDATE_LIMIT; i++)
+        {
+            NoteRecord record = context.getSortedRecords().get(i);
+            RecordCandidate candidate = new RecordCandidate();
+            candidate.setRecordId(record.getId());
+            candidate.setName(record.getName() == null ? "" : record.getName());
+            candidates.add(candidate);
+        }
+        relationCandidates.setCandidates(candidates);
+        result.getRelationCandidates().add(relationCandidates);
+    }
+
+    /**
+     * 21 列单元格解析（U3 双轨制，预检与执行两阶段共用；R5/R7-R9 + U1 悬空回读边界）。
+     * <p>
+     * 逐条目语义（{@code _ID} 与名称条目按导出顺序一一对应）：
+     * <ul>
+     *   <li>{@code _ID} 全命中 → 整格按 ID 重建（名称被外部改写不参与、不产生失败——ID 为准）；</li>
+     *   <li>{@code _ID} 缺失/部分未命中 → 命中位置按 ID；未命中位置按同位名称条目经
+     *       {@link LinkNameResolver} 回退，空名称条目 = U1 悬空导出回读的死链，按“无链接”
+     *       跳过不计失败（导出时本就是死链）；</li>
+     *   <li>无 {@code _ID} → 纯名称解析（整串优先 + CSV 转义还原拆分逐条目，空串条目跳过）；</li>
+     *   <li>任一名称条目歧义/未命中 → 失败条目（多值任一失败由调用方整表阻断，R9）。</li>
+     * </ul>
+     */
+    private DoubleLinkCellResolution resolveDoubleLinkCell(String idText, String nameText,
+            LinkTableContext context, List<String> candidateNames)
+    {
+        DoubleLinkCellResolution resolution = new DoubleLinkCellResolution();
+        Map<Long, NoteRecord> recordsById = context.getRecordsById();
+        Map<String, List<NoteRecord>> recordsByName = context.getRecordsByName();
+
+        // `_ID` 逐 id 解析（逗号拆分、trim、去空 token；非法 token 记 null 占位、按未命中走名称回退）
+        List<Long> ids = new ArrayList<>();
+        if (idText != null && !idText.trim().isEmpty())
+        {
+            for (String part : idText.split(","))
+            {
+                String token = part.trim();
+                if (token.isEmpty())
+                {
+                    continue;
+                }
+                Long id;
+                try
+                {
+                    id = Long.valueOf(token);
+                }
+                catch (NumberFormatException e)
+                {
+                    id = null;
+                }
+                ids.add(id);
+            }
+        }
+
+        if (!ids.isEmpty())
+        {
+            boolean allHit = true;
+            for (Long id : ids)
+            {
+                if (id == null || !recordsById.containsKey(id))
+                {
+                    allHit = false;
+                    break;
+                }
+            }
+            if (allHit)
+            {
+                // ID 全命中：整格按 ID 精确重建，名称不参与（R3：ID 与名称不一致以 ID 为准）
+                for (Long id : ids)
+                {
+                    resolution.addRecord(recordsById.get(id));
+                }
+                return resolution;
+            }
+            // 部分未命中：命中位置按 ID；未命中位置按同位名称条目回退
+            //（含空条目的 CSV 拆分保持与 `_ID` 的位置一一对应，resolve 会跳过空条目丢失位置）
+            List<String> nameEntries = LinkNameResolver.splitCsvEntries(
+                    nameText == null ? "" : nameText.trim());
+            for (int i = 0; i < ids.size(); i++)
+            {
+                Long id = ids.get(i);
+                NoteRecord byId = id == null ? null : recordsById.get(id);
+                if (byId != null)
+                {
+                    resolution.addRecord(byId);
+                    continue;
+                }
+                String entry = i < nameEntries.size() ? nameEntries.get(i).trim() : "";
+                if (entry.isEmpty())
+                {
+                    // U1 悬空导出回读：`_ID` 指向已删记录且名称为空 → 该条目按“无链接”跳过不失败
+                    continue;
+                }
+                // 单条目解析（条目本身含逗号时 resolver 的整串优先恰为整条目匹配）
+                for (LinkNameResolver.EntryResult entryResult : linkNameResolver.resolve(entry, candidateNames))
+                {
+                    applyNameEntryResult(entryResult, recordsByName, true, resolution);
+                }
+            }
+            return resolution;
+        }
+
+        // 无 `_ID`：纯名称解析（整串优先 + CSV 拆分逐条目）
+        if (nameText != null && !nameText.trim().isEmpty())
+        {
+            for (LinkNameResolver.EntryResult entryResult : linkNameResolver.resolve(nameText, candidateNames))
+            {
+                applyNameEntryResult(entryResult, recordsByName, false, resolution);
+            }
+        }
+        return resolution;
+    }
+
+    /**
+     * 名称解析结果落地：MATCHED → 命中记录（resolver 语义保证唯一，取首条防御）；
+     * AMBIGUOUS/NOT_FOUND → 失败条目（原因区分纯名称与 ID 回退两来源，容错命中说明随附）。
+     */
+    private static void applyNameEntryResult(LinkNameResolver.EntryResult entryResult,
+            Map<String, List<NoteRecord>> recordsByName, boolean idFallback, DoubleLinkCellResolution resolution)
+    {
+        if (entryResult.isMatched())
+        {
+            List<NoteRecord> matched = recordsByName.get(entryResult.getMatchedName());
+            if (matched != null && !matched.isEmpty())
+            {
+                resolution.addRecord(matched.get(0));
+            }
+            return;
+        }
+        String prefix = idFallback ? "ID 未命中且" : "";
+        String reason = entryResult.isAmbiguous()
+                ? prefix + "名称歧义（多条同名候选，双向关联列无法唯一确定目标记录）"
+                : prefix + "名称未命中（被关联表不存在同名记录）";
+        resolution.failures.add(new LinkEntryFailure(entryResult.getRawEntry(), reason,
+                entryResult.getExplanation()));
+    }
+
+    /**
+     * 被关联表全部记录名列表（{@link LinkNameResolver} 候选名口径：同名重复保留——
+     * 重复名在组件内判歧义，R7）。
+     */
+    private static List<String> candidateNameList(LinkTableContext context)
+    {
+        List<NoteRecord> sortedRecords = context.getSortedRecords();
+        List<String> names = new ArrayList<>(sortedRecords.size());
+        for (NoteRecord record : sortedRecords)
+        {
+            names.add(record.getName() == null ? "" : record.getName());
+        }
+        return names;
     }
 
     // ==================== 被关联表上下文（R23 + KTD4） ====================
@@ -1515,40 +1770,66 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                 LinkColumnAnalysis analysis = new LinkColumnAnalysis();
                 analysis.context = context;
                 analysis.backFieldId = parseBackFieldId(column);
-                Set<String> missNames = new LinkedHashSet<>();
-                Map<String, Long> ambiguity = new LinkedHashMap<>();
-                for (int r = 0; r < rowCount; r++)
+                if (type == ExcelColumnMatcher.TYPE_DOUBLE_LINK)
                 {
-                    String text = mapping.cellText(rows.get(r), headerIndex).trim();
-                    List<String> names = candidateNames(text, context.getRecordsByName());
-                    analysis.namesPerRow.add(names);
-                    for (String name : names)
+                    // U3：21 列 ID 优先逐行解析（与预检同款）。失败即漂移拒绝——预检已将
+                    // 链接失败列为阻断项，此处触发必为预检-导入间隙的数据变化或绕过预检的
+                    // 直调（fail-fast 于任何写入之前，整表零写入）
+                    int idHeaderIndex = mapping.linkIdHeaderIndex(column);
+                    List<String> candidates = candidateNameList(context);
+                    for (int r = 0; r < rowCount; r++)
                     {
-                        List<NoteRecord> matched = context.getRecordsByName().get(name);
-                        if (matched != null && !matched.isEmpty())
+                        String idText = idHeaderIndex >= 0 ? mapping.cellText(rows.get(r), idHeaderIndex) : "";
+                        String nameText = mapping.cellText(rows.get(r), headerIndex);
+                        DoubleLinkCellResolution cell =
+                                resolveDoubleLinkCell(idText, nameText, context, candidates);
+                        analysis.recordsPerRow.add(cell.records());
+                        if (!cell.failures.isEmpty())
                         {
-                            // 同名多条 → 歧义，预选 sort 靠前首条（R14）
-                            if (matched.size() > 1)
-                            {
-                                ambiguity.putIfAbsent(name, Long.valueOf(matched.get(0).getId()));
-                            }
-                        }
-                        else
-                        {
-                            missNames.add(name);
+                            LinkEntryFailure failure = cell.failures.get(0);
+                            throw driftException("关联列“" + columnName + "”第 "
+                                    + rows.get(r).getRowNumber() + " 行的链接条目“"
+                                    + failure.entryText + "”解析失败（" + failure.reason + "）");
                         }
                     }
                 }
+                else
+                {
+                    Set<String> missNames = new LinkedHashSet<>();
+                    Map<String, Long> ambiguity = new LinkedHashMap<>();
+                    for (int r = 0; r < rowCount; r++)
+                    {
+                        String text = mapping.cellText(rows.get(r), headerIndex).trim();
+                        List<String> names = candidateNames(text, context.getRecordsByName());
+                        analysis.namesPerRow.add(names);
+                        for (String name : names)
+                        {
+                            List<NoteRecord> matched = context.getRecordsByName().get(name);
+                            if (matched != null && !matched.isEmpty())
+                            {
+                                // 同名多条 → 歧义，预选 sort 靠前首条（R14）
+                                if (matched.size() > 1)
+                                {
+                                    ambiguity.putIfAbsent(name, Long.valueOf(matched.get(0).getId()));
+                                }
+                            }
+                            else
+                            {
+                                missNames.add(name);
+                            }
+                        }
+                    }
+                    if (!missNames.isEmpty())
+                    {
+                        missNamesByColumn.put(columnName, missNames);
+                        stage2MissingColumns.add(columnName);
+                    }
+                    if (!ambiguity.isEmpty())
+                    {
+                        ambiguityByColumn.put(columnName, ambiguity);
+                    }
+                }
                 linkAnalysisByColumn.put(column, analysis);
-                if (!missNames.isEmpty())
-                {
-                    missNamesByColumn.put(columnName, missNames);
-                    stage2MissingColumns.add(columnName);
-                }
-                if (!ambiguity.isEmpty())
-                {
-                    ambiguityByColumn.put(columnName, ambiguity);
-                }
             }
             else
             {
@@ -1652,8 +1933,11 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                 if (link)
                 {
                     LinkColumnAnalysis analysis = linkAnalysisByColumn.get(column);
-                    List<NoteRecord> resolved = resolveLinkRecords(column, analysis.namesPerRow.get(r),
-                            relations, analysis.context.getRecordsByName());
+                    // U3：21 列用分析段的双轨解析产物（ID 优先 + 名称回退）；18 列走补参优先解析
+                    List<NoteRecord> resolved = type == ExcelColumnMatcher.TYPE_DOUBLE_LINK
+                            ? analysis.recordsPerRow.get(r)
+                            : resolveLinkRecords(column, analysis.namesPerRow.get(r),
+                                    relations, analysis.context.getRecordsByName());
                     if (!resolved.isEmpty())
                     {
                         // 21/18 列 link 字段经扩展批量 insert 落库（P0：不得被批量 insert 丢弃）
@@ -1672,7 +1956,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                     }
                     else
                     {
-                        // R15：空单元格/显式留空 → 空串 value，不建立关联
+                        // R15：空单元格/显式留空/死链回读跳过 → 空串 value，不建立关联
                         item.setValue("");
                     }
                 }
@@ -1904,7 +2188,8 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     }
 
     /**
-     * 解析一个关联单元格的最终记录序列（补参优先，KTD5）：
+     * 解析一个关联单元格的最终记录序列（补参优先，KTD5；U3 起 18 列专属——21 列走
+     * 双轨解析产物 {@code recordsPerRow}，无补参层）：
      * <ul>
      *   <li>补参覆盖（列名+名）以补参为准——recordId=null 显式留空不建立关联（即便重新匹配命中），
      *       recordId 非空用补选记录；</li>
@@ -2942,8 +3227,49 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         /** 配对列（21 必填 / 18 可空） */
         Long backFieldId;
 
-        /** 逐行名字序列（KTD4 整串优先拆分） */
+        /** 逐行名字序列（KTD4 整串优先拆分；18 列用，21 列走 recordsPerRow） */
         final List<List<String>> namesPerRow = new ArrayList<>();
+
+        /** 21 列逐行双轨解析产物（U3：ID 优先 + 名称回退；与数据行等长同序） */
+        final List<List<NoteRecord>> recordsPerRow = new ArrayList<>();
+    }
+
+    /** 21 列单元格解析产物（U3）：命中记录（按记录 id 去重保序）+ 失败条目 */
+    private static final class DoubleLinkCellResolution
+    {
+        private final Map<Long, NoteRecord> recordById = new LinkedHashMap<>();
+
+        final List<LinkEntryFailure> failures = new ArrayList<>();
+
+        void addRecord(NoteRecord record)
+        {
+            recordById.putIfAbsent(record.getId(), record);
+        }
+
+        List<NoteRecord> records()
+        {
+            return new ArrayList<>(recordById.values());
+        }
+    }
+
+    /** 21 列单条目解析失败载体（R8 清单元素与阶段二拒绝消息的原始材料） */
+    private static final class LinkEntryFailure
+    {
+        /** 失败条目文本（CSV 转义还原并 trim 后） */
+        final String entryText;
+
+        /** 失败原因（中文，ID 回退来源带前缀） */
+        final String reason;
+
+        /** 容错命中说明（resolver 各级尝试的命中数与来源） */
+        final String explanation;
+
+        LinkEntryFailure(String entryText, String reason, String explanation)
+        {
+            this.entryText = entryText;
+            this.reason = reason;
+            this.explanation = explanation;
+        }
     }
 
     /** 补参 relationSelections 的解析产物（键=列名 trim） */

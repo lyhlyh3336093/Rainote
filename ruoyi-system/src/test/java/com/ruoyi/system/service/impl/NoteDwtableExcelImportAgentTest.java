@@ -23,6 +23,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Captor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
+import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
@@ -63,8 +64,9 @@ import static org.mockito.Mockito.when;
  * <p>
  * 覆盖：无缺参成功导入（含 replaceImpact 透传）、columnValues 覆盖缺参（含数字归一化）、
  * 表头未映射列的删除/新建 replaceImpact 行为（不再产生缺参）、成功结果替换摘要
- * （"替换：删除原 N 行"）与 agent 基线 replaceDeletedColumns、关联未命中失败清单
- * （零写入 + 结构化清单）、歧义预选成功报告、路径穿越拒绝、非 profile 前缀拒绝、
+ * （"替换：删除原 N 行"）与 agent 基线 replaceDeletedColumns、18 列关联未命中失败清单
+ * （零写入 + 结构化清单）、21 列链接解析失败结构化清单（U3/R10：与界面共用 DTO、零写入）、
+ * 歧义预选成功报告、路径穿越拒绝、非 profile 前缀拒绝、
  * 文件不存在、归属失败穿透。
  *
  * @author ruoyi
@@ -106,6 +108,10 @@ class NoteDwtableExcelImportAgentTest
 
     @Mock
     private INoteRecordService noteRecordService;
+
+    /** 共享名称解析组件（U2）：真实实例经 @Spy 注入（21 列名称回退用） */
+    @Spy
+    private LinkNameResolver linkNameResolver = new LinkNameResolver();
 
     @InjectMocks
     private NoteDwtableExcelImportServiceImpl service;
@@ -389,6 +395,7 @@ class NoteDwtableExcelImportAgentTest
     @Test
     void importExcelShouldFailReportOnLinkMiss() throws IOException
     {
+        // 18 列关联未命中（U3 后 21 列未命中走链接失败清单，见下方专项测试；18 维持缺参清单）
         mockRelatedTable();
         mockRelatedRecords(Collections.singletonList(record(814L, "家", 1L)));
         byte[] bytes = singleSheetBytes(new String[] {"名称", "关联_文本"},
@@ -397,7 +404,7 @@ class NoteDwtableExcelImportAgentTest
         when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class)))
                 .thenReturn(java.util.Arrays.asList(
                         column(101L, "名称", 1L, null),
-                        column(104L, "关联", 21L, "{\"table_id\":80,\"back_field_id\":502}")));
+                        column(104L, "关联", 18L, "{\"select\":80}")));
 
         ExcelImportAgentResult result = service.importExcel(
                 NOTE_ID, DWTABLE_ID, filePath, null, USER_ID);
@@ -414,6 +421,45 @@ class NoteDwtableExcelImportAgentTest
         assertTrue(result.getMessage().contains("界面导入"));
         verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
         assertFalse(resultWithFill.isSuccess());
+    }
+
+    // ===== U3（R8/R10）：21 列链接解析失败 → 结构化清单返回、零写入（与界面共用 DTO） =====
+
+    @Test
+    void importExcelShouldReturnLinkFailuresForDoubleLink() throws IOException
+    {
+        mockRelatedTable();
+        mockRelatedRecords(Collections.singletonList(record(814L, "家", 1L)));
+        byte[] bytes = singleSheetBytes(new String[] {"名称", "关联_文本"},
+                Collections.singletonList(new String[] {"张三", "公司"}));
+        String filePath = writeUploadFile("2026/09/16/链接失败.xlsx", bytes);
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class)))
+                .thenReturn(java.util.Arrays.asList(
+                        column(101L, "名称", 1L, null),
+                        column(104L, "关联", 21L, "{\"table_id\":80,\"back_field_id\":502}")));
+
+        ExcelImportAgentResult result = service.importExcel(
+                NOTE_ID, DWTABLE_ID, filePath, null, USER_ID);
+
+        // 强失败：结构化链接失败清单（单元格定位/原因/容错命中说明），不进缺参清单
+        assertFalse(result.isSuccess());
+        assertTrue(result.getMissingParams().isEmpty());
+        assertEquals(1, result.getLinkFailures().size());
+        ExcelImportPrecheckResult.LinkFailure failure = result.getLinkFailures().get(0);
+        assertEquals(Long.valueOf(104L), failure.getColumnId());
+        assertEquals("关联", failure.getColumnName());
+        assertEquals(2, failure.getRowNumber());
+        assertEquals("公司", failure.getEntryText());
+        assertNotNull(failure.getReason());
+        assertTrue(failure.getReason().contains("未命中"));
+        assertNotNull(failure.getExplanation());
+        assertTrue(result.getMessage().contains("链接解析失败"));
+        assertTrue(result.getMessage().contains("零写入"));
+        // 无半写入：预检即拒绝，零记录/零 item 落库、零跨表修改
+        verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
+        verify(noteDwtableItemMapper, never()).insertNoteDwtableItems(anyList());
+        verify(noteDwtableItemMapper, never()).updateNoteDwtableItem(any(NoteDwtableItem.class));
+        verify(noteDwtableItemMapper, never()).insertNoteDwtableItem(any(NoteDwtableItem.class));
     }
 
     @Test

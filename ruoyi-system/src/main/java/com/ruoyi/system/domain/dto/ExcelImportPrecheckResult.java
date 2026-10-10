@@ -16,7 +16,9 @@ import java.util.List;
  *   <li>默认值填充项（{@link DefaultValueFill}）：有默认值的列不进缺参弹框（R10 填充优先级）；</li>
  *   <li>新选项创建项（{@link NewOption}）：单选/多选未命中选项自动追加（R19）；</li>
  *   <li>对称写入跨表影响（{@link SymmetricWriteImpact}）：21 双向关联列将修改的被关联表记录数；</li>
- *   <li>忽略 sheet/跳过表头提示（R2/R5/R6）；</li>
+ *   <li>忽略 sheet/跳过表头提示（R2/R5/R6）；
+ *   <li>链接失败清单（{@link LinkFailure}）：21 列 ID 未命中且名称解析歧义/未命中
+ *       （U3 双轨制 ID 优先、名称回退；与缺参清单并列阻断，确认前零写入）；</li>
  *   <li>关联列选择器候选（{@link RelationCandidates}）：已过 R23 归属校验的内嵌数据源（KTD7）；</li>
  *   <li>文件指纹（{@link FileFingerprint}）：size + md5，阶段二重新上传文件时比对（KTD5）。</li>
  * </ul>
@@ -62,10 +64,17 @@ public class ExcelImportPrecheckResult
     /** 关联列选择器候选清单：每个映射到的 18/21 关联列附被关联表记录候选首批（KTD7，已过 R23 归属校验） */
     private List<RelationCandidates> relationCandidates = new ArrayList<>();
 
+    /**
+     * 链接失败清单（U3，R8）：21 列单元格 ID 未命中且名称解析歧义/未命中（含多值任一条目失败）。
+     * 与缺参清单<b>并列阻断</b>——清单非空即确认前零写入；条目含单元格定位（列+行号）、
+     * 失败原因与容错命中说明。21 列强失败为新设行为（取代旧弹框补选；18 列弹框补选维持不变）。
+     */
+    private List<LinkFailure> linkFailures = new ArrayList<>();
+
     /** 替换式导入影响面（删除类字段非空/非零即前端必须弹框确认后才执行导入） */
     private ReplaceImpact replaceImpact = new ReplaceImpact();
 
-    /** 是否存在阻断性问题（缺参或歧义非空 → 前端打开补参弹框，R13 分流） */
+    /** 是否存在阻断性问题（缺参/歧义/链接失败任一非空 → 前端打开补参或失败弹框，R13/R8 分流） */
     private boolean hasBlockingIssues;
 
     public FileFingerprint getFileFingerprint()
@@ -156,6 +165,16 @@ public class ExcelImportPrecheckResult
     public void setRelationCandidates(List<RelationCandidates> relationCandidates)
     {
         this.relationCandidates = relationCandidates;
+    }
+
+    public List<LinkFailure> getLinkFailures()
+    {
+        return linkFailures;
+    }
+
+    public void setLinkFailures(List<LinkFailure> linkFailures)
+    {
+        this.linkFailures = linkFailures;
     }
 
     public ReplaceImpact getReplaceImpact()
@@ -872,6 +891,92 @@ public class ExcelImportPrecheckResult
         public void setColumnId(Long columnId)
         {
             this.columnId = columnId;
+        }
+    }
+
+    /**
+     * 链接失败条目（U3，R8）：21 列一个单元格条目一条——ID 未命中且名称解析歧义/未命中。
+     * 定位（列 + Excel 行号）+ 失败原因 + 容错命中说明（resolver 各级尝试的命中数与来源），
+     * 供界面弹框分组与 agent 结果结构化返回（两路径共用本 DTO，R10）。
+     */
+    public static class LinkFailure
+    {
+        /** 双向关联列 id */
+        private Long columnId;
+
+        /** 双向关联列名 */
+        private String columnName;
+
+        /** 失败条目所在 Excel 物理行号（表头为第 1 行，数据行从第 2 行起） */
+        private int rowNumber;
+
+        /** 失败条目文本（CSV 转义还原并 trim 后的名称条目） */
+        private String entryText;
+
+        /** 失败原因（中文：名称歧义 / 名称未命中，ID 回退来源带“ID 未命中且”前缀） */
+        private String reason;
+
+        /** 容错命中说明（LinkNameResolver 各级尝试的命中数与来源，供用户修正参考） */
+        private String explanation;
+
+        public Long getColumnId()
+        {
+            return columnId;
+        }
+
+        public void setColumnId(Long columnId)
+        {
+            this.columnId = columnId;
+        }
+
+        public String getColumnName()
+        {
+            return columnName;
+        }
+
+        public void setColumnName(String columnName)
+        {
+            this.columnName = columnName;
+        }
+
+        public int getRowNumber()
+        {
+            return rowNumber;
+        }
+
+        public void setRowNumber(int rowNumber)
+        {
+            this.rowNumber = rowNumber;
+        }
+
+        public String getEntryText()
+        {
+            return entryText;
+        }
+
+        public void setEntryText(String entryText)
+        {
+            this.entryText = entryText;
+        }
+
+        public String getReason()
+        {
+            return reason;
+        }
+
+        public void setReason(String reason)
+        {
+            this.reason = reason;
+        }
+
+        public String getExplanation()
+        {
+            return explanation;
+        }
+
+        public void setExplanation(String explanation)
+        {
+            this.explanation = explanation;
         }
     }
 }

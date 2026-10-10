@@ -29,6 +29,7 @@ import org.mockito.Captor;
 import org.mockito.InOrder;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
+import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
@@ -49,6 +50,7 @@ import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.AmbiguityItem;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.ClearedLinkColumn;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.DefaultValueFill;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.DeletedColumnInfo;
+import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.LinkFailure;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.MissingParam;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.MissName;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.NewOption;
@@ -100,6 +102,12 @@ import static org.mockito.Mockito.when;
  * 删除 21 列级联删配对列、kept 21 清空配对引用、新建列空单元格、隐藏列匹配取消隐藏、
  * 他表 18 列跨表清空、仅表头 Excel（重算无条件执行）、空表头 guard、自引用配对列 guard、
  * pending 同名冲突 drift、name 从新文本列派生、替换删除漂移（checkDrift 第 4 触发集）。
+ * <p>
+ * U3（21 列 ID 优先重建，双轨制）：round-trip `_ID`+`_文本` 回读链接恢复与配对列对称（AE1）、
+ * ID 命中名称被改写以 ID 为准、ID 未命中名称回退唯一命中、名称歧义/多值部分命中进链接失败
+ * 清单（R8 并列阻断 + 阶段二漂移防御零写入）、死链回读（`_ID` 指向已删且名称空）跳过不失败、
+ * 空 `_ID`+空名称无链接；18 列红线回归（`列名_文本` 机制、`_ID` 忽略、缺参记录选择器、
+ * 同名取 sort 最小、补参优先语义——歧义/漂移/补参系列已转钉 18 列）。
  *
  * @author ruoyi
  */
@@ -143,6 +151,10 @@ class NoteDwtableExcelImportServiceImplTest
 
     @Mock
     private INoteRecordService noteRecordService;
+
+    /** 共享名称解析组件（U2）：真实实例经 @Spy 注入（纯逻辑无 DB 依赖，21 列名称回退用） */
+    @Spy
+    private LinkNameResolver linkNameResolver = new LinkNameResolver();
 
     @InjectMocks
     private NoteDwtableExcelImportServiceImpl precheckService;
@@ -632,14 +644,15 @@ class NoteDwtableExcelImportServiceImplTest
         assertEquals(1, fill.getRowCount());
     }
 
-    // ===== AE4：歧义 → 预选 sort 靠前 =====
+    // ===== AE4：歧义 → 预选 sort 靠前（18 列回归红线：同名取 sort 最小不变；
+    // 21 列歧义已改为链接失败强失败，见 precheck_doubleLink_ambiguousName_linkFailure） =====
 
     @Test
     void precheck_ambiguousName_preselectsLowerSortRecord()
     {
         when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
                 column(101L, "名称", 1L, null, 0L),
-                column(104L, "关联", 21L, "{\"table_id\":80,\"back_field_id\":502}", 0L)));
+                column(104L, "关联", 18L, "{\"select\":80}", 0L)));
         mockRelatedTable(relatedTable("被关联表", NOTE_ID));
         // 同名两记录：sort=5 在前插入，sort=2 在后 → 预选应取 sort=2
         mockRelatedRecords(Arrays.asList(record(201L, "张三", 5L), record(202L, "张三", 2L)));
@@ -657,19 +670,20 @@ class NoteDwtableExcelImportServiceImplTest
         assertEquals("张三", item.getName());
         assertEquals(2, item.getCandidateCount());
         assertEquals(Long.valueOf(202L), item.getPreselectedRecordId());
-        // 影响面只计预选记录（distinct 1 条）
-        assertEquals(1, result.getSymmetricWriteImpact().get(0).getAffectedRecordCount());
+        // 18 列无对称写入影响（21 专属）
+        assertTrue(result.getSymmetricWriteImpact().isEmpty());
         assertTrue(result.isHasBlockingIssues());
     }
 
-    // ===== AE5：未命中 → 未命中名清单；关联空单元格不进任何缺参 =====
+    // ===== AE5：未命中 → 未命中名清单（18 列回归红线：缺参记录选择器不变）；
+    // 关联空单元格不进任何缺参 =====
 
     @Test
     void precheck_unmatchedName_missNamesWithRowNumbers()
     {
         when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
                 column(101L, "名称", 1L, null, 0L),
-                column(104L, "关联", 21L, "{\"table_id\":80,\"back_field_id\":502}", 0L)));
+                column(104L, "关联", 18L, "{\"select\":80}", 0L)));
         mockRelatedTable(relatedTable("被关联表", NOTE_ID));
         mockRelatedRecords(Collections.singletonList(record(301L, "张三", 1L)));
 
@@ -1473,12 +1487,14 @@ class NoteDwtableExcelImportServiceImplTest
         verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
     }
 
-    // ===== 反向漂移：歧义预选变化拒绝 =====
+    // ===== 反向漂移：歧义预选变化拒绝（18 列——歧义预选漂移检测机制不变） =====
 
     @Test
     void import_drift_ambiguityPreselectChanged_rejected()
     {
-        mockDoubleLinkColumns();
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
+                column(101L, "名称", 1L, null, 0L),
+                column(104L, "关联", 18L, "{\"select\":80}", 0L)));
         mockRelatedTable(relatedTable("被关联表", NOTE_ID));
         // 同名两记录：sort=2 在前 → 阶段二预选 202
         mockRelatedRecords(Arrays.asList(record(201L, "张三", 5L), record(202L, "张三", 2L)));
@@ -1496,12 +1512,14 @@ class NoteDwtableExcelImportServiceImplTest
         verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
     }
 
-    // ===== 补参校验（R26）：伪造 recordId（不属于被关联表/不存在）拒绝 =====
+    // ===== 补参校验（R26，18 列）：伪造 recordId（不属于被关联表/不存在）拒绝 =====
 
     @Test
     void import_supplement_forgedRecordId_rejected()
     {
-        mockDoubleLinkColumns();
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
+                column(101L, "名称", 1L, null, 0L),
+                column(104L, "关联", 18L, "{\"select\":80}", 0L)));
         mockRelatedTable(relatedTable("被关联表", NOTE_ID));
         mockRelatedRecords(Collections.singletonList(record(100L, "张三", 1L)));
 
@@ -1536,12 +1554,14 @@ class NoteDwtableExcelImportServiceImplTest
         verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
     }
 
-    // ===== 补参优先语义（KTD5）：显式留空后重新匹配命中也不建立关联 =====
+    // ===== 补参优先语义（KTD5，18 列）：显式留空后重新匹配命中也不建立关联 =====
 
     @Test
     void import_supplementPriority_explicitNullBeatsStage2Match()
     {
-        mockDoubleLinkColumns();
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
+                column(101L, "名称", 1L, null, 0L),
+                column(104L, "关联", 18L, "{\"select\":80}", 0L)));
         mockRelatedTable(relatedTable("被关联表", NOTE_ID));
         // 阶段二"王五"已存在（预检后新增），但补参显式留空
         mockRelatedRecords(Arrays.asList(record(100L, "张三", 1L), record(300L, "王五", 2L)));
@@ -1568,21 +1588,17 @@ class NoteDwtableExcelImportServiceImplTest
         verify(noteDwtableItemMapper, never()).updateNoteDwtableItem(any(NoteDwtableItem.class));
     }
 
-    // ===== 补参优先语义（KTD5）：歧义改选后以补参为准 =====
+    // ===== 补参优先语义（KTD5，18 列）：歧义改选后以补参为准 =====
 
     @Test
     void import_supplementPriority_reselectionWinsOverPreselect()
     {
-        mockDoubleLinkColumns();
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
+                column(101L, "名称", 1L, null, 0L),
+                column(104L, "关联", 18L, "{\"select\":80}", 0L)));
         mockRelatedTable(relatedTable("被关联表", NOTE_ID));
         // 同名两记录：sort=2 的 202 为预选；补参改选 201
         mockRelatedRecords(Arrays.asList(record(201L, "张三", 5L), record(202L, "张三", 2L)));
-        when(noteDwtableItemMapper.selectNoteDwtableItemByRecordAndColumnForUpdate(any(NoteDwtableItem.class)))
-                .thenAnswer(inv -> {
-                    NoteDwtableItem query = inv.getArgument(0);
-                    return Long.valueOf(201L).equals(query.getRecordId())
-                            ? pairedItem(900L, 502L, null, null, null) : null;
-                });
 
         byte[] bytes = singleSheetBytes(new String[] {"名称", "关联_文本"},
                 Collections.singletonList(new String[] {"a", "张三"}));
@@ -1591,18 +1607,22 @@ class NoteDwtableExcelImportServiceImplTest
                 "[{\"columnName\":\"关联\",\"name\":\"张三\",\"preselectedRecordId\":202}]", null,
                 "[{\"columnName\":\"关联\",\"name\":\"张三\",\"recordId\":201}]"));
 
-        // 改选生效：源 item linkRecordId=201（非预选 202），配对 item 锁定在 (201, 502)
+        // 改选生效：源 item linkRecordId=201（非预选 202）；18 列无对称写入（零 FOR UPDATE/零 update）
         verify(noteDwtableItemMapper, times(1)).insertNoteDwtableItems(itemsCaptor.capture());
+        NoteDwtableItem linkItem = null;
         for (NoteDwtableItem item : itemsCaptor.getValue())
         {
             if (item.getColumnId().equals(104L))
             {
-                assertEquals("201", item.getLinkRecordId());
+                linkItem = item;
             }
         }
-        verify(noteDwtableItemMapper, times(1))
-                .selectNoteDwtableItemByRecordAndColumnForUpdate(itemCaptor.capture());
-        assertEquals(Long.valueOf(201L), itemCaptor.getValue().getRecordId());
+        assertNotNull(linkItem);
+        assertEquals("201", linkItem.getLinkRecordId());
+        assertEquals("张三", linkItem.getValue());
+        verify(noteDwtableItemMapper, never())
+                .selectNoteDwtableItemByRecordAndColumnForUpdate(any(NoteDwtableItem.class));
+        verify(noteDwtableItemMapper, never()).updateNoteDwtableItem(any(NoteDwtableItem.class));
     }
 
     // ===== params JSON 非法：解析失败明确拒绝 =====
@@ -1850,12 +1870,14 @@ class NoteDwtableExcelImportServiceImplTest
         verify(noteRecordService, never()).recomputeSetOperationColumn(any(NoteColumn.class));
     }
 
-    // ===== #16：checkDrift 新增同名记录分支（基线歧义为空、阶段二两条同名 → 拒绝） =====
+    // ===== #16：checkDrift 新增同名记录分支（18 列——基线歧义为空、阶段二两条同名 → 拒绝） =====
 
     @Test
     void import_drift_newSameNameRecord_rejected()
     {
-        mockDoubleLinkColumns();
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
+                column(101L, "名称", 1L, null, 0L),
+                column(104L, "关联", 18L, "{\"select\":80}", 0L)));
         mockRelatedTable(relatedTable("被关联表", NOTE_ID));
         // 预检后新增同名"张三"记录：阶段二出现两条同名 → 基线（歧义为空）外的歧义
         mockRelatedRecords(Arrays.asList(record(201L, "张三", 1L), record(202L, "张三", 2L)));
@@ -2509,5 +2531,313 @@ class NoteDwtableExcelImportServiceImplTest
         verify(noteRecordMapper, never()).deleteNoteRecordByDwtableId(any(Long.class));
         verify(noteColumnMapper, never()).deleteNoteColumnById(any(Long.class));
         verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
+    }
+
+    // ==================================================================
+    // U3：21 列 ID 优先重建（双轨制：`_ID` 锚点 + LinkNameResolver 名称回退）
+    // ==================================================================
+
+    /** 21 列 round-trip 场景公共桩：被关联表 B记录(100) + 已存在配对 item (100, 502) */
+    private void mockDoubleLinkRoundTrip()
+    {
+        mockDoubleLinkColumns();
+        mockRelatedTable(relatedTable("被关联表", NOTE_ID));
+        mockRelatedRecords(Collections.singletonList(record(100L, "B记录", 1L)));
+        when(noteDwtableItemMapper.selectNoteDwtableItemByRecordAndColumnForUpdate(any(NoteDwtableItem.class)))
+                .thenReturn(pairedItem(900L, 502L, null, null, null));
+    }
+
+    // ===== Covers AE1. 导出文件不改再导入：`_ID` + `_文本` 双列回读，链接恢复 + 配对列对称 =====
+
+    @Test
+    void precheckAndImport_doubleLink_idHit_roundTripRestoresLinkAndSymmetry()
+    {
+        mockDoubleLinkRoundTrip();
+
+        // 导出产物布局（renderer：record_id 首列 + 双列 `_ID` 前 `_文本` 后）
+        byte[] bytes = singleSheetBytes(
+                new String[] {"record_id", "名称", "关联_ID", "关联_文本"},
+                Collections.singletonList(new String[] {"1", "a", "100", "B记录"}));
+
+        // 预检：ID 全命中 → 通过（无缺参/歧义/链接失败），对称写入影响 1 条
+        ExcelImportPrecheckResult precheck =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
+        assertTrue(precheck.getLinkFailures().isEmpty());
+        assertTrue(precheck.getMissingParams().isEmpty());
+        assertTrue(precheck.getAmbiguityItems().isEmpty());
+        assertFalse(precheck.isHasBlockingIssues());
+        assertEquals(1, precheck.getSymmetricWriteImpact().size());
+        assertEquals(1, precheck.getSymmetricWriteImpact().get(0).getAffectedRecordCount());
+        // `_ID` 锚点列进跳过清单（不作值导入）
+        assertEquals(2, precheck.getSkippedHeaders().size());
+
+        int count = runImport(bytes, paramsJson(bytes, null, null, null, null, null));
+        assertEquals(1, count);
+
+        // 源 item：linkRecordId=100（ID 精确重建）、value=记录当前名、linkColumnId=配对列
+        verify(noteDwtableItemMapper, times(1)).insertNoteDwtableItems(itemsCaptor.capture());
+        NoteDwtableItem sourceInserted = null;
+        for (NoteDwtableItem item : itemsCaptor.getValue())
+        {
+            if (item.getColumnId().equals(104L))
+            {
+                sourceInserted = item;
+            }
+        }
+        assertNotNull(sourceInserted);
+        assertEquals("100", sourceInserted.getLinkRecordId());
+        assertEquals("B记录", sourceInserted.getValue());
+        assertEquals(Long.valueOf(502L), sourceInserted.getLinkColumnId());
+        Long sourceItemId = sourceInserted.getId();
+        Long newRecordId = sourceInserted.getRecordId();
+        assertNotNull(sourceItemId);
+
+        // 配对 item 对称写入：追加新记录 id / 源 item id / 新记录名（linkColumnId=源列 id）
+        verify(noteDwtableItemMapper, times(2)).updateNoteDwtableItem(itemCaptor.capture());
+        NoteDwtableItem pairedUpdate = itemCaptor.getAllValues().get(0);
+        NoteDwtableItem sourceUpdate = itemCaptor.getAllValues().get(1);
+        assertEquals(Long.valueOf(100L), pairedUpdate.getRecordId());
+        assertEquals(Long.valueOf(502L), pairedUpdate.getColumnId());
+        assertEquals(String.valueOf(newRecordId), pairedUpdate.getLinkRecordId());
+        assertEquals(String.valueOf(sourceItemId), pairedUpdate.getLinkItemId());
+        assertEquals("a", pairedUpdate.getValue());
+        assertEquals(Long.valueOf(104L), pairedUpdate.getLinkColumnId());
+        // 源 item 回写 linkItemId=配对 item id（配对列对称闭合）
+        assertEquals("900", sourceUpdate.getLinkItemId());
+        assertEquals("100", sourceUpdate.getLinkRecordId());
+    }
+
+    // ===== `_ID` 命中但名称被外部改写：以 ID 为准重建，名称不产生失败 =====
+
+    @Test
+    void import_doubleLink_idHitWithRewrittenName_idWins()
+    {
+        mockDoubleLinkRoundTrip();
+
+        // 名称列被改写为不存在的记录名——ID 命中即整格按 ID 重建，名称不参与解析
+        byte[] bytes = singleSheetBytes(
+                new String[] {"record_id", "名称", "关联_ID", "关联_文本"},
+                Collections.singletonList(new String[] {"1", "a", "100", "被外部改写的名称"}));
+
+        ExcelImportPrecheckResult precheck =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
+        assertTrue(precheck.getLinkFailures().isEmpty());
+        assertFalse(precheck.isHasBlockingIssues());
+
+        runImport(bytes, paramsJson(bytes, null, null, null, null, null));
+
+        // 重建值取记录当前名（非单元格文本）；链接指向 id=100
+        verify(noteDwtableItemMapper, times(1)).insertNoteDwtableItems(itemsCaptor.capture());
+        NoteDwtableItem sourceInserted = null;
+        for (NoteDwtableItem item : itemsCaptor.getValue())
+        {
+            if (item.getColumnId().equals(104L))
+            {
+                sourceInserted = item;
+            }
+        }
+        assertNotNull(sourceInserted);
+        assertEquals("100", sourceInserted.getLinkRecordId());
+        assertEquals("B记录", sourceInserted.getValue());
+    }
+
+    // ===== `_ID` 未命中（目标已删）且名称回退唯一命中：按名称重建 =====
+
+    @Test
+    void import_doubleLink_idMiss_nameFallbackUniqueHit()
+    {
+        mockDoubleLinkColumns();
+        mockRelatedTable(relatedTable("被关联表", NOTE_ID));
+        mockRelatedRecords(Collections.singletonList(record(301L, "张三", 1L)));
+        when(noteDwtableItemMapper.selectNoteDwtableItemByRecordAndColumnForUpdate(any(NoteDwtableItem.class)))
+                .thenReturn(pairedItem(900L, 502L, null, null, null));
+
+        byte[] bytes = singleSheetBytes(
+                new String[] {"record_id", "名称", "关联_ID", "关联_文本"},
+                Collections.singletonList(new String[] {"1", "a", "999", "张三"}));
+
+        ExcelImportPrecheckResult precheck =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
+        assertTrue(precheck.getLinkFailures().isEmpty());
+
+        runImport(bytes, paramsJson(bytes, null, null, null, null, null));
+
+        // 名称回退命中唯一记录 301
+        verify(noteDwtableItemMapper, times(1)).insertNoteDwtableItems(itemsCaptor.capture());
+        NoteDwtableItem sourceInserted = null;
+        for (NoteDwtableItem item : itemsCaptor.getValue())
+        {
+            if (item.getColumnId().equals(104L))
+            {
+                sourceInserted = item;
+            }
+        }
+        assertNotNull(sourceInserted);
+        assertEquals("301", sourceInserted.getLinkRecordId());
+        assertEquals("张三", sourceInserted.getValue());
+    }
+
+    // ===== 名称回退歧义：预检失败清单含定位与原因（不再预选），整表零写入 =====
+
+    @Test
+    void precheck_doubleLink_ambiguousName_linkFailure()
+    {
+        mockDoubleLinkColumns();
+        mockRelatedTable(relatedTable("被关联表", NOTE_ID));
+        mockRelatedRecords(Arrays.asList(record(201L, "张三", 5L), record(202L, "张三", 2L)));
+
+        // 空 `_ID`（ID 缺失）→ 纯名称解析 → 歧义
+        byte[] bytes = singleSheetBytes(
+                new String[] {"record_id", "名称", "关联_ID", "关联_文本"},
+                Collections.singletonList(new String[] {"1", "a", "", "张三"}));
+
+        ExcelImportPrecheckResult result =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
+
+        // 链接失败清单：定位（列+行号）+ 原因 + 容错命中说明；与缺参清单并列阻断
+        assertEquals(1, result.getLinkFailures().size());
+        LinkFailure failure = result.getLinkFailures().get(0);
+        assertEquals(Long.valueOf(104L), failure.getColumnId());
+        assertEquals("关联", failure.getColumnName());
+        assertEquals(2, failure.getRowNumber());
+        assertEquals("张三", failure.getEntryText());
+        assertTrue(failure.getReason().contains("歧义"));
+        assertNotNull(failure.getExplanation());
+        // 21 列不再产生歧义预选项与未命中缺参（选择器为 18 专属）
+        assertTrue(result.getAmbiguityItems().isEmpty());
+        assertTrue(result.getMissingParams().isEmpty());
+        assertTrue(result.isHasBlockingIssues());
+
+        // 导入（阶段二防御）：漂移式拒绝，零写入
+        ServiceException ex = assertThrows(ServiceException.class,
+                () -> runImport(bytes, paramsJson(bytes, null, null, null, null, null)));
+        assertTrue(ex.getMessage().contains("数据已变化，请重新预检"));
+        assertTrue(ex.getMessage().contains("解析失败"));
+        assertTrue(ex.getMessage().contains("张三"));
+        verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
+        verify(noteDwtableItemMapper, never()).insertNoteDwtableItems(anyList());
+        verify(noteDwtableItemMapper, never()).updateNoteDwtableItem(any(NoteDwtableItem.class));
+    }
+
+    // ===== 多值部分命中（R9）：任一条目失败 → 整表零写入 =====
+
+    @Test
+    void precheck_doubleLink_multiValuePartialHit_linkFailureZeroWrites()
+    {
+        mockDoubleLinkColumns();
+        mockRelatedTable(relatedTable("被关联表", NOTE_ID));
+        mockRelatedRecords(Collections.singletonList(record(301L, "张三", 1L)));
+
+        // `_ID`=301,999：301 命中、999 死链；同位名称"张三,错名"：错名未命中 → 失败
+        byte[] bytes = singleSheetBytes(
+                new String[] {"record_id", "名称", "关联_ID", "关联_文本"},
+                Collections.singletonList(new String[] {"1", "a", "301,999", "张三,错名"}));
+
+        ExcelImportPrecheckResult result =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
+
+        assertEquals(1, result.getLinkFailures().size());
+        LinkFailure failure = result.getLinkFailures().get(0);
+        assertEquals("错名", failure.getEntryText());
+        assertEquals(2, failure.getRowNumber());
+        assertTrue(failure.getReason().contains("ID 未命中"));
+        assertTrue(result.isHasBlockingIssues());
+
+        ServiceException ex = assertThrows(ServiceException.class,
+                () -> runImport(bytes, paramsJson(bytes, null, null, null, null, null)));
+        assertTrue(ex.getMessage().contains("解析失败"));
+        assertTrue(ex.getMessage().contains("错名"));
+        verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
+        verify(noteDwtableItemMapper, never()).insertNoteDwtableItems(anyList());
+    }
+
+    // ===== `_ID` 指向已删目标且名称空（U1 悬空导出回读）：按“无链接”跳过不失败；
+    //       空 `_ID` + 空名称：无链接（R15） =====
+
+    @Test
+    void import_doubleLink_deadIdWithEmptyName_skipped_noFailure()
+    {
+        mockDoubleLinkColumns();
+        mockRelatedTable(relatedTable("被关联表", NOTE_ID));
+        mockRelatedRecords(Collections.singletonList(record(301L, "张三", 1L)));
+
+        // 行2：`_ID`=999（目标已删）+ 名称空 → 死链回读跳过；行3：`_ID` 空 + 名称空 → 无链接
+        byte[] bytes = singleSheetBytes(
+                new String[] {"record_id", "名称", "关联_ID", "关联_文本"},
+                Arrays.asList(
+                        new String[] {"1", "a", "999", ""},
+                        new String[] {"2", "b", "", ""}));
+
+        ExcelImportPrecheckResult result =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
+        assertTrue(result.getLinkFailures().isEmpty());
+        assertTrue(result.getMissingParams().isEmpty());
+        assertTrue(result.getSymmetricWriteImpact().isEmpty());
+        assertFalse(result.isHasBlockingIssues());
+
+        int count = runImport(bytes, paramsJson(bytes, null, null, null, null, null));
+        assertEquals(2, count);
+
+        // 两行均不建立关联：空串 value、无 link 字段、零对称写入
+        verify(noteDwtableItemMapper, times(1)).insertNoteDwtableItems(itemsCaptor.capture());
+        int linkItemCount = 0;
+        for (NoteDwtableItem item : itemsCaptor.getValue())
+        {
+            if (item.getColumnId().equals(104L))
+            {
+                linkItemCount++;
+                assertEquals("", item.getValue());
+                assertNull(item.getLinkRecordId());
+            }
+        }
+        assertEquals(2, linkItemCount);
+        verify(noteDwtableItemMapper, never())
+                .selectNoteDwtableItemByRecordAndColumnForUpdate(any(NoteDwtableItem.class));
+        verify(noteDwtableItemMapper, never()).updateNoteDwtableItem(any(NoteDwtableItem.class));
+    }
+
+    // ===== 18 列回归（红线）：`列名_文本` 机制不变、`_ID` 仍忽略不消费 =====
+
+    @Test
+    void precheckAndImport_singleLink_textMechanismAndIdIgnored_unchanged()
+    {
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
+                column(101L, "名称", 1L, null, 0L),
+                column(105L, "单向", 18L, "{\"select\":80}", 0L)));
+        mockRelatedTable(relatedTable("被关联表", NOTE_ID));
+        mockRelatedRecords(Collections.singletonList(record(301L, "张三", 1L)));
+
+        // `_ID` 单元格放了错误 id（888）：18 列 `_ID` 仍被忽略（不消费），链接仅由 `_文本` 名称建立
+        byte[] bytes = singleSheetBytes(
+                new String[] {"record_id", "名称", "单向_ID", "单向_文本"},
+                Collections.singletonList(new String[] {"1", "a", "888", "张三"}));
+
+        ExcelImportPrecheckResult result =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
+        assertTrue(result.getLinkFailures().isEmpty());
+        assertTrue(result.getMissingParams().isEmpty());
+        assertFalse(result.isHasBlockingIssues());
+        // record_id + 单向_ID 两个跳过表头（后者为源 id 列不导入值）
+        assertEquals(2, result.getSkippedHeaders().size());
+
+        runImport(bytes, paramsJson(bytes, null, null, null, null, null));
+
+        // 链接由名称建立（301），`_ID` 的 888 未参与；18 列无对称写入
+        verify(noteDwtableItemMapper, times(1)).insertNoteDwtableItems(itemsCaptor.capture());
+        NoteDwtableItem linkItem = null;
+        for (NoteDwtableItem item : itemsCaptor.getValue())
+        {
+            if (item.getColumnId().equals(105L))
+            {
+                linkItem = item;
+            }
+        }
+        assertNotNull(linkItem);
+        assertEquals("301", linkItem.getLinkRecordId());
+        assertEquals("张三", linkItem.getValue());
+        assertNull(linkItem.getLinkColumnId());
+        verify(noteDwtableItemMapper, never())
+                .selectNoteDwtableItemByRecordAndColumnForUpdate(any(NoteDwtableItem.class));
+        verify(noteDwtableItemMapper, never()).updateNoteDwtableItem(any(NoteDwtableItem.class));
     }
 }

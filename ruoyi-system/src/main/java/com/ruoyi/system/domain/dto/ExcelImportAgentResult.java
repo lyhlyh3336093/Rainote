@@ -13,7 +13,8 @@ import java.util.List;
  *   <li>失败态（{@code success=false}）：导入未执行（零写入），携带 {@link #missingParams}
  *       未覆盖缺参清单——LLM 可将清单呈现给用户，用户在对话中提供补值后由 LLM 生成带
  *       {@code columnValues} 的第二次调用；关联类缺参（关联缺列/关联未命中/记录选择）无法由
- *       文本补值覆盖，须提示用户改走界面导入。</li>
+ *       文本补值覆盖，须提示用户改走界面导入；21 列链接解析失败（U3/R10）同样零写入，
+ *       携带 {@link #linkFailures} 结构化清单（与界面共用 DTO），须修正文件后重导。</li>
  * </ul>
  * 复用 {@link ExcelImportPrecheckResult} 的内部静态类作为清单元素类型。
  *
@@ -44,6 +45,13 @@ public class ExcelImportAgentResult
 
     /** 未覆盖缺参清单（仅失败态：columnValues 未覆盖的基础列缺参 + 无法覆盖的关联类缺参） */
     private List<ExcelImportPrecheckResult.MissingParam> missingParams = new ArrayList<>();
+
+    /**
+     * 链接解析失败清单（仅失败态，U3/R10）：21 列 ID 未命中且名称解析歧义/未命中——强失败
+     * 无法补参覆盖，零写入返回；与界面预检共用 {@link ExcelImportPrecheckResult.LinkFailure}
+     * 结构（单元格定位/原因/容错命中说明），LLM 呈现清单引导用户修正文件后重导。
+     */
+    private List<ExcelImportPrecheckResult.LinkFailure> linkFailures = new ArrayList<>();
 
     /** 替换式导入影响面（仅成功态：删除行/删除列/新建列/跨表引用清空摘要，供用户知悉） */
     private ExcelImportPrecheckResult.ReplaceImpact replaceImpact;
@@ -126,6 +134,16 @@ public class ExcelImportAgentResult
     public void setMissingParams(List<ExcelImportPrecheckResult.MissingParam> missingParams)
     {
         this.missingParams = missingParams;
+    }
+
+    public List<ExcelImportPrecheckResult.LinkFailure> getLinkFailures()
+    {
+        return linkFailures;
+    }
+
+    public void setLinkFailures(List<ExcelImportPrecheckResult.LinkFailure> linkFailures)
+    {
+        this.linkFailures = linkFailures;
     }
 
     public ExcelImportPrecheckResult.ReplaceImpact getReplaceImpact()

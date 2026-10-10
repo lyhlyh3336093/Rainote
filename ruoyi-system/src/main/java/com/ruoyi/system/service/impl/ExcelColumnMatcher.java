@@ -35,7 +35,10 @@ import com.ruoyi.system.service.impl.ExcelWorkbookReader.RowData;
  *       record_id 源列仅识别未精确命中的表头；<b>隐藏列参与匹配</b>（Excel 出现同名列即
  *       取消隐藏并导入数据）；排除类型列（公式 20/23、集合运算 24、语义关联 25、lookup 26、
  *       系统列 1001-1005）同名跳过但记录被引用（列保留）；未匹配表头为新建纯文本列候选；
- *       18/21 关联列参与导入（值来源为文本匹配，匹配逻辑归 U4）；</li>
+ *       18/21 关联列参与导入——名称主列同时接受<b>列原名</b>（精确匹配）与
+ *       {@code 列名_文本}（round-trip 与外部手写两种来源）；{@code 列名_ID} 剥离后缀命中
+ *       21 列时<b>登记 ID 锚点列</b>（U3：ID 优先重建，经
+ *       {@link ColumnMapping#linkIdHeaderIndex} 消费、不导入值），命中 18 列仍忽略；</li>
  *   <li>{@link #validateCellText(NoteColumn, String)}——单元格显示文本的类型校验（R11/KTD9）：
  *       数字(2)/日期(5)/复选框(7) 三类，空缺值不算违规，违规返回中文描述供预检聚合为缺参。</li>
  * </ul>
@@ -259,7 +262,8 @@ public final class ExcelColumnMatcher
      *       即取消隐藏并导入数据，不静默丢弃）；</li>
      *   <li>未命中的表头才做 round-trip 识别：首列且恰为 {@code record_id} 的表头是导出固定的
      *       记录 id 源列 → 忽略；{@code 列名_文本} 剥离后缀命中 type 18/21 关联列 → 该表头为其
-     *       文本值来源；{@code 列名_ID} 剥离后缀命中 18/21 列 → 忽略（源 id 不映射）；</li>
+     *       文本值来源；{@code 列名_ID} 剥离后缀命中 21 列 → 登记 ID 锚点列（U3，不导入值、
+     *       经 {@link ColumnMapping#linkIdHeaderIndex} 消费），命中 18 列 → 忽略（源 id 不映射）；</li>
      *   <li>排除类型列（公式/集合运算/语义关联/lookup）与系统列同名 → 跳过但记录
      *       {@link HeaderEntry#getSkippedColumn()}（替换式语义：列保留、值由系统计算，
      *       不进删除清单）；</li>
@@ -397,8 +401,21 @@ public final class ExcelColumnMatcher
                 NoteColumn link = importableByName.get(bare);
                 if (link != null && isLinkType(link))
                 {
-                    entries.set(i, new HeaderEntry(i, header, null,
-                            "关联列源 id 列（" + bare + "_ID），不导入值"));
+                    if (link.getType() == TYPE_DOUBLE_LINK)
+                    {
+                        // U3（R3/R5）：21 列 `_ID` 由“忽略、不导值”改为登记——ID 优先重建的
+                        // 机器锚点列。不占列的值映射槽位（column 保持 null、不参与 mapped 列
+                        // 冲突检测与删除/保留分类），经 ColumnMapping#linkIdHeaderIndex 消费
+                        entries.set(i, new HeaderEntry(i, header, null,
+                                "双向关联列 id 锚点列（" + bare + "_ID），供链接按 ID 重建，不导入值",
+                                null, false, link));
+                    }
+                    else
+                    {
+                        // 18 列维持忽略（`列名_文本` 机制与记录选择器不动，回归红线）
+                        entries.set(i, new HeaderEntry(i, header, null,
+                                "关联列源 id 列（" + bare + "_ID），不导入值"));
+                    }
                     continue;
                 }
                 NoteColumn suffixTarget = excludedByName.get(bare);
@@ -758,6 +775,27 @@ public final class ExcelColumnMatcher
         {
             return row == null ? "" : cellText(row.getCells(), headerIndex);
         }
+
+        /**
+         * 21 列 `_ID` 锚点表头的下标（U3；无锚点列或非 21 列返回 -1）。
+         * 身份比较（列实例与调用方来自同一列清单），供预检/执行两阶段读取 id 单元格
+         * （ID 优先重建的机器锚点，R3/R5）。
+         */
+        public int linkIdHeaderIndex(NoteColumn column)
+        {
+            if (column == null)
+            {
+                return -1;
+            }
+            for (HeaderEntry entry : entries)
+            {
+                if (entry.linkIdColumn == column)
+                {
+                    return entry.getHeaderIndex();
+                }
+            }
+            return -1;
+        }
     }
 
     /**
@@ -768,7 +806,9 @@ public final class ExcelColumnMatcher
      *   <li>{@link #skippedColumn}——表头因同名排除类型/系统列跳过时记录该列
      *       （列保留、值由系统计算，供调用方判定"被引用不删除"）；其余跳过为 null；</li>
      *   <li>{@link #unmatched}——目标表无任何同名列（= 新建纯文本列候选）；
-     *       同名重复表头仅首个标记。</li>
+     *       同名重复表头仅首个标记；</li>
+     *   <li>{@link #getLinkIdColumn()}——表头为 21 列的 {@code 列名_ID} 锚点列时登记该
+     *       双向关联列（U3：ID 优先重建的机器锚点，column 保持 null 不作值映射）；其余为 null。</li>
      * </ul>
      */
     public static final class HeaderEntry
@@ -791,6 +831,9 @@ public final class ExcelColumnMatcher
         /** 目标表无同名列（替换式语义 = 新建纯文本列候选） */
         private final boolean unmatched;
 
+        /** 21 列 `_ID` 锚点列登记的目标双向关联列（U3；非锚点表头为 null） */
+        private final NoteColumn linkIdColumn;
+
         HeaderEntry(int headerIndex, String headerName, NoteColumn column, String reason)
         {
             this(headerIndex, headerName, column, reason, null, false);
@@ -805,12 +848,19 @@ public final class ExcelColumnMatcher
         HeaderEntry(int headerIndex, String headerName, NoteColumn column, String reason,
                 NoteColumn skippedColumn, boolean unmatched)
         {
+            this(headerIndex, headerName, column, reason, skippedColumn, unmatched, null);
+        }
+
+        HeaderEntry(int headerIndex, String headerName, NoteColumn column, String reason,
+                NoteColumn skippedColumn, boolean unmatched, NoteColumn linkIdColumn)
+        {
             this.headerIndex = headerIndex;
             this.headerName = headerName;
             this.column = column;
             this.reason = reason;
             this.skippedColumn = skippedColumn;
             this.unmatched = unmatched;
+            this.linkIdColumn = linkIdColumn;
         }
 
         public int getHeaderIndex()
@@ -841,6 +891,11 @@ public final class ExcelColumnMatcher
         public boolean isUnmatched()
         {
             return unmatched;
+        }
+
+        public NoteColumn getLinkIdColumn()
+        {
+            return linkIdColumn;
         }
     }
 }

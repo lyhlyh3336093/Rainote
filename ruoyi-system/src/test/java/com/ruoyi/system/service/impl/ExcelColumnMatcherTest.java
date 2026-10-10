@@ -426,8 +426,47 @@ class ExcelColumnMatcherTest
         HeaderEntry hidden = entryOf(mapping, "机密");
         assertEquals(hiddenText, hidden.getColumn());
         assertEquals(hiddenLink, entryOf(mapping, "隐藏关联_文本").getColumn());
-        // 源 id 后缀表头仍忽略（不导入值）
+        // 21 列 `_ID`（U3）：不作值映射（column=null）但登记为 ID 锚点列
         assertNull(entryOf(mapping, "隐藏关联_ID").getColumn());
+        assertEquals(2, mapping.linkIdHeaderIndex(hiddenLink));
+    }
+
+    // ==================== 列映射：21 列 `_ID` 锚点登记与 18 列忽略（U3，R3/R5） ====================
+
+    @Test
+    void mapShouldRegisterDoubleLinkIdAnchorAndIgnoreSingleLinkId()
+    {
+        NoteColumn doubleLink = column(4L, "双向", 21L);
+        NoteColumn singleLink = column(5L, "单向", 18L);
+        ColumnMapping mapping = ExcelColumnMatcher.mapColumns(
+                Arrays.asList("record_id", "双向", "双向_ID", "单向_文本", "单向_ID"),
+                Arrays.asList(doubleLink, singleLink));
+
+        // 21 列名称主列：列原名（精确匹配）与 `_ID` 锚点登记并存（round-trip 与外部手写两种来源）
+        assertEquals(doubleLink, mapping.mappedColumn(1));
+        assertNull(entryOf(mapping, "双向_ID").getColumn());
+        assertEquals(2, mapping.linkIdHeaderIndex(doubleLink));
+        // 登记条目进跳过清单（不导入值），原因标明锚点用途
+        assertTrue(entryOf(mapping, "双向_ID").getReason().contains("锚点"));
+
+        // `_文本` 形态的名称主列同样可与 `_ID` 锚点并存
+        ColumnMapping suffixMapping = ExcelColumnMatcher.mapColumns(
+                Arrays.asList("双向_文本", "双向_ID"),
+                Collections.singletonList(doubleLink));
+        assertEquals(doubleLink, entryOf(suffixMapping, "双向_文本").getColumn());
+        assertEquals(1, suffixMapping.linkIdHeaderIndex(doubleLink));
+
+        // 18 列 `_ID` 维持忽略（不登记、不导入值——`列名_文本` 机制与记录选择器不动，回归红线）
+        assertEquals(singleLink, entryOf(mapping, "单向_文本").getColumn());
+        assertNull(entryOf(mapping, "单向_ID").getColumn());
+        assertEquals(-1, mapping.linkIdHeaderIndex(singleLink));
+        assertTrue(entryOf(mapping, "单向_ID").getReason().contains("不导入值"));
+
+        // 未登记锚点的 21 列（无 `_ID` 表头）返回 -1
+        ColumnMapping noIdMapping = ExcelColumnMatcher.mapColumns(
+                Arrays.asList("双向_文本"),
+                Collections.singletonList(doubleLink));
+        assertEquals(-1, noIdMapping.linkIdHeaderIndex(doubleLink));
     }
 
     @Test

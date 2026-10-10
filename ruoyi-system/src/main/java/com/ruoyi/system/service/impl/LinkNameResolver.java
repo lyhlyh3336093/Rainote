@@ -257,12 +257,21 @@ public class LinkNameResolver
     // ==================== 条目拆分与锚词剥离 ====================
 
     /**
-     * CSV 风格拆分（导出侧 {@code escapeCsvValue} 的逆操作）：
+     * CSV 风格拆分（导出侧 {@code escapeCsvValue} 的逆操作；<b>保留空条目</b>）：
      * 双引号包裹段整体读入——段内英文逗号不拆分、包裹引号去除、内层双引号翻倍还原
      * （{@code ""} → {@code "}）；非包裹段按英文逗号拆分。未闭合引号按宽松规则读到结尾。
+     * <p>
+     * U3 消费点：导入侧 21 列 `_ID` 与名称条目按导出顺序一一配对（{@code resolve} 会跳过
+     * 空条目丢失位置信息，位置配对须经本方法取得含空条目的原序清单）。
+     *
+     * @param text 单元格文本（null / 空串 → 空列表）
      */
-    private static List<String> splitCsvEntries(String text)
+    public static List<String> splitCsvEntries(String text)
     {
+        if (text == null)
+        {
+            return Collections.emptyList();
+        }
         List<String> entries = new ArrayList<>();
         StringBuilder current = new StringBuilder();
         boolean inQuotes = false;
