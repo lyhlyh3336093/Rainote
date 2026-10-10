@@ -36,6 +36,16 @@ A row's display name is derived, not user-authored: it takes the value of the ta
 ### NoteNotelink
 A link record representing a semantic association between a note and a multi-dimensional table cell, persisted per anchor. `noteId`/`blockId` identify the source note and block; `linkDwTableId`/`linkColumnId`/`linkItemId`/`linkRecordId` identify the target cell; `linkNoteId` is the target table's owner note id (used as the navigation URL's first segment). Historical rows may have null `linkNoteId` — see the Semantic Link Column entry for the recovery rule.
 
+### Dual-Track Round-Trip (双轨往返)
+The identity mechanism for link-column Excel round-trips: a machine-anchor `_ID` companion column is consumed first for exact reconstruction, and readable-name parsing serves only as the fallback for externally authored data lacking IDs.
+
+When ID and name disagree, ID wins and the name is treated as user-edited prose. The name-fallback pipeline (whole-entry first, then exact, then normalized, then unique-prefix matching) treats ambiguity as hard failure — zero-write for the whole import. Machine anchors dissolve the duplicate-name, empty-name, and name-derivation-column-drift problems that pure-name schemes cannot solve.
+
+### Declared Target Set (互指声明集)
+The set of targets a double link column's cells declare in an import plan; paired-column back-entries survive replace-import repointing only when the opposite side's declared set still contains their record.
+
+Deleting a forward link in the Excel removes the target from the declared set, so the corresponding back-entry is entry-level cleared and reported — preserving the mutual-reference symmetry the UI continuously maintains. One-way relation columns (type=18) have no mutual-reference semantics and repoint unconditionally; this fork is intentional.
+
 ### back_field_id
 A property in type=21 columns that references the paired column in the other table. If column 3262 has `back_field_id=3263`, then column 3263 has `back_field_id=3262`. This pairing is essential for indirect trigger matching in set operations.
 
