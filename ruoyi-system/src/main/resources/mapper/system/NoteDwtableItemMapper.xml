@@ -170,10 +170,29 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         </foreach>
     </delete>
 
-    <!-- 替换式 Excel 导入：本表记录全删后，其他表指向本表的关联列（kept 21 配对列/他表 18 列）
-         的 items 旧引用悬空，按列清空关联三字段（linkColumnId 保留标识配对方向） -->
+    <!-- 替换式 Excel 导入（历史用途）：本表记录全删后，其他表指向本表的关联列（kept 21 配对列/他表 18 列）
+         的 items 旧引用悬空，按列清空关联三字段（linkColumnId 保留标识配对方向）。
+         导入路径已由 U5 入链重指向（重写取代整列清空）取代，现仅用于列级联删除链路 -->
     <update id="clearLinkFieldsByColumnId" parameterType="Long">
         update note_dwtable_item set linkRecordId = '', linkItemId = '', value = ''
         where columnId = #{columnId} and (linkRecordId is not null or linkItemId is not null)
+    </update>
+
+    <!-- U5 入链重指向·捕获：按表集合全量反查 linkRecordId 非空行（成员级"含某旧记录 id"的精确
+         过滤由 Java 侧拆 CSV 串比对完成——查询侧同样禁 LIKE 子串匹配，id 3 会误中 13） -->
+    <select id="selectLinkItemsByDwtIds" resultMap="NoteDwtableItemResult">
+        <include refid="selectNoteDwtableItemVo"/>
+        where linkRecordId is not null and linkRecordId != ''
+        and dwtId in
+        <foreach item="dwtId" collection="dwtIds" open="(" separator="," close=")">
+            #{dwtId}
+        </foreach>
+    </select>
+
+    <!-- U5 入链重指向·写路径：按主键单行更新三字段（Java 侧读-改-写：拆串→逐 id 映射→Set 去重→join
+         后落库；禁集合式 SQL REPLACE——逗号串子串误替换，如旧 id 3 被 REPLACE 误中 13） -->
+    <update id="updateLinkFieldsById">
+        update note_dwtable_item set linkRecordId = #{linkRecordId}, linkItemId = #{linkItemId}, value = #{value}
+        where id = #{id}
     </update>
 </mapper>

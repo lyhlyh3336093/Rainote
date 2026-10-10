@@ -1,6 +1,7 @@
 package com.ruoyi.system.mapper;
 
 import java.util.List;
+import org.apache.ibatis.annotations.Param;
 import com.ruoyi.system.domain.NoteDwtableItem;
 
 /**
@@ -149,11 +150,41 @@ public interface NoteDwtableItemMapper
     /**
      * 清空指定列全部 items 的关联字段（linkRecordId/linkItemId/value 置空串，linkColumnId 保留）。
      * <p>
-     * 替换式 Excel 导入用：本表记录全删后，其他表指向本表的关联列
-     * （kept 21 列的配对列 / 他表 18 列）的 items 旧引用全部悬空。
+     * 列级联删除场景用（删列删配对列链路）。替换式 Excel 导入的跨表清理已由
+     * 入链重指向（U5，R11-R13）取代整列清空，本方法不再用于导入路径。
      *
      * @param columnId 列主键
      * @return 受影响行数
      */
     public int clearLinkFieldsByColumnId(Long columnId);
+
+    /**
+     * 按表 id 集合全量反查 linkRecordId 非空的 items（U5/R11 入链重指向的捕获查询）。
+     * <p>
+     * 替换式导入全删本表前的快照读：他表指向本表旧记录的入链按 linkRecordId 数据面
+     * 反查（不复用列扫描——18 列 property.table_id / 21 配对列 back_field_id 残缺的
+     * 入链同样捕获，防空配漏捕）。CSV 成员级"含某旧记录 id"的精确过滤由 Java 侧
+     * 拆串比对完成（查询侧同样禁 LIKE 子串匹配——id 3 会误中 13）。
+     *
+     * @param dwtIds 表 id 集合（调用方保证非空，通常为同笔记下本表之外的全部表）
+     * @return linkRecordId 非空的 items 集合
+     */
+    public List<NoteDwtableItem> selectLinkItemsByDwtIds(@Param("dwtIds") List<Long> dwtIds);
+
+    /**
+     * 按主键单行更新关联三字段（U5/R11 入链重指向的唯一写路径）。
+     * <p>
+     * 仅 SET linkRecordId/linkItemId/value（linkColumnId 等其余字段不动；空串语义对齐
+     * {@link #clearLinkFieldsByColumnId} 的字段口径）。读-改-写合并（拆 CSV 串→逐 id
+     * 映射→Set 去重→join）全部在 Java 侧完成后单行落库——禁止集合式 SQL REPLACE
+     * （逗号串子串误替换，如旧 id 3 被 REPLACE 误中 13）。
+     *
+     * @param id           行主键
+     * @param linkRecordId 重写后的 linkRecordId（join 串，可为空串）
+     * @param linkItemId   重写后的 linkItemId（join 串，可为空串）
+     * @param value        重写后的 value（join 串，可为空串）
+     * @return 受影响行数（行已被级联删除时为 0，自然 no-op）
+     */
+    public int updateLinkFieldsById(@Param("id") Long id, @Param("linkRecordId") String linkRecordId,
+            @Param("linkItemId") String linkItemId, @Param("value") String value);
 }

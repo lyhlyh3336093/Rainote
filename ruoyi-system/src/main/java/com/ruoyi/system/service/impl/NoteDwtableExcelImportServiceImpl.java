@@ -81,7 +81,8 @@ import com.ruoyi.system.service.impl.ExcelWorkbookReader.RowData;
  * <p>
  * 替换式语义：导入成功后目标表现有数据行全部删除、列集合对齐 Excel——同名列保留配置只换数据，
  * Excel 独有表头自动新建纯文本列，表中 Excel 未含的非系统列（含公式/查找/隐藏列）删除，
- * 被删 21 双向关联列在被关联表的配对列级联删除，其他表指向本表的关联列引用被清空。
+ * 被删 21 双向关联列在被关联表的配对列级联删除，其他表指向本表的关联列入链按
+ * "旧 item→新 item"映射精准重指向（取代原整列清空，U5）。
  * <p>
  * 预检流程（R9/R10/R11/R14/R15/R23/R24/R25，KTD4/KTD5）：
  * <ol>
@@ -116,7 +117,7 @@ import com.ruoyi.system.service.impl.ExcelWorkbookReader.RowData;
  * NoteNotelink 行 id，单元格先按 `_ID` 逐条目校验行存在性（旧行核心字段按行 id 捕获备用），
  * 命中即按行 id 恢复原行；`_ID` 缺失/未命中按同位名称条目（"引用笔记名（锚词）"语法）经
  * {@link LinkNameResolver} 对全部笔记标题回退（空名称条目=悬空导出回读的死链，跳过不失败）；
- * 歧义/未命中进同一链接失败清单（多值任一失败整表零写入，R9）。执行段 (h2)（21 对称写回之后、
+ * 歧义/未命中进同一链接失败清单（多值任一失败整表零写入，R9）。执行段 (h3)（21 对称写回之后、
  * 跨表重算之前）逐列重建：先按列 {@code deleteNoteNotelinkByColumnId} 清旧行，`_ID` 命中按行 id
  * upsert 恢复原行（保留行 id 与 blockId——源笔记锚点 data-link-id 不断链）、名称回退 insert 新行
  * （blockId=null 锚点降级、contextText=锚词、linkNoteId=本表归属笔记规范值）。
@@ -126,11 +127,24 @@ import com.ruoyi.system.service.impl.ExcelWorkbookReader.RowData;
  * <p>
  * 导入流程（U5，R16-R26，KTD3/KTD5/KTD8）：非事务前置段（指纹校验 → 同一私有方法链
  * 重新解析/映射/匹配 → params 解析 → 补参校验 R26 → 反向漂移 fail-fast）→
- * {@code @Transactional} 写入段（替换阶段：全删本表行与 items → 清空跨表关联引用 →
- * 级联删被删 21 列的配对列 → 删旧列+清孤儿 notelink → 建新列 → 取消隐藏；
- * 写入阶段：逐行 NoteRecord + items 批量 ≥500 flush + 选项追加 + 全量最终 flush +
+ * {@code @Transactional} 写入段（替换阶段：入链捕获与重指向预判（全删前，U5）→
+ * 全删本表行与 items → 级联删被删 21 列的配对列 → 删旧列+清孤儿 notelink →
+ * 建新列 → 取消隐藏；写入阶段：逐行 NoteRecord + items 批量 ≥500 flush + 选项追加 +
+ * 全量最终 flush → 入链重指向（建新落库回填新 id 后、21 对称写回之前，取代原整列清空）→
  * 双链对称写入 + 重算编排——重算无条件执行，仅表头无数据行的清空场景也要跑）→
  * 返回 recordCount；失败整体回滚（R22）。
+ * <p>
+ * 入链重指向（U5，R11-R13，2026-10-10 裁决）：全删前按 linkRecordId 全量反查捕获他表
+ * 指向本表旧记录的 21/18 入链（不复用列扫描，防属性残缺入链漏捕）；建新落库后以
+ * Excel 首列 record_id + 回填新 id 构造"旧 item→新 item"精确映射，Java 侧读-改-写
+ * （拆 CSV 串→逐 id 映射→Set 去重→join）三字段重写 linkRecordId/linkItemId/value
+ * （value 刷新为新记录名；21 配对列与 18 入链同口径；禁集合式 SQL REPLACE——逗号串
+ * 子串误替换）。映射未覆盖且 record_id 列缺失（外部手写文件）→ 名称回退
+ * （{@link LinkNameResolver}，歧义进失败清单零写入）；目标确已不存在（旧记录未出现在
+ * Excel 中）→ 单元格级全清并报告；21 配对列中导入计划已无对侧互指声明的旧条目→
+ * 条目级清空并报告（互指一致性；18 列单向、无条件重指向）。kept 配对列与他表 18 列
+ * 不再整列清空；被删列的配对列级联删除语义不变；notelink 目标行处置归 25 列重建
+ * （U4），重指向不碰 notelink。
  *
  * @author ruoyi
  */
@@ -593,6 +607,9 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         appendSkippedHeaders(result, mapping, noteId, dwtableId);
         analyzeColumns(result, noteId, dwtableId, userId, selection.getRows(), columns, mapping);
         buildReplaceImpact(result, noteId, dwtableId, columns, mapping);
+        // U5（R12 裁决）：入链重指向名称回退歧义预判（外部手写文件无 record_id 首列场景；
+        // 歧义进链接失败清单并列阻断，确认前零写入）
+        analyzeInboundRepointAmbiguity(result, noteId, dwtableId, selection, columns, mapping);
         // U3（R8）：链接失败清单与缺参清单并列阻断（21 列强失败，确认前零写入）
         result.setHasBlockingIssues(!result.getMissingParams().isEmpty()
                 || !result.getAmbiguityItems().isEmpty()
@@ -2258,6 +2275,51 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             plan.rows.add(rowPlan);
         }
 
+        // ===== U5 入链重指向锚点：record_id 首列（导出固定首列）→ 行索引 =====
+        // 旧记录 id 精确映射的主路径（KTD 裁决：名称回退仅是外部手写文件的兜底）；
+        // 空/非法单元格值不进映射（该行视为无旧 id 的新增行）；重复 id 首行生效
+        plan.recordIdColumnPresent = recordIdHeaderPresent(selection);
+        if (plan.recordIdColumnPresent)
+        {
+            for (int r = 0; r < rowCount; r++)
+            {
+                Long legacyRecordId = parseLongSafe(mapping.cellText(rows.get(r), 0).trim());
+                if (legacyRecordId != null)
+                {
+                    plan.rowIndexByLegacyRecordId.putIfAbsent(legacyRecordId, Integer.valueOf(r));
+                }
+            }
+        }
+
+        // ===== U5 互指声明集：kept 21 列逐行解析目标（配对列旧条目存活 ⇔ 对侧行声明含该记录；
+        // Excel 声明集 = 21 列单元格解析出的目标集合，事务段重指向的互指一致性判定输入） =====
+        for (NoteColumn column : participants)
+        {
+            if (column.getType() == null || column.getType() != ExcelColumnMatcher.TYPE_DOUBLE_LINK)
+            {
+                continue;
+            }
+            LinkColumnAnalysis analysis = linkAnalysisByColumn.get(column);
+            if (analysis == null)
+            {
+                continue;
+            }
+            List<Set<Long>> declaredPerRow = new ArrayList<>(rowCount);
+            for (int r = 0; r < rowCount; r++)
+            {
+                Set<Long> targets = new LinkedHashSet<>();
+                for (NoteRecord target : analysis.recordsPerRow.get(r))
+                {
+                    if (target != null && target.getId() != null)
+                    {
+                        targets.add(target.getId());
+                    }
+                }
+                declaredPerRow.add(targets);
+            }
+            plan.declaredTargetsByColumnId.put(column.getId(), declaredPerRow);
+        }
+
         // ===== 重算编排清单（KTD8，替换式扩展） =====
         buildRecomputeTargets(plan, columns, headerIndexByColumn);
         return plan;
@@ -2824,17 +2886,23 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
      * 事务写入段（R22，经自注入代理进入，<b>替换式语义</b>）：
      * <ol>
      *   <li>漂移复查（kept 参与列/被关联表配对列存在性 + pending 新列名冲突，fail-fast 于任何写入之前）；</li>
+     *   <li>入链捕获与重指向预判（U5，<b>全删前</b>）：他表指向本表旧记录的 items 按 linkRecordId
+     *       全量反查捕获 + 本表旧 items 坐标/旧记录名快照；名称回退歧义 fail-fast（零写入）；</li>
      *   <li><b>替换阶段（rows 为空也执行——只有表头的 Excel = 清表重建列）</b>：全删本表 items/records →
-     *       清空跨表关联引用（kept 21 配对列 + 他表指向本表的 18 列）→ 级联删被删 21 列的配对列 →
-     *       删旧列 + 清孤儿 notelink → insert 新建列（id 回填）→ 取消隐藏；</li>
+     *       级联删被删 21 列的配对列 → 删旧列 + 清孤儿 notelink → insert 新建列（id 回填）→ 取消隐藏
+     *       （原"清空跨表关联引用"的整列清空已由 (h1) 入链重指向取代，R13）；</li>
      *   <li>写入阶段（仅 rows 非空）：逐行 NoteRecord insert（sort 从 1 递增、name 已派生、自增 id 回填）→
      *       kept items + pending 列 items 累积 ≥500 flush → 选项追加（FOR UPDATE）→
-     *       items 全量最终 flush（零缓冲不变量）→ 双链对称写入；</li>
-     *   <li>25 列语义链接重建（U4，rows 为空也执行清旧行——悬空 notelink 不残留）：每列先清旧行，
+     *       items 全量最终 flush（零缓冲不变量）；</li>
+     *   <li>入链重指向（U5，(h1)：建新落库回填新 id 后、21 对称写回之前——rows 为空的纯清空场景
+     *       同样执行）："旧 item→新 item"映射三字段重写他表 21/18 入链
+     *       （record_id 精确映射主路径 + 名称回退兜底；互指一致性/确已不存在 → 条目级清空+报告）；</li>
+     *   <li>21 对称写回（(h2)，仅 rows 非空，时序：入链重指向之后）；</li>
+     *   <li>25 列语义链接重建（U4，(h3)，rows 为空也执行清旧行——悬空 notelink 不残留）：每列先清旧行，
      *       `_ID` 命中按行 id upsert 恢复原行、名称回退 insert 新行；</li>
      *   <li>重算编排（<b>无条件执行</b>——清空引发的跨表重算不依赖新行）。</li>
      * </ol>
-     * 任一步骤抛 {@link ServiceException} 整体回滚（含跨表清理与选项追加）。
+     * 任一步骤抛 {@link ServiceException} 整体回滚（含跨表重指向与选项追加）。
      */
     @Transactional(rollbackFor = Exception.class)
     public int executeImport(ImportPlan plan)
@@ -2843,20 +2911,22 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         verifyReplacePreconditions(plan);
         verifyBackFieldsExist(plan);
 
+        // (a2) U5 入链重指向·捕获与预判（<b>全删前</b>）：他表指向本表旧记录的 items 按
+        //      linkRecordId 全量反查捕获（不复用列扫描——属性残缺的入链同样按数据面捕获，
+        //      防空配漏捕），本表旧 items 坐标与旧记录名一并快照；名称回退歧义在此
+        //      fail-fast（预检清单的事务段兜底，先于任何写入，整表零写入）
+        RepointContext repointContext = captureInboundLinks(plan.noteId, plan.dwtableId);
+        verifyInboundRepointNoAmbiguity(plan, repointContext);
+
         // ===== (b) 替换阶段：全删本表行与单元格（rows 为空也执行） =====
         noteDwtableItemMapper.deleteNoteDwtableItemByDwtId(plan.dwtableId);
         noteRecordMapper.deleteNoteRecordByDwtableId(plan.dwtableId);
 
-        // (c) 清空跨表关联引用（kept 21 配对列 + 他表指向本表的 18 列；自引用配对列已被 (b) 清，no-op 无害）
-        for (NoteColumn cleared : plan.clearedLinkColumns)
-        {
-            if (cleared != null && cleared.getId() != null)
-            {
-                noteDwtableItemMapper.clearLinkFieldsByColumnId(cleared.getId());
-            }
-        }
+        // (c) U5/R13：原"清空跨表关联引用（kept 21 配对列 + 他表 18 列）"的整列清空已由
+        //     (h1) 入链重指向取代——旧引用按"旧 item→新 item"映射三字段精准重写
+        //     （映射未覆盖者名称回退/条目清空+报告），他表 value 显示值不再被连带抹除
 
-        // (d) 级联删被删 21 列的配对列及其 items（guard 防误删本表存活列）
+        // (d) 级联删被删 21 列的配对列及其 items（guard 防误删本表存活列；R13：语义保持不变）
         cascadeDeletePairedColumns(plan);
 
         // (e) 删旧列 + 清孤儿语义链接（本表 deleted 列的 items 已随 (b) 删）
@@ -2927,10 +2997,21 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             {
                 noteDwtableItemMapper.insertNoteDwtableItems(batch);
             }
+        }
+
+        // (h1) 入链重指向（U5，R11-R13，取代原 (c) 整列清空）：<b>建新落库（回填新 id）后、
+        //      21 对称写回 (h2) 之前</b>执行——借对称写回既有 FOR UPDATE 读取与 CSV 去重
+        //      合并旧 id→新 id，避免配对列重复条目；rows 为空的纯清空场景同样执行
+        //     （捕获条目全部走单元格级清空+报告，全删后他表旧引用不残留）
+        executeInboundRepoint(plan, repointContext);
+
+        // (h2) 21 对称写回（仅 rows 非空；原 (h) 尾段拆出——时序：入链重指向之后）
+        if (!plan.rows.isEmpty())
+        {
             executeSymmetricWrite(plan);
         }
 
-        // (h2) 25 列语义链接重建（U4，21 对称写回之后、跨表重算之前；rows 为空也执行——
+        // (h3) 25 列语义链接重建（U4，21 对称写回之后、跨表重算之前；rows 为空也执行——
         // 只有表头的清空场景同样要清旧行，指向已删 items 的悬空 notelink 不残留）
         rebuildSemanticLinks(plan);
 
@@ -3207,6 +3288,575 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         }
     }
 
+    // ==================== 入链重指向（U5，R11-R13，取代整列清空） ====================
+
+    /**
+     * 入链重指向的名称回退歧义预判（U5，R12 裁决：预检阶段即完成解析判定）。
+     * <p>
+     * 仅外部手写文件（Excel 无 record_id 首列）走名称回退（KTD 裁决：重指向以
+     * record_id+回填新 id 的 ID 精确映射为主路径，名称回退是外部编辑场景的兜底）；
+     * record_id 列存在时旧记录要么映射命中、要么"确已不存在"，无歧义可判，直接跳过。
+     * 候选名为导入后新记录名的近似派生（名称列单元格文本 ∪ 默认值；补参值待阶段二按
+     * {@link RowPlan#name} 权威判定——此处未命中仅降级为清空报告，不误放行歧义）。
+     * 歧义进链接失败清单（与 U3/U4 同机制并列阻断，确认前零写入）；未命中/空名为
+     * "目标确已不存在"的清空+报告项（不阻断，R12 裁决）。
+     */
+    private void analyzeInboundRepointAmbiguity(ExcelImportPrecheckResult result, Long noteId, Long dwtableId,
+            SheetSelection selection, List<NoteColumn> columns, ColumnMapping mapping)
+    {
+        // record_id 首列存在 → ID 精确映射主路径，无名称回退、无歧义可判
+        if (recordIdHeaderPresent(selection))
+        {
+            return;
+        }
+        RepointContext context = captureInboundLinks(noteId, dwtableId);
+        if (context.involvedLegacyRecordIds.isEmpty())
+        {
+            return;
+        }
+        List<String> candidateNames = deriveRowNameCandidates(selection, columns, mapping);
+        if (candidateNames.isEmpty())
+        {
+            // 无候选（无文本列/全空名）→ 全部按"确已不存在"清空+报告，无歧义可判
+            return;
+        }
+        for (Long legacyId : context.involvedLegacyRecordIds)
+        {
+            String legacyName = context.legacyRecordNameById.get(legacyId);
+            if (legacyName == null || legacyName.trim().isEmpty())
+            {
+                // 空名记录无法按名称回退 → 按"确已不存在"清空+报告（不阻断）
+                continue;
+            }
+            for (LinkNameResolver.EntryResult entryResult : linkNameResolver.resolve(legacyName, candidateNames))
+            {
+                if (entryResult.isAmbiguous())
+                {
+                    result.getLinkFailures().add(
+                            repointAmbiguityFailure(context, legacyId, legacyName, entryResult));
+                }
+            }
+        }
+    }
+
+    /**
+     * 重指向名称歧义的失败清单条目（复用 {@link LinkFailure} 载体）：定位取首个指向该旧记录
+     * 的捕获条目（他表表名.列名——重指向条目不在本表 Excel 中，rowNumber 无行号语义置 0，
+     * 呈现细化归 U6）；原因说明外部手写文件缺 record_id 列的回退场景与修正建议。
+     */
+    private static LinkFailure repointAmbiguityFailure(RepointContext context, Long legacyId, String legacyName,
+            LinkNameResolver.EntryResult entryResult)
+    {
+        LinkFailure failure = new LinkFailure();
+        for (NoteDwtableItem inbound : context.inboundItems)
+        {
+            for (String part : splitCsvToList(inbound.getLinkRecordId()))
+            {
+                if (legacyId.equals(parseLongSafe(part.trim())))
+                {
+                    NoteColumn column = context.inboundColumnById.get(inbound.getColumnId());
+                    failure.setColumnId(inbound.getColumnId());
+                    failure.setColumnName((context.tableNameByDwtId.get(inbound.getDwtId()) == null
+                            ? "" : context.tableNameByDwtId.get(inbound.getDwtId()))
+                            + "." + (column == null || column.getName() == null
+                            ? String.valueOf(inbound.getColumnId()) : column.getName()));
+                    break;
+                }
+            }
+            if (failure.getColumnId() != null)
+            {
+                break;
+            }
+        }
+        failure.setRowNumber(0);
+        failure.setEntryText(legacyName);
+        failure.setReason("入链重指向名称歧义（文件缺少 record_id 列，按名称回退时新记录候选同名多条，"
+                + "无法唯一确定重指向目标；可在导出产物基础上修改以保留 record_id 首列，或修正重名后重试）");
+        failure.setExplanation(entryResult.getExplanation());
+        return failure;
+    }
+
+    /**
+     * 导入后新记录名候选（预检近似派生，名称回退歧义预判用）：与 {@code buildImportPlan}
+     * 的 name 派生同源选择——kept（被表头引用）中首个 type=1 列，无则首个未匹配表头
+     * （新建文本列）；值为单元格文本 trim，空单元格取列默认值，仍空不进候选
+     * （三源合并的补参终值由阶段二按 {@link RowPlan#name} 权威判定）。
+     */
+    private static List<String> deriveRowNameCandidates(SheetSelection selection, List<NoteColumn> columns,
+            ColumnMapping mapping)
+    {
+        List<RowData> rows = selection.getRows();
+        if (rows == null || rows.isEmpty())
+        {
+            return Collections.emptyList();
+        }
+        Set<Long> referencedIds = new HashSet<>();
+        for (HeaderEntry entry : mapping.getEntries())
+        {
+            if (entry.getColumn() != null && entry.getColumn().getId() != null)
+            {
+                referencedIds.add(entry.getColumn().getId());
+            }
+            if (entry.getSkippedColumn() != null && entry.getSkippedColumn().getId() != null)
+            {
+                referencedIds.add(entry.getSkippedColumn().getId());
+            }
+        }
+        NoteColumn nameColumn = null;
+        for (NoteColumn column : columns)
+        {
+            if (column == null || column.getType() == null || column.getId() == null)
+            {
+                continue;
+            }
+            if (referencedIds.contains(column.getId()) && column.getType() == 1L)
+            {
+                nameColumn = column;
+                break;
+            }
+        }
+        String defaultValue = null;
+        int headerIndex = -1;
+        if (nameColumn != null)
+        {
+            defaultValue = ColumnDefaultValueSupport.read(nameColumn);
+            for (HeaderEntry entry : mapping.getMappedEntries())
+            {
+                if (entry.getColumn() == nameColumn)
+                {
+                    headerIndex = entry.getHeaderIndex();
+                    break;
+                }
+            }
+            if (headerIndex < 0)
+            {
+                // 防御：被引用的 type=1 列未映射（形态不可达——排除类型不含 1）
+                return Collections.emptyList();
+            }
+        }
+        else
+        {
+            // 无 kept 文本列 → 首个未匹配表头（新建文本列）派生（与 namePendingSource 同源）
+            List<HeaderEntry> unmatched = mapping.getUnmatchedEntries();
+            if (unmatched.isEmpty())
+            {
+                return Collections.emptyList();
+            }
+            headerIndex = unmatched.get(0).getHeaderIndex();
+        }
+        List<String> names = new ArrayList<>(rows.size());
+        for (RowData row : rows)
+        {
+            String name = mapping.cellText(row, headerIndex).trim();
+            if (name.isEmpty() && defaultValue != null)
+            {
+                name = defaultValue;
+            }
+            if (!name.isEmpty())
+            {
+                names.add(name);
+            }
+        }
+        return names;
+    }
+
+    /**
+     * 捕获他表指向本表旧记录的入链 items 及配套快照（U5，R11；预检歧义预判与事务段
+     * 重指向共用，<b>全删前调用</b>）。
+     * <p>
+     * 全量反查口径（不复用 collectClearedLinkColumns 列扫描——18 列 property.table_id
+     * 残缺、21 配对列 back_field_id 残缺等属性缺失的入链同样按 linkRecordId 数据面
+     * 捕获，防空配漏捕）：同 note 其他表 linkRecordId 非空的 items 全量读出，
+     * Java 侧按 CSV 成员精确过滤（成员 ∈ 本表旧记录 id 集；查询侧与写入侧同源禁
+     * LIKE 子串匹配——id 3 会误中 13）。一并快照：本表旧记录 id→名（名称回退输入）、
+     * 本表旧 items id→坐标（linkItemId 逐位映射的坐标链：旧记录 id+列 id→旧 item id、
+     * 新记录 id+同列 id→新 item id）。本表自引用的 items 不捕获（随全删清理，
+     * 重指向无意义）。
+     */
+    private RepointContext captureInboundLinks(Long noteId, Long dwtableId)
+    {
+        RepointContext context = new RepointContext();
+        // 本表旧记录快照（id→名；名称回退解析输入与"本表旧记录"成员判定基准）
+        NoteRecordVo recordQuery = new NoteRecordVo();
+        recordQuery.setDwtableId(dwtableId);
+        for (NoteRecord legacy : noteRecordMapper.selectNoteRecordList(recordQuery))
+        {
+            if (legacy != null && legacy.getId() != null)
+            {
+                context.legacyRecordNameById.put(legacy.getId(),
+                        legacy.getName() == null ? "" : legacy.getName());
+            }
+        }
+        // 本表旧 items 坐标快照（id→(recordId, columnId)，linkItemId 重写的坐标链）
+        NoteDwtableItem itemQuery = new NoteDwtableItem();
+        itemQuery.setDwtId(dwtableId);
+        for (NoteDwtableItem legacyItem : noteDwtableItemMapper.selectNoteDwtableItemList(itemQuery))
+        {
+            if (legacyItem != null && legacyItem.getId() != null)
+            {
+                context.legacyItemById.put(legacyItem.getId(), legacyItem);
+            }
+        }
+        // 他表清单（同 note、排除本表）
+        List<NoteDwtable> otherTables = new ArrayList<>();
+        for (NoteDwtable table : noteDwtableMapper.selectDWTableList(noteId))
+        {
+            if (table != null && table.getId() != null && !table.getId().equals(dwtableId))
+            {
+                otherTables.add(table);
+            }
+        }
+        if (otherTables.isEmpty() || context.legacyRecordNameById.isEmpty())
+        {
+            return context;
+        }
+        for (NoteDwtable table : otherTables)
+        {
+            context.tableNameByDwtId.put(table.getId(), table.getName() == null ? "" : table.getName());
+        }
+        List<Long> otherTableIds = new ArrayList<>(otherTables.size());
+        for (NoteDwtable table : otherTables)
+        {
+            otherTableIds.add(table.getId());
+        }
+        // 全量反查 → Java 侧 CSV 成员精确过滤（成员 ∈ 本表旧记录 id 集）
+        List<NoteDwtableItem> candidates = noteDwtableItemMapper.selectLinkItemsByDwtIds(otherTableIds);
+        Set<Long> inboundColumnIds = new LinkedHashSet<>();
+        for (NoteDwtableItem candidate : candidates == null
+                ? Collections.<NoteDwtableItem>emptyList() : candidates)
+        {
+            if (candidate == null || candidate.getId() == null)
+            {
+                continue;
+            }
+            boolean involved = false;
+            for (String part : splitCsvToList(candidate.getLinkRecordId()))
+            {
+                Long legacyId = parseLongSafe(part.trim());
+                if (legacyId != null && context.legacyRecordNameById.containsKey(legacyId))
+                {
+                    context.involvedLegacyRecordIds.add(legacyId);
+                    involved = true;
+                }
+            }
+            if (involved)
+            {
+                context.inboundItems.add(candidate);
+                if (candidate.getColumnId() != null)
+                {
+                    inboundColumnIds.add(candidate.getColumnId());
+                }
+            }
+        }
+        if (context.inboundItems.isEmpty())
+        {
+            return context;
+        }
+        // 捕获条目列定义（互指判定：21 配对列才检查对侧声明；查不到按 18 口径无条件重指向）
+        for (NoteDwtable table : otherTables)
+        {
+            NoteColumn query = new NoteColumn();
+            query.setDwtableId(table.getId());
+            for (NoteColumn column : noteColumnMapper.selectNoteColumnList(query))
+            {
+                if (column != null && column.getId() != null && inboundColumnIds.contains(column.getId()))
+                {
+                    context.inboundColumnById.put(column.getId(), column);
+                }
+            }
+        }
+        return context;
+    }
+
+    /**
+     * 事务段名称回退歧义 fail-fast（U5，R12：预检清单的事务段兜底——预检-导入间隙的
+     * 他表数据变化或绕过预检直调时在此整体拒绝，<b>先于任何写入</b>，整表零写入）。
+     * 候选名为 {@link RowPlan#name} 权威派生（三源合并终值，含补参/默认值）。
+     */
+    private void verifyInboundRepointNoAmbiguity(ImportPlan plan, RepointContext context)
+    {
+        if (plan.recordIdColumnPresent || context.involvedLegacyRecordIds.isEmpty())
+        {
+            return;
+        }
+        List<String> candidateNames = new ArrayList<>(plan.rows.size());
+        for (RowPlan row : plan.rows)
+        {
+            candidateNames.add(row.name == null ? "" : row.name);
+        }
+        for (Long legacyId : context.involvedLegacyRecordIds)
+        {
+            String legacyName = context.legacyRecordNameById.get(legacyId);
+            if (legacyName == null || legacyName.trim().isEmpty())
+            {
+                continue;
+            }
+            for (LinkNameResolver.EntryResult entryResult : linkNameResolver.resolve(legacyName, candidateNames))
+            {
+                if (entryResult.isAmbiguous())
+                {
+                    throw new ServiceException("导入未执行（零写入）：他表指向本表记录“" + legacyName
+                            + "”的入链在按名称回退重指向时产生名称歧义（匹配到多条同名新记录，"
+                            + "无法唯一确定目标）；请在导出产物基础上修改以保留 record_id 首列"
+                            + "（ID 精确映射），或修正重名后重试（"
+                            + entryResult.getExplanation() + "）");
+                }
+            }
+        }
+    }
+
+    /**
+     * 执行入链重指向（U5，R11-R13；事务段：建新落库（回填新 id）后、21 对称写回之前——
+     * 借对称写回既有 FOR UPDATE 读取与 CSV 去重合并旧 id→新 id，避免配对列重复条目）。
+     * <p>
+     * 对每个捕获的他表条目做 Java 侧读-改-写：拆 linkRecordId/linkItemId/value 三串 →
+     * 逐条目分类 → Set 去重 → join → 按主键单行 update（{@code updateLinkFieldsById}，
+     * 禁集合式 SQL REPLACE——逗号串子串误替换，如旧 id 3 被 REPLACE 误中 13）。
+     * 分类（R12 裁决，四情形）：
+     * <ul>
+     *   <li>精确映射命中（record_id 首列声明旧记录 id）→ linkRecordId 换新记录 id、
+     *       linkItemId 经坐标链换新 item id（旧记录 id+列 id→旧 item id、
+     *       新记录 id+同列 id→新 item id）、value 刷新为新记录名
+     *       （21 配对列与 18 入链同口径）；</li>
+     *   <li>21 配对列的互指一致性：对侧行（新行）的源列声明集不含该条目所在记录 →
+     *       条目级清空并报告（Excel 声明集 = 21 列单元格解析出的目标集合；
+     *       18 列单向、无条件重指向，不受此约束）；</li>
+     *   <li>record_id 列缺失（外部手写文件）→ 名称回退（预检/事务段预判已保证无歧义），
+     *       未命中 = 目标确已不存在；</li>
+     *   <li>目标确已不存在（旧记录未出现在 Excel 中）→ 该条目单元格级全清
+     *       （三字段清空、保留 linkColumnId——复刻 clearLinkFieldsByColumnId 字段语义）
+     *       并在导入结果报告。</li>
+     * </ul>
+     * 异常成员（id 非数字或不在本表旧记录全集——CSV 混入的脏数据）原样保留，不扩大
+     * 破坏半径。被 (d) 级联删除的配对列条目按主键 update 影响 0 行，自然 no-op。
+     * rows 为空的纯清空场景同样执行（捕获条目全部走单元格级清空+报告，全删后他表
+     * 旧引用不残留）。清空与重指向计数随导入结果日志报告（界面/agent 呈现归 U6）。
+     */
+    private void executeInboundRepoint(ImportPlan plan, RepointContext context)
+    {
+        if (context.inboundItems.isEmpty())
+        {
+            return;
+        }
+        // 新坐标索引：(新记录 id, 列 id) → 新 item（零缓冲不变量：批量 insert 已回填自增 id）
+        Map<Long, Map<Long, NoteDwtableItem>> newItemsByRecordAndColumn = new HashMap<>();
+        for (RowPlan row : plan.rows)
+        {
+            for (NoteDwtableItem item : row.items)
+            {
+                if (item.getRecordId() != null && item.getColumnId() != null)
+                {
+                    newItemsByRecordAndColumn
+                            .computeIfAbsent(item.getRecordId(), k -> new HashMap<Long, NoteDwtableItem>())
+                            .put(item.getColumnId(), item);
+                }
+            }
+        }
+        // 名称回退候选（record_id 列缺失场景）：行名列表 + 名→行（resolver MATCHED 保证唯一）
+        List<String> rowNameCandidates = null;
+        Map<String, Integer> rowIndexByName = null;
+        if (!plan.recordIdColumnPresent)
+        {
+            rowNameCandidates = new ArrayList<>(plan.rows.size());
+            rowIndexByName = new HashMap<>();
+            for (int r = 0; r < plan.rows.size(); r++)
+            {
+                String name = plan.rows.get(r).name == null ? "" : plan.rows.get(r).name;
+                rowNameCandidates.add(name);
+                rowIndexByName.putIfAbsent(name, Integer.valueOf(r));
+            }
+        }
+        int repointedEntries = 0;
+        List<String> clearedReports = new ArrayList<>();
+        for (NoteDwtableItem inbound : context.inboundItems)
+        {
+            List<String> oldRecordIds = splitCsvToList(inbound.getLinkRecordId());
+            List<String> oldItemIds = splitCsvToList(inbound.getLinkItemId());
+            List<String> oldValues = splitCsvToList(inbound.getValue());
+            NoteColumn inboundColumn = context.inboundColumnById.get(inbound.getColumnId());
+            // 互指判定前提：捕获条目所在列为 21 且 linkColumnId 指向本表 kept 21 参与列
+            //（18 列单向无条件重指向；列属性/linkColumnId 残缺按 18 口径，不扩大破坏半径）
+            List<Set<Long>> declaredPerRow = null;
+            if (inboundColumn != null && inboundColumn.getType() != null
+                    && inboundColumn.getType() == ExcelColumnMatcher.TYPE_DOUBLE_LINK
+                    && inbound.getLinkColumnId() != null
+                    && plan.declaredTargetsByColumnId.containsKey(inbound.getLinkColumnId()))
+            {
+                declaredPerRow = plan.declaredTargetsByColumnId.get(inbound.getLinkColumnId());
+            }
+            // Set 去重保序合并（value 去重键=recordId，对齐对称写回的追加语义）
+            Set<String> mergedRecordIds = new LinkedHashSet<>();
+            Set<String> mergedItemIds = new LinkedHashSet<>();
+            Set<String> mergedValues = new LinkedHashSet<>();
+            for (int j = 0; j < oldRecordIds.size(); j++)
+            {
+                Long legacyId = parseLongSafe(oldRecordIds.get(j).trim());
+                if (legacyId == null || !context.legacyRecordNameById.containsKey(legacyId))
+                {
+                    // 异常成员（非本表旧记录的脏数据）：原样保留不扩大破坏半径
+                    keepInboundEntry(j, oldRecordIds, oldItemIds, oldValues,
+                            mergedRecordIds, mergedItemIds, mergedValues);
+                    continue;
+                }
+                String legacyName = context.legacyRecordNameById.get(legacyId);
+                // 行定位：record_id 精确映射优先；列缺失场景名称回退（预判已 fail-fast 歧义）
+                Integer rowIndex = plan.rowIndexByLegacyRecordId.get(legacyId);
+                if (rowIndex == null && !plan.recordIdColumnPresent)
+                {
+                    rowIndex = resolveRepointRowByName(legacyName, rowNameCandidates, rowIndexByName);
+                }
+                if (rowIndex == null)
+                {
+                    // 目标确已不存在（旧记录未出现在 Excel 中）→ 条目单元格级全清 + 报告
+                    clearedReports.add(repointReport(context, inbound, legacyName,
+                            "目标记录未出现在导入文件中，已清空该入链条目"));
+                    continue;
+                }
+                if (declaredPerRow != null && !declaredPerRow.get(rowIndex.intValue())
+                        .contains(inbound.getRecordId()))
+                {
+                    // 21 互指一致性：对侧行的声明集不含本条目所在记录 → 条目级清空 + 报告
+                    clearedReports.add(repointReport(context, inbound, legacyName,
+                            "导入计划已无对侧互指声明，已清空该入链条目（互指一致性）"));
+                    continue;
+                }
+                RowPlan row = plan.rows.get(rowIndex.intValue());
+                String newRecordId = String.valueOf(row.record.getId());
+                if (mergedRecordIds.add(newRecordId))
+                {
+                    mergedValues.add(row.record.getName() == null ? "" : row.record.getName());
+                }
+                // linkItemId 坐标链：旧 item id → 旧 (记录, 列) → 新 (新记录, 同列) → 新 item id
+                //（映射不到的锚点丢弃——linkRecordId 是主键，21 场景理论恒命中：源列 kept 每行必有 item）
+                Long legacyItemId = j < oldItemIds.size() ? parseLongSafe(oldItemIds.get(j).trim()) : null;
+                NoteDwtableItem legacyItem = legacyItemId == null ? null
+                        : context.legacyItemById.get(legacyItemId);
+                NoteDwtableItem newItem = legacyItem == null ? null
+                        : newItemsByRecordAndColumn
+                                .getOrDefault(row.record.getId(), Collections.<Long, NoteDwtableItem>emptyMap())
+                                .get(legacyItem.getColumnId());
+                if (newItem != null && newItem.getId() != null)
+                {
+                    mergedItemIds.add(String.valueOf(newItem.getId()));
+                }
+                repointedEntries++;
+            }
+            // join 后与原值比对，变化才按主键单行 update（三字段；全清=空串，字段语义对齐列级清空）
+            String mergedRecordIdText = String.join(",", mergedRecordIds);
+            String mergedItemIdText = String.join(",", mergedItemIds);
+            String mergedValueText = String.join(",", mergedValues);
+            if (!mergedRecordIdText.equals(nullToEmpty(inbound.getLinkRecordId()))
+                    || !mergedItemIdText.equals(nullToEmpty(inbound.getLinkItemId()))
+                    || !mergedValueText.equals(nullToEmpty(inbound.getValue())))
+            {
+                noteDwtableItemMapper.updateLinkFieldsById(inbound.getId(),
+                        mergedRecordIdText, mergedItemIdText, mergedValueText);
+            }
+        }
+        // 导入结果报告（U5 最小实现：结构化日志；界面弹框/agent 结果呈现归 U6）
+        if (!clearedReports.isEmpty() || repointedEntries > 0)
+        {
+            log.info("[EXCEL-IMPORT] 入链重指向完成 noteId={}, dwtableId={}, repointedEntries={}, "
+                            + "clearedEntries={}, details={}",
+                    plan.noteId, plan.dwtableId, Integer.valueOf(repointedEntries),
+                    Integer.valueOf(clearedReports.size()), clearedReports);
+        }
+    }
+
+    /**
+     * 名称回退定位新行（record_id 列缺失场景）：{@link LinkNameResolver} 全管线容错
+     * （整串优先→精确→归一化→唯一前缀，R7 口径三处复用之一）。旧记录名为单名（非 CSV
+     * 单元格），拆分出多条目视为未命中（整串优先未兜住的形态不可信）；歧义在预检/
+     * 事务段预判已 fail-fast，此处为防御（宁可中止不可写坏指向）。
+     *
+     * @return 命中的行索引；未命中/空名返回 null（=目标确已不存在）
+     */
+    private Integer resolveRepointRowByName(String legacyName, List<String> candidateNames,
+            Map<String, Integer> rowIndexByName)
+    {
+        if (legacyName == null || legacyName.trim().isEmpty() || candidateNames == null)
+        {
+            return null;
+        }
+        List<LinkNameResolver.EntryResult> results = linkNameResolver.resolve(legacyName, candidateNames);
+        if (results.size() != 1)
+        {
+            return null;
+        }
+        LinkNameResolver.EntryResult result = results.get(0);
+        if (result.isAmbiguous())
+        {
+            throw new ServiceException("导入失败：他表指向本表记录“" + legacyName
+                    + "”的入链重指向名称歧义（" + result.getExplanation() + "）");
+        }
+        if (!result.isMatched())
+        {
+            return null;
+        }
+        return rowIndexByName.get(result.getMatchedName());
+    }
+
+    /** 异常成员原样保留（id 非数字或不在本表旧记录全集——不进重指向分类，不扩大破坏半径） */
+    private static void keepInboundEntry(int index, List<String> oldRecordIds, List<String> oldItemIds,
+            List<String> oldValues, Set<String> mergedRecordIds, Set<String> mergedItemIds,
+            Set<String> mergedValues)
+    {
+        mergedRecordIds.add(oldRecordIds.get(index));
+        if (index < oldItemIds.size())
+        {
+            mergedItemIds.add(oldItemIds.get(index));
+        }
+        if (index < oldValues.size())
+        {
+            mergedValues.add(oldValues.get(index));
+        }
+    }
+
+    /** 清空条目的导入结果报告文本（他表定位 + 旧记录名 + 原因，供日志与 U6 呈现） */
+    private static String repointReport(RepointContext context, NoteDwtableItem inbound,
+            String legacyName, String reason)
+    {
+        String tableName = context.tableNameByDwtId.containsKey(inbound.getDwtId())
+                ? context.tableNameByDwtId.get(inbound.getDwtId()) : String.valueOf(inbound.getDwtId());
+        NoteColumn column = context.inboundColumnById.get(inbound.getColumnId());
+        String columnName = column == null || column.getName() == null
+                ? String.valueOf(inbound.getColumnId()) : column.getName();
+        return "他表“" + tableName + "”列“" + columnName + "”指向本表记录“"
+                + (legacyName == null || legacyName.isEmpty() ? "?" : legacyName) + "”的条目：" + reason;
+    }
+
+    /** Excel 首列是否为导出固定的 record_id 源列（{@link ExcelColumnMatcher#RECORD_ID_HEADER}，
+     * 与 matcher 的"首列且同名"识别口径一致；无该列 = 外部手写文件，重指向走名称回退） */
+    private static boolean recordIdHeaderPresent(SheetSelection selection)
+    {
+        List<String> headers = selection.getHeaders();
+        return headers != null && !headers.isEmpty() && ExcelColumnMatcher.RECORD_ID_HEADER
+                .equals(headers.get(0) == null ? "" : headers.get(0).trim());
+    }
+
+    /** null 归一为空串（三字段 join 前后的原值比对用） */
+    private static String nullToEmpty(String value)
+    {
+        return value == null ? "" : value;
+    }
+
+    /** 宽松解析十进制长整数（空白/非法返回 null，不抛异常） */
+    private static Long parseLongSafe(String text)
+    {
+        if (text == null || text.isEmpty())
+        {
+            return null;
+        }
+        try
+        {
+            return Long.valueOf(text);
+        }
+        catch (NumberFormatException e)
+        {
+            return null;
+        }
+    }
+
     /**
      * 双链(21)对称写入（KTD3，独立实现不复用 updateNoteRecord）：
      * <ul>
@@ -3326,7 +3976,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     }
 
     /**
-     * 25 列（语义关联）重建（U4，R2/R6；事务段 (h2)，21 对称写回之后、跨表重算之前）。
+     * 25 列（语义关联）重建（U4，R2/R6；事务段 (h3)，21 对称写回之后、跨表重算之前）。
      * <p>
      * 每个被导入的 25 列：重建前按列调用既有 {@code deleteNoteNotelinkByColumnId} 清旧行
      * （旧行核心字段已在计划段按 `_ID` 捕获），随后逐条目重建：
@@ -3511,8 +4161,20 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         /** 本表存活列 id 集（mapped ∪ 排除类型同名列；级联删除 guard 用） */
         final Set<Long> survivingColumnIds = new HashSet<>();
 
-        /** 其他表中引用将被清空的关联列（kept 21 配对列 + 他表指向本表的 18 列） */
+        /** 其他表中涉及跨表清理的关联列清单（预检报告口径；导入路径已由入链重指向取代
+         *  整列清空，事务段不再按此清空——语义迁移呈现归 U6） */
         final List<NoteColumn> clearedLinkColumns = new ArrayList<>();
+
+        /** U5 入链重指向：record_id 首列存在（true=旧记录 id 精确映射主路径；
+         *  false=外部手写文件，名称回退兜底） */
+        boolean recordIdColumnPresent;
+
+        /** U5 入链重指向：Excel record_id 旧记录 id → 行索引（旧记录→新行的精确映射，重复 id 首行生效） */
+        final Map<Long, Integer> rowIndexByLegacyRecordId = new LinkedHashMap<>();
+
+        /** U5 互指声明集：本表 kept 21 列 id → 逐行声明的目标记录 id 集合
+         *  （配对列旧条目存活 ⇔ 对侧行声明含该条目所在记录；18 列单向不受约束） */
+        final Map<Long, List<Set<Long>>> declaredTargetsByColumnId = new LinkedHashMap<>();
 
         /** 本表归属笔记 id（25 列重建行 linkNoteId 的规范值 = NoteDwtable.noteId，U4） */
         Long linkNoteId;
@@ -3527,6 +4189,28 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     {
         /** 逐行解析产物（与数据行等长同序：`_ID` 命中的待恢复旧行 + 名称回退的新建行预案） */
         final List<SemanticCellResolution> cellsPerRow = new ArrayList<>();
+    }
+
+    /** 入链重指向捕获上下文（U5，R11：全删前快照，预检歧义预判与事务段重指向共用） */
+    private static final class RepointContext
+    {
+        /** 捕获的他表入链条目（linkRecordId CSV 含本表旧记录 id；含属性残缺入链） */
+        final List<NoteDwtableItem> inboundItems = new ArrayList<>();
+
+        /** 捕获条目列 id → 列定义（互指判定：21 配对列才检查对侧声明；查不到按 18 口径） */
+        final Map<Long, NoteColumn> inboundColumnById = new HashMap<>();
+
+        /** 捕获条目所在表 id → 表名（失败清单定位与结果报告用） */
+        final Map<Long, String> tableNameByDwtId = new HashMap<>();
+
+        /** 本表旧记录 id → 旧记录名（名称回退解析输入与"本表旧记录"成员判定基准） */
+        final Map<Long, String> legacyRecordNameById = new LinkedHashMap<>();
+
+        /** 本表旧 item id → 旧 item（linkItemId 坐标链：旧 (记录, 列) → 新 (新记录, 同列)） */
+        final Map<Long, NoteDwtableItem> legacyItemById = new HashMap<>();
+
+        /** 捕获条目涉及的本表旧记录 id 集（名称回退预判范围） */
+        final Set<Long> involvedLegacyRecordIds = new LinkedHashSet<>();
     }
 
     /** 待新建列：未落库 NoteColumn（无 id，事务段 insert 后回填）+ 逐行预解析值（trim 文本） */
