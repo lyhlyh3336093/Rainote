@@ -24,10 +24,10 @@ import org.springframework.stereotype.Service;
  *   <li>记录 id 列（R6）：每表首位，值=NoteRecord.id，SQL 中唯一可 JOIN 的标量锚点</li>
  *   <li>基础类型列（1/2/3/4/5/7/11/13/15/17/22）：直接取 item.value（R11）</li>
  *   <li>系统列（1001-1005）：按语义输出可读值（R12）</li>
- *   <li>双向关联(21)/单向关联(18)：双列——ID=linkRecordId，文本=关联记录 name</li>
+ *   <li>双向关联(21)/单向关联(18)：双列——ID=linkRecordId，文本=关联记录 name（21 列名称含逗号/引号时 CSV 风格转义，R1；18 列维持现状）</li>
  *   <li>lookup(26)：双列——ID 经 double_link_column_id 回溯，文本=source_column_id 值</li>
  *   <li>集合运算(24)：双列——ID=item.linkRecordId（best-effort），文本=记录 name</li>
- *   <li>语义关联(25)：双列——ID=linkNoteId（COALESCE 兜底），文本=笔记标题</li>
+ *   <li>语义关联(25)：双列——ID=NoteNotelink 行 id，文本=每条链接"引用笔记名（锚词）"条目串（R2，引用来源为 noteId 侧笔记）</li>
  * </ul>
  * 隐藏列（isShow=1）不导出（R5）。空表仍产出列定义（R20）。
  * <p>
@@ -323,9 +323,18 @@ public class NoteDwtableExportPivotServiceImpl implements INoteDwtableExportPivo
             Map<Long, String> recordNameCache, NoteDwtable table)
     {
         Long type = col.getType();
-        if (type == TYPE_DOUBLE_LINK || type == TYPE_SINGLE_LINK)
+        if (type == TYPE_DOUBLE_LINK)
         {
-            // 双向关联(21)/单向关联(18)：ID=linkRecordId，文本=记录 name
+            // 双向关联(21)：ID=linkRecordId 原样；文本=记录 name，名称含逗号/引号时 CSV 风格转义（R1）
+            NoteDwtableItem item = rowItems.get(col.getId());
+            String idValue = (item != null && item.getLinkRecordId() != null) ? item.getLinkRecordId() : "";
+            String textValue = resolveRecordNames(idValue, recordNameCache, true);
+            row.add(idValue);
+            row.add(textValue);
+        }
+        else if (type == TYPE_SINGLE_LINK)
+        {
+            // 单向关联(18)：ID=linkRecordId，文本=记录 name（维持现状不转义，18 列行为回归红线）
             NoteDwtableItem item = rowItems.get(col.getId());
             String idValue = (item != null && item.getLinkRecordId() != null) ? item.getLinkRecordId() : "";
             String textValue = resolveRecordNames(idValue, recordNameCache);
@@ -348,7 +357,7 @@ public class NoteDwtableExportPivotServiceImpl implements INoteDwtableExportPivo
         }
         else if (type == TYPE_SEMANTIC_LINK)
         {
-            // 语义关联(25)：从 NoteNotelink 取 linkNoteId（COALESCE 兜底），文本=笔记标题
+            // 语义关联(25)：ID=NoteNotelink 行 id，文本="引用笔记名（锚词）"条目串（R2/R4）
             resolveSemanticLinkColumn(col, record, rowItems, row, table);
         }
     }
@@ -447,9 +456,12 @@ public class NoteDwtableExportPivotServiceImpl implements INoteDwtableExportPivo
 
     /**
      * 语义关联(25) 列解析：
-     * 从 NoteNotelink 按 (linkColumnId, linkItemId) 查询；
-     * ID 列 = linkNoteId（去重，历史 null 按 COALESCE(linkNoteId, NoteDwtable.noteId) 兜底，R10）；
-     * 文本列 = 对应笔记标题。不出现 NoteNotelink.id。
+     * 从 NoteNotelink 按 (linkColumnId, linkItemId) 查询（mapper 按行 id 升序返回）；
+     * 文本列 = 每条链接的"引用笔记名（锚词）"条目串——引用来源为 NoteNotelink 的 noteId 侧笔记
+     * （noteId 为 null 的历史行经 COALESCE 式兜底解析），锚词=contextText（空则回退 itemValue），
+     * 锚词为空省略全角括号；多值逗号连接、CSV 风格转义（R2）；
+     * ID 列 = NoteNotelink 行 id 串，与名称条目顺序一一对应（R2）。
+     * 悬空引用（来源笔记已删/无法解析）整体跳过该条目（名称与行 id 均不写），不报错不阻断（R4）。
      */
     private void resolveSemanticLinkColumn(NoteColumn col, NoteRecord record,
             Map<Long, NoteDwtableItem> rowItems, List<String> row, NoteDwtable table)
@@ -473,39 +485,39 @@ public class NoteDwtableExportPivotServiceImpl implements INoteDwtableExportPivo
                 row.add("");
                 return;
             }
-            // 收集 linkNoteId（COALESCE 兜底历史 null）
-            Set<Long> noteIds = new LinkedHashSet<>();
+            // 逐行产出"引用笔记名（锚词）"条目与行 id，悬空行整体跳过（保持名称与 id 条目一一对应）
+            List<String> entries = new ArrayList<>();
+            List<String> linkIds = new ArrayList<>();
             for (NoteNotelink link : links)
             {
-                Long linkNoteId = link.getLinkNoteId();
-                if (linkNoteId == null)
+                // 引用来源笔记：noteId 侧；历史 null 行经 COALESCE 式兜底解析
+                Long sourceNoteId = resolveSemanticSourceNoteId(link);
+                if (sourceNoteId == null)
                 {
-                    // 历史 null 兜底：从 NoteDwtable.noteId 取（selectNoteNotelinkByNoteId 的 COALESCE 模式）
-                    if (link.getLinkDwTableId() != null)
-                    {
-                        NoteDwtable linkedTable = noteDwtableMapper.selectNoteDwtableById(link.getLinkDwTableId());
-                        if (linkedTable != null)
-                        {
-                            linkNoteId = linkedTable.getNoteId();
-                        }
-                    }
+                    continue;
                 }
-                if (linkNoteId != null)
+                NoteNote sourceNote = noteNoteMapper.selectNoteNoteById(sourceNoteId);
+                if (sourceNote == null || sourceNote.getTitle() == null || sourceNote.getTitle().isEmpty())
                 {
-                    noteIds.add(linkNoteId);
+                    // 悬空引用：来源笔记已删，跳过条目不阻断（R4）
+                    continue;
                 }
+                // 锚词：contextText 优先，空则回退 itemValue；都为空省略括号
+                String anchor = link.getContextText();
+                if (anchor == null || anchor.isEmpty())
+                {
+                    anchor = link.getItemValue();
+                }
+                String entry = (anchor != null && !anchor.isEmpty())
+                        ? sourceNote.getTitle() + "（" + anchor + "）"
+                        : sourceNote.getTitle();
+                entries.add(escapeCsvValue(entry));
+                linkIds.add(String.valueOf(link.getId()));
             }
-            if (!noteIds.isEmpty())
+            if (!entries.isEmpty())
             {
-                idValue = noteIds.stream().map(String::valueOf).collect(Collectors.joining(","));
-                // 查笔记标题
-                List<String> titles = new ArrayList<>();
-                for (Long noteId : noteIds)
-                {
-                    NoteNote note = noteNoteMapper.selectNoteNoteById(noteId);
-                    titles.add(note != null && note.getTitle() != null ? note.getTitle() : "");
-                }
-                textValue = String.join(",", titles);
+                textValue = String.join(",", entries);
+                idValue = String.join(",", linkIds);
             }
         }
         catch (Exception e)
@@ -518,9 +530,47 @@ public class NoteDwtableExportPivotServiceImpl implements INoteDwtableExportPivo
     }
 
     /**
-     * 把逗号分隔的 recordId 列表解析为对应的记录 name 列表。
+     * 解析语义链接行的引用来源笔记 id：
+     * 优先 NoteNotelink.noteId（引用来源）；为 null 的历史行经 COALESCE 式兜底——
+     * 先取 linkNoteId（目标表归属笔记），仍为 null 时从 linkDwTableId→NoteDwtable.noteId 取
+     * （对齐 selectNoteNotelinkByNoteId 的 COALESCE 兜底模式）。
+     */
+    private Long resolveSemanticSourceNoteId(NoteNotelink link)
+    {
+        if (link.getNoteId() != null)
+        {
+            return link.getNoteId();
+        }
+        if (link.getLinkNoteId() != null)
+        {
+            return link.getLinkNoteId();
+        }
+        if (link.getLinkDwTableId() != null)
+        {
+            NoteDwtable linkedTable = noteDwtableMapper.selectNoteDwtableById(link.getLinkDwTableId());
+            if (linkedTable != null && linkedTable.getNoteId() != null)
+            {
+                return linkedTable.getNoteId();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 把逗号分隔的 recordId 列表解析为对应的记录 name 列表（不转义，18/24 列现状行为）。
      */
     private String resolveRecordNames(String linkRecordIds, Map<Long, String> recordNameCache)
+    {
+        return resolveRecordNames(linkRecordIds, recordNameCache, false);
+    }
+
+    /**
+     * 把逗号分隔的 recordId 列表解析为对应的记录 name 列表。
+     *
+     * @param csvEscape true 时按 CSV 风格转义每个名称——名称含逗号/引号时整名双引号包裹、
+     *                  内层双引号翻倍（R1）；悬空引用的空占位不参与转义
+     */
+    private String resolveRecordNames(String linkRecordIds, Map<Long, String> recordNameCache, boolean csvEscape)
     {
         if (linkRecordIds == null || linkRecordIds.isEmpty())
         {
@@ -536,7 +586,8 @@ public class NoteDwtableExportPivotServiceImpl implements INoteDwtableExportPivo
             try
             {
                 Long rid = Long.valueOf(id.trim());
-                names.add(recordNameCache.getOrDefault(rid, ""));
+                String name = recordNameCache.getOrDefault(rid, "");
+                names.add(csvEscape ? escapeCsvValue(name) : name);
             }
             catch (NumberFormatException e)
             {
@@ -544,6 +595,23 @@ public class NoteDwtableExportPivotServiceImpl implements INoteDwtableExportPivo
             }
         }
         return String.join(",", names);
+    }
+
+    /**
+     * CSV 风格转义（R1）：名称含逗号或双引号时，整名用双引号包裹、内层双引号翻倍；
+     * 空串原样返回（悬空引用的空占位不包裹）。
+     */
+    private String escapeCsvValue(String value)
+    {
+        if (value == null || value.isEmpty())
+        {
+            return "";
+        }
+        if (value.contains(",") || value.contains("\""))
+        {
+            return "\"" + value.replace("\"", "\"\"") + "\"";
+        }
+        return value;
     }
 
     /**
