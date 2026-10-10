@@ -48,5 +48,8 @@ The first stage of two-stage Excel import: parse the workbook, map columns, run 
 ### Relation Text Matching (关联文本匹配)
 The mechanism by which Excel import resolves relation column (18/21) values: the cell's record-name text (comma-separated, from the export-time "列名_文本" column or plain external data) is matched against `NoteRecord.name` of the target linked table's existing records. Ambiguity (same-name records) resolves to the lowest-sort record; a miss is treated as a missing parameter routed to the record-picker dialog; an empty cell simply means no relation. The "列名_ID" column from round-trip exports is ignored.
 
+### Link Re-pointing (入链重指向)
+After a replace-style import rebuilds a table's records with new IDs, incoming links — other tables' type=21 link cells and NoteNotelink rows — that targeted the old records are re-pointed to the new records by matching the old record name. Re-pointing failure (ambiguous or missing name) clears the incoming link cell and reports it in the import result instead of aborting the import. This replaces the prior replace-import behavior of clearing the paired columns column-wide (which also wiped their display `value`s).
+
 ### NoteDwtableItem
 A cell in the data table, identified by recordId + columnId. For type=21 columns, stores `value`, `linkRecordId`, and `linkColumnId`. For type=26 columns, these link fields are NULL — the data lives in the referenced double link column's item.
