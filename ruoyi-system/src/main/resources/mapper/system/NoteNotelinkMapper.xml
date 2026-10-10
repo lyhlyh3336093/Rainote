@@ -118,6 +118,27 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     </delete>
 
     <!--
+        U4: 25 列(语义关联)重建——按主键 upsert 行内坐标与核心字段(供 Excel 导入事务段调用)
+        重建时序为"先清旧行(deleteNoteNotelinkByColumnId)再逐条目恢复":本语句显式携带原主键
+        insert,行已不存在时以原行 id 恢复插入(行 id 保留——源笔记正文锚点 data-link-id 不断链);
+        行仍存在(同一条目被重复引用等场景)时按主键 update 行内坐标与核心字段
+    -->
+    <insert id="updateNoteNotelinkCoordinates" parameterType="NoteNotelink">
+        insert into note_notelink (id, contextText, noteId, blockId, linkNoteId, linkDwTableId, linkRecordId, linkColumnId, linkItemId, itemValue)
+        values (#{id}, #{contextText}, #{noteId}, #{blockId}, #{linkNoteId}, #{linkDwTableId}, #{linkRecordId}, #{linkColumnId}, #{linkItemId}, #{itemValue})
+        on duplicate key update
+            contextText = values(contextText),
+            noteId = values(noteId),
+            blockId = values(blockId),
+            linkNoteId = values(linkNoteId),
+            linkDwTableId = values(linkDwTableId),
+            linkRecordId = values(linkRecordId),
+            linkColumnId = values(linkColumnId),
+            linkItemId = values(linkItemId),
+            itemValue = values(itemValue)
+    </insert>
+
+    <!--
         U2: 按 linkColumnId 级联删除,用于 deleteDataWhenLink
         删除语义关联列时清理孤儿 NoteNotelink 记录
     -->

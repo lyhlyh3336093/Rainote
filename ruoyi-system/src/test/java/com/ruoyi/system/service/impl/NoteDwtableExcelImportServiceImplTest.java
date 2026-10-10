@@ -43,6 +43,8 @@ import com.ruoyi.system.agent.security.AgentOwnershipChecker;
 import com.ruoyi.system.domain.NoteColumn;
 import com.ruoyi.system.domain.NoteDwtable;
 import com.ruoyi.system.domain.NoteDwtableItem;
+import com.ruoyi.system.domain.NoteNotelink;
+import com.ruoyi.system.domain.NoteNote;
 import com.ruoyi.system.domain.NoteRecord;
 import com.ruoyi.system.domain.NoteView;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult;
@@ -62,6 +64,7 @@ import com.ruoyi.system.mapper.NoteColumnMapper;
 import com.ruoyi.system.mapper.NoteDwtableItemMapper;
 import com.ruoyi.system.mapper.NoteDwtableMapper;
 import com.ruoyi.system.mapper.NoteNotelinkMapper;
+import com.ruoyi.system.mapper.NoteNoteMapper;
 import com.ruoyi.system.mapper.NoteRecordMapper;
 import com.ruoyi.system.mapper.NoteViewMapper;
 import com.ruoyi.system.service.INoteRecordService;
@@ -108,6 +111,11 @@ import static org.mockito.Mockito.when;
  * 清单（R8 并列阻断 + 阶段二漂移防御零写入）、死链回读（`_ID` 指向已删且名称空）跳过不失败、
  * 空 `_ID`+空名称无链接；18 列红线回归（`列名_文本` 机制、`_ID` 忽略、缺参记录选择器、
  * 同名取 sort 最小、补参优先语义——歧义/漂移/补参系列已转钉 18 列）。
+ * <p>
+ * U4（25 列从零建立，双轨制）：round-trip 行重建 + 坐标指向本表新记录 + 跳转参数完整（AE2）、
+ * 行 id 保留（data-link-id 不断链）与 blockId/核心字段恢复、笔记名回退新建行（linkNoteId
+ * 规范值、contextText=锚词、blockId 降级）、笔记重名歧义零写入、多锚点逐条目全命中才通过、
+ * 悬空空值回读不建行不失败、仅表头清空场景清旧行、26 列等其余排除类型回归。
  *
  * @author ruoyi
  */
@@ -138,9 +146,13 @@ class NoteDwtableExcelImportServiceImplTest
     @Mock
     private NoteDwtableItemMapper noteDwtableItemMapper;
 
-    /** 替换式导入：被删列的孤儿语义链接清理（service 新注入，@InjectMocks 自动装配） */
+    /** 替换式导入：被删列的孤儿语义链接清理 + 25 列重建（service 新注入，@InjectMocks 自动装配） */
     @Mock
     private NoteNotelinkMapper noteNotelinkMapper;
+
+    /** 25 列名称回退的候选笔记标题来源（U4：service 新注入） */
+    @Mock
+    private NoteNoteMapper noteNoteMapper;
 
     /** 导入记录归属视图解析（service 新注入；网格 dataList 按视图 viewId 过滤记录） */
     @Mock
@@ -170,6 +182,10 @@ class NoteDwtableExcelImportServiceImplTest
 
     @Captor
     private ArgumentCaptor<NoteRecord> recordCaptor;
+
+    /** 25 列重建的 notelink 行捕获（U4） */
+    @Captor
+    private ArgumentCaptor<NoteNotelink> notelinkCaptor;
 
     /** 模拟 NoteRecordMapper.insertNoteRecord 的 useGeneratedKeys 自增 id 回填 */
     private final AtomicLong recordIdSequence = new AtomicLong(1000L);
@@ -2839,5 +2855,334 @@ class NoteDwtableExcelImportServiceImplTest
         verify(noteDwtableItemMapper, never())
                 .selectNoteDwtableItemByRecordAndColumnForUpdate(any(NoteDwtableItem.class));
         verify(noteDwtableItemMapper, never()).updateNoteDwtableItem(any(NoteDwtableItem.class));
+    }
+
+    // ==================================================================
+    // U4：25 列（语义关联）从零建立（双轨制：`_ID` notelink 行 id 优先 + 笔记名回退）
+    // ==================================================================
+
+    /** 25 列场景公共桩：名称(1) + 语义(25)；笔记候选（U4/R6：候选=库内全部笔记标题） */
+    private void mockSemanticColumns(NoteNote... notes)
+    {
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
+                column(101L, "名称", 1L, null, 0L),
+                column(104L, "语义", 25L, null, 0L)));
+        when(noteNoteMapper.selectAllNoteList()).thenReturn(new ArrayList<>(Arrays.asList(notes)));
+    }
+
+    private NoteNote note(Long id, String title)
+    {
+        NoteNote note = new NoteNote();
+        note.setId(id);
+        note.setTitle(title);
+        return note;
+    }
+
+    /** 既有 NoteNotelink 行（`_ID` 命中时按行 id 恢复的核心字段载体） */
+    private NoteNotelink notelink(Long id, Long noteId, Long blockId, String contextText,
+            String itemValue, Long linkNoteId, Long linkDwTableId, Long linkRecordId,
+            Long linkColumnId, Long linkItemId)
+    {
+        NoteNotelink link = new NoteNotelink();
+        link.setId(id);
+        link.setNoteId(noteId);
+        link.setBlockId(blockId);
+        link.setContextText(contextText);
+        link.setItemValue(itemValue);
+        link.setLinkNoteId(linkNoteId);
+        link.setLinkDwTableId(linkDwTableId);
+        link.setLinkRecordId(linkRecordId);
+        link.setLinkColumnId(linkColumnId);
+        link.setLinkItemId(linkItemId);
+        return link;
+    }
+
+    /** 取批量 insert 落库的 25 列（columnId=104）item */
+    private NoteDwtableItem semanticItemOf(List<NoteDwtableItem> items)
+    {
+        for (NoteDwtableItem item : items)
+        {
+            if (item.getColumnId().equals(104L))
+            {
+                return item;
+            }
+        }
+        return null;
+    }
+
+    // ===== Covers AE2. 导出再导入：notelink 行重建、坐标指向本表新记录、跳转参数完整；
+    //       行 id 不变（data-link-id 不断链）、blockId/核心字段恢复；26 列排除类型回归 =====
+
+    @Test
+    void precheckAndImport_semanticLink_idHit_roundTripRestoresRowAndCoordinates()
+    {
+        // 26 列（排除类型回归）：同名表头 skip-referenced，不参与导入、不进删除清单
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(Arrays.asList(
+                column(101L, "名称", 1L, null, 0L),
+                column(104L, "语义", 25L, null, 0L),
+                column(106L, "引用", 26L, null, 0L)));
+        when(noteNoteMapper.selectAllNoteList()).thenReturn(new ArrayList<>(
+                Collections.singletonList(note(40L, "引用笔记"))));
+        when(noteNotelinkMapper.selectNoteNotelinkById(901L)).thenReturn(
+                notelink(901L, 40L, 701L, "锚词", "锚词", 50L, 60L, 999L, 104L, 888L));
+
+        // 导出产物布局（renderer：record_id 首列 + 双列 `_ID` 前 `_文本` 后）
+        byte[] bytes = singleSheetBytes(
+                new String[] {"record_id", "名称", "语义_ID", "语义_文本", "引用"},
+                Collections.singletonList(new String[] {"1", "a", "901", "引用笔记（锚词）", "x"}));
+
+        // 预检：行 id 命中即通过（无链接失败/缺参/歧义）
+        ExcelImportPrecheckResult precheck =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
+        assertTrue(precheck.getLinkFailures().isEmpty());
+        assertTrue(precheck.getMissingParams().isEmpty());
+        assertTrue(precheck.getAmbiguityItems().isEmpty());
+        assertFalse(precheck.isHasBlockingIssues());
+        // 跳过表头：record_id + 语义_ID（行 id 锚点）+ 引用（26 排除类型，行为不变）
+        assertEquals(3, precheck.getSkippedHeaders().size());
+        assertTrue(precheck.getReplaceImpact().getDeletedColumns().isEmpty());
+
+        int count = runImport(bytes, paramsJson(bytes, null, null, null, null, null));
+        assertEquals(1, count);
+
+        // 25 列 item 落库：value=名称条目串原样（显示值），自增 id 为 notelink 行内坐标
+        verify(noteDwtableItemMapper, times(1)).insertNoteDwtableItems(itemsCaptor.capture());
+        NoteDwtableItem semanticItem = semanticItemOf(itemsCaptor.getValue());
+        assertNotNull(semanticItem);
+        assertEquals("引用笔记（锚词）", semanticItem.getValue());
+        Long newItemId = semanticItem.getId();
+        Long newRecordId = semanticItem.getRecordId();
+        assertNotNull(newItemId);
+        assertNotNull(newRecordId);
+
+        // 重建顺序：先按列清旧行（悬空清理），再按行 id upsert 恢复原行
+        InOrder inOrder = inOrder(noteNotelinkMapper);
+        inOrder.verify(noteNotelinkMapper).deleteNoteNotelinkByColumnId(104L);
+        inOrder.verify(noteNotelinkMapper).updateNoteNotelinkCoordinates(notelinkCaptor.capture());
+        NoteNotelink restored = notelinkCaptor.getValue();
+        // 行 id 保留（源笔记正文锚点 data-link-id 不断链）+ blockId/核心字段按原行恢复
+        assertEquals(Long.valueOf(901L), restored.getId());
+        assertEquals(Long.valueOf(40L), restored.getNoteId());
+        assertEquals(Long.valueOf(701L), restored.getBlockId());
+        assertEquals("锚词", restored.getContextText());
+        assertEquals("锚词", restored.getItemValue());
+        // 跳转参数完整（五字段）：linkNoteId=本表归属笔记规范值、坐标指向本表新记录/新单元格
+        assertEquals(NOTE_ID, restored.getLinkNoteId());
+        assertEquals(DWTABLE_ID, restored.getLinkDwTableId());
+        assertEquals(Long.valueOf(104L), restored.getLinkColumnId());
+        assertEquals(newItemId, restored.getLinkItemId());
+        assertEquals(newRecordId, restored.getLinkRecordId());
+        // ID 命中不产生名称回退新建
+        verify(noteNotelinkMapper, never()).insertNoteNotelink(any(NoteNotelink.class));
+    }
+
+    // ===== 笔记名回退命中唯一笔记：新建行、linkNoteId 规范值、contextText=锚词、blockId 降级；
+    //       列原名表头（外部手写形态）同样识别为 25 列名称主列 =====
+
+    @Test
+    void import_semanticLink_nameFallbackUniqueNote_insertsRowWithCanonicalFields()
+    {
+        mockSemanticColumns(note(40L, "引用笔记"));
+
+        // 空 `_ID` → 纯名称解析；名称主列用列原名"语义"（与 `语义_文本` 同为合法来源）
+        byte[] bytes = singleSheetBytes(
+                new String[] {"record_id", "名称", "语义_ID", "语义"},
+                Collections.singletonList(new String[] {"1", "a", "", "引用笔记（锚词）"}));
+
+        ExcelImportPrecheckResult precheck =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
+        assertTrue(precheck.getLinkFailures().isEmpty());
+        assertFalse(precheck.isHasBlockingIssues());
+
+        runImport(bytes, paramsJson(bytes, null, null, null, null, null));
+
+        verify(noteDwtableItemMapper, times(1)).insertNoteDwtableItems(itemsCaptor.capture());
+        NoteDwtableItem semanticItem = semanticItemOf(itemsCaptor.getValue());
+        assertNotNull(semanticItem);
+        Long newItemId = semanticItem.getId();
+        Long newRecordId = semanticItem.getRecordId();
+
+        // 新建行：noteId=命中笔记、blockId=null 锚点降级、contextText/itemValue=锚词、
+        // linkNoteId=本表归属笔记规范值、坐标指向本表新记录
+        verify(noteNotelinkMapper, times(1)).deleteNoteNotelinkByColumnId(104L);
+        verify(noteNotelinkMapper, times(1)).insertNoteNotelink(notelinkCaptor.capture());
+        verify(noteNotelinkMapper, never()).updateNoteNotelinkCoordinates(any(NoteNotelink.class));
+        NoteNotelink inserted = notelinkCaptor.getValue();
+        assertEquals(Long.valueOf(40L), inserted.getNoteId());
+        assertNull(inserted.getBlockId());
+        assertEquals("锚词", inserted.getContextText());
+        assertEquals("锚词", inserted.getItemValue());
+        assertEquals(NOTE_ID, inserted.getLinkNoteId());
+        assertEquals(DWTABLE_ID, inserted.getLinkDwTableId());
+        assertEquals(Long.valueOf(104L), inserted.getLinkColumnId());
+        assertEquals(newItemId, inserted.getLinkItemId());
+        assertEquals(newRecordId, inserted.getLinkRecordId());
+        assertNull(inserted.getId());
+    }
+
+    // ===== 笔记重名歧义：失败清单零写入（含阶段二漂移防御，notelink 重建段不执行） =====
+
+    @Test
+    void precheck_semanticLink_ambiguousNoteTitle_linkFailureZeroWrites()
+    {
+        mockSemanticColumns(note(40L, "引用笔记"), note(41L, "引用笔记"));
+
+        byte[] bytes = singleSheetBytes(
+                new String[] {"record_id", "名称", "语义_ID", "语义_文本"},
+                Collections.singletonList(new String[] {"1", "a", "", "引用笔记（锚词）"}));
+
+        ExcelImportPrecheckResult result =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
+
+        // 链接失败清单：定位（列+行号）+ 原因 + 容错命中说明；与缺参清单并列阻断
+        assertEquals(1, result.getLinkFailures().size());
+        LinkFailure failure = result.getLinkFailures().get(0);
+        assertEquals(Long.valueOf(104L), failure.getColumnId());
+        assertEquals("语义", failure.getColumnName());
+        assertEquals(2, failure.getRowNumber());
+        assertEquals("引用笔记（锚词）", failure.getEntryText());
+        assertTrue(failure.getReason().contains("歧义"));
+        assertNotNull(failure.getExplanation());
+        assertTrue(result.getMissingParams().isEmpty());
+        assertTrue(result.isHasBlockingIssues());
+
+        // 导入（阶段二防御）：漂移式拒绝，零写入
+        ServiceException ex = assertThrows(ServiceException.class,
+                () -> runImport(bytes, paramsJson(bytes, null, null, null, null, null)));
+        assertTrue(ex.getMessage().contains("数据已变化，请重新预检"));
+        assertTrue(ex.getMessage().contains("解析失败"));
+        assertTrue(ex.getMessage().contains("引用笔记（锚词）"));
+        verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
+        verify(noteDwtableItemMapper, never()).insertNoteDwtableItems(anyList());
+        verify(noteNotelinkMapper, never()).deleteNoteNotelinkByColumnId(any(Long.class));
+        verify(noteNotelinkMapper, never()).insertNoteNotelink(any(NoteNotelink.class));
+        verify(noteNotelinkMapper, never()).updateNoteNotelinkCoordinates(any(NoteNotelink.class));
+    }
+
+    // ===== 多锚点单元格（多行 notelink）：逐条目全命中才通过——两行 id 均恢复 =====
+
+    @Test
+    void import_semanticLink_multiAnchorAllHit_bothRestored()
+    {
+        mockSemanticColumns(note(40L, "引用笔记"), note(41L, "另一笔记"));
+        when(noteNotelinkMapper.selectNoteNotelinkById(901L)).thenReturn(
+                notelink(901L, 40L, 701L, "锚词", "锚词", 50L, 60L, 998L, 104L, 887L));
+        when(noteNotelinkMapper.selectNoteNotelinkById(902L)).thenReturn(
+                notelink(902L, 41L, 702L, "词二", "词二", 50L, 60L, 999L, 104L, 888L));
+
+        byte[] bytes = singleSheetBytes(
+                new String[] {"record_id", "名称", "语义_ID", "语义_文本"},
+                Collections.singletonList(new String[] {"1", "a", "901,902", "引用笔记（锚词）,另一笔记（词二）"}));
+
+        ExcelImportPrecheckResult precheck =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
+        assertTrue(precheck.getLinkFailures().isEmpty());
+
+        int count = runImport(bytes, paramsJson(bytes, null, null, null, null, null));
+        assertEquals(1, count);
+
+        verify(noteNotelinkMapper, times(1)).deleteNoteNotelinkByColumnId(104L);
+        verify(noteNotelinkMapper, times(2)).updateNoteNotelinkCoordinates(notelinkCaptor.capture());
+        // 两个行 id 均保留、核心字段各自恢复
+        Set<Long> restoredIds = new HashSet<>();
+        for (NoteNotelink restored : notelinkCaptor.getAllValues())
+        {
+            restoredIds.add(restored.getId());
+        }
+        assertEquals(new HashSet<>(Arrays.asList(901L, 902L)), restoredIds);
+        verify(noteNotelinkMapper, never()).insertNoteNotelink(any(NoteNotelink.class));
+    }
+
+    // ===== 多锚点部分未命中（R9）：`_ID` 死链且同位名称未命中 → 任一失败整表零写入 =====
+
+    @Test
+    void precheck_semanticLink_multiAnchorPartialMiss_linkFailureZeroWrites()
+    {
+        mockSemanticColumns(note(40L, "引用笔记"));
+        when(noteNotelinkMapper.selectNoteNotelinkById(901L)).thenReturn(
+                notelink(901L, 40L, 701L, "锚词", "锚词", 50L, 60L, 999L, 104L, 888L));
+
+        // 999 为已删 notelink 行；同位名称"错名"未命中 → 失败
+        byte[] bytes = singleSheetBytes(
+                new String[] {"record_id", "名称", "语义_ID", "语义_文本"},
+                Collections.singletonList(new String[] {"1", "a", "901,999", "引用笔记（锚词）,错名"}));
+
+        ExcelImportPrecheckResult result =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
+
+        assertEquals(1, result.getLinkFailures().size());
+        LinkFailure failure = result.getLinkFailures().get(0);
+        assertEquals("错名", failure.getEntryText());
+        assertEquals(2, failure.getRowNumber());
+        assertTrue(failure.getReason().contains("行 id 未命中"));
+        assertTrue(result.isHasBlockingIssues());
+
+        ServiceException ex = assertThrows(ServiceException.class,
+                () -> runImport(bytes, paramsJson(bytes, null, null, null, null, null)));
+        assertTrue(ex.getMessage().contains("解析失败"));
+        assertTrue(ex.getMessage().contains("错名"));
+        verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
+        verify(noteNotelinkMapper, never()).deleteNoteNotelinkByColumnId(any(Long.class));
+        verify(noteNotelinkMapper, never()).updateNoteNotelinkCoordinates(any(NoteNotelink.class));
+    }
+
+    // ===== 悬空导出回读（空名称+空 `_ID`）再导入：不建行、不失败（U1/R4 边界） =====
+
+    @Test
+    void import_semanticLink_deadIdWithEmptyName_skipped_noFailure()
+    {
+        mockSemanticColumns(note(40L, "引用笔记"));
+
+        // 行2：`_ID`=999（行已删）+ 名称空 → 死链回读跳过；行3：双空 → 无链接
+        byte[] bytes = singleSheetBytes(
+                new String[] {"record_id", "名称", "语义_ID", "语义_文本"},
+                Arrays.asList(
+                        new String[] {"1", "a", "999", ""},
+                        new String[] {"2", "b", "", ""}));
+
+        ExcelImportPrecheckResult result =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
+        assertTrue(result.getLinkFailures().isEmpty());
+        assertTrue(result.getMissingParams().isEmpty());
+        assertFalse(result.isHasBlockingIssues());
+
+        int count = runImport(bytes, paramsJson(bytes, null, null, null, null, null));
+        assertEquals(2, count);
+
+        // 两行均不重建 notelink 行；清旧行仍执行（本列旧 notelink 悬空清理）
+        verify(noteDwtableItemMapper, times(1)).insertNoteDwtableItems(itemsCaptor.capture());
+        int semanticItemCount = 0;
+        for (NoteDwtableItem item : itemsCaptor.getValue())
+        {
+            if (item.getColumnId().equals(104L))
+            {
+                semanticItemCount++;
+                assertEquals("", item.getValue());
+            }
+        }
+        assertEquals(2, semanticItemCount);
+        verify(noteNotelinkMapper, times(1)).deleteNoteNotelinkByColumnId(104L);
+        verify(noteNotelinkMapper, never()).insertNoteNotelink(any(NoteNotelink.class));
+        verify(noteNotelinkMapper, never()).updateNoteNotelinkCoordinates(any(NoteNotelink.class));
+    }
+
+    // ===== 仅表头 Excel（清空场景）：25 列旧行同样清除，无重建 =====
+
+    @Test
+    void import_semanticLink_headerOnlyExcel_clearsOldRows()
+    {
+        mockSemanticColumns();
+
+        byte[] bytes = singleSheetBytes(
+                new String[] {"record_id", "名称", "语义_ID", "语义_文本"},
+                Collections.emptyList());
+
+        int count = runImport(bytes, paramsJson(bytes, null, null, null, null, null));
+        assertEquals(0, count);
+
+        // rows 为空也执行清旧行（指向已删 items 的悬空 notelink 不残留），无重建
+        verify(noteNotelinkMapper, times(1)).deleteNoteNotelinkByColumnId(104L);
+        verify(noteNotelinkMapper, never()).insertNoteNotelink(any(NoteNotelink.class));
+        verify(noteNotelinkMapper, never()).updateNoteNotelinkCoordinates(any(NoteNotelink.class));
     }
 }

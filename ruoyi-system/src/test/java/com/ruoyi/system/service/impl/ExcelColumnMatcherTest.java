@@ -469,6 +469,36 @@ class ExcelColumnMatcherTest
         assertEquals(-1, noIdMapping.linkIdHeaderIndex(doubleLink));
     }
 
+    // ==================== 列映射：25 列锚点登记与 26 列排除回归（U4，R2/R6） ====================
+
+    @Test
+    void mapShouldRegisterSemanticLinkAnchors()
+    {
+        NoteColumn semantic = column(6L, "语义", 25L);
+        NoteColumn lookup = column(7L, "引用", 26L);
+        ColumnMapping mapping = ExcelColumnMatcher.mapColumns(
+                Arrays.asList("语义_ID", "语义_文本", "引用", "引用_ID"),
+                Arrays.asList(semantic, lookup));
+
+        // 25 列移出排除集（U4）：`_文本` 映射为名称主列、`_ID` 登记为行 id 锚点（不导入值）
+        assertEquals(semantic, entryOf(mapping, "语义_文本").getColumn());
+        assertNull(entryOf(mapping, "语义_ID").getColumn());
+        assertEquals(0, mapping.linkIdHeaderIndex(semantic));
+        assertTrue(entryOf(mapping, "语义_ID").getReason().contains("锚点"));
+
+        // 26 列维持排除（回归红线）：同名表头（含后缀形式）跳过、不登记锚点
+        assertNull(entryOf(mapping, "引用").getColumn());
+        assertTrue(entryOf(mapping, "引用").getReason().contains("重算"));
+        assertNull(entryOf(mapping, "引用_ID").getColumn());
+        assertEquals(-1, mapping.linkIdHeaderIndex(lookup));
+
+        // 列原名（精确匹配）同样可作为 25 列的名称主列（外部手写形态）
+        ColumnMapping nameMapping = ExcelColumnMatcher.mapColumns(
+                Arrays.asList("语义"),
+                Collections.singletonList(semantic));
+        assertEquals(semantic, nameMapping.mappedColumn(0));
+    }
+
     @Test
     void mapShouldSkipExcludedAndSystemTypeColumns()
     {

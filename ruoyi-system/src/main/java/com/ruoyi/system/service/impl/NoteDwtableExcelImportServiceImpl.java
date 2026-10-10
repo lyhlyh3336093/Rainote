@@ -39,6 +39,8 @@ import com.ruoyi.system.agent.security.AgentOwnershipChecker;
 import com.ruoyi.system.domain.NoteColumn;
 import com.ruoyi.system.domain.NoteDwtable;
 import com.ruoyi.system.domain.NoteDwtableItem;
+import com.ruoyi.system.domain.NoteNotelink;
+import com.ruoyi.system.domain.NoteNote;
 import com.ruoyi.system.domain.NoteRecord;
 import com.ruoyi.system.domain.NoteView;
 import com.ruoyi.system.domain.dto.ExcelImportAgentResult;
@@ -63,6 +65,7 @@ import com.ruoyi.system.mapper.NoteColumnMapper;
 import com.ruoyi.system.mapper.NoteDwtableItemMapper;
 import com.ruoyi.system.mapper.NoteDwtableMapper;
 import com.ruoyi.system.mapper.NoteNotelinkMapper;
+import com.ruoyi.system.mapper.NoteNoteMapper;
 import com.ruoyi.system.mapper.NoteRecordMapper;
 import com.ruoyi.system.mapper.NoteViewMapper;
 import com.ruoyi.system.service.INoteDwtableExcelImportService;
@@ -108,6 +111,15 @@ import com.ruoyi.system.service.impl.ExcelWorkbookReader.RowData;
  * 按同位名称条目经 {@link LinkNameResolver} 回退（空名称条目=U1 悬空导出回读的死链，跳过
  * 不失败）；歧义/未命中进链接失败清单（与缺参清单并列阻断，确认前零写入）。18 列的
  * `列名_文本` 机制、缺参记录选择器与同名取 sort 最小维持不变（回归红线）。
+ * <p>
+ * 25 列双轨制（U4，R2/R6-R9）：语义关联列移出排除集参与导入——{@code 列名_ID} 载体为
+ * NoteNotelink 行 id，单元格先按 `_ID` 逐条目校验行存在性（旧行核心字段按行 id 捕获备用），
+ * 命中即按行 id 恢复原行；`_ID` 缺失/未命中按同位名称条目（"引用笔记名（锚词）"语法）经
+ * {@link LinkNameResolver} 对全部笔记标题回退（空名称条目=悬空导出回读的死链，跳过不失败）；
+ * 歧义/未命中进同一链接失败清单（多值任一失败整表零写入，R9）。执行段 (h2)（21 对称写回之后、
+ * 跨表重算之前）逐列重建：先按列 {@code deleteNoteNotelinkByColumnId} 清旧行，`_ID` 命中按行 id
+ * upsert 恢复原行（保留行 id 与 blockId——源笔记锚点 data-link-id 不断链）、名称回退 insert 新行
+ * （blockId=null 锚点降级、contextText=锚词、linkNoteId=本表归属笔记规范值）。
  * <p>
  * 预检不触碰任何写路径（零 insert/update mapper 调用）；
  * 日志只记录列名/行号/跳过原因等元数据，不含单元格值（R25）。
@@ -169,9 +181,13 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     @Autowired
     private NoteDwtableItemMapper noteDwtableItemMapper;
 
-    /** 替换式导入：被删列的孤儿语义链接清理（byColumnId） */
+    /** 替换式导入：被删列的孤儿语义链接清理（byColumnId）+ 25 列重建（U4） */
     @Autowired
     private NoteNotelinkMapper noteNotelinkMapper;
+
+    /** 25 列名称回退的候选笔记标题来源（U4/R6：候选=库内笔记标题，一次查全量） */
+    @Autowired
+    private NoteNoteMapper noteNoteMapper;
 
     /** 导入记录的目标视图解析（网格 dataList 按视图 viewId 过滤记录） */
     @Autowired
@@ -219,7 +235,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
      *       提供补值后由 LLM 生成带 {@code columnValues} 的第二次调用；</li>
      *   <li>关联列未命中无法文本补值（须选择被关联表记录 id），一律进失败清单，
      *       提示用户改走界面导入；</li>
-     *   <li>21 列链接解析失败（U3，R10）：ID 未命中且名称歧义/未命中为强失败，
+     *   <li>21/25 列链接解析失败（U3/U4，R10）：`_ID` 未命中且名称歧义/未命中为强失败，
      *       零写入返回结构化失败清单（与界面共用 DTO），修正文件后重导；</li>
      *   <li>歧义（同名多条，18 列）：按 sort 靠前预选建立关联（与界面预检默认一致），不阻断，
      *       成功结果中报告歧义处理清单；</li>
@@ -244,8 +260,8 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                     + "有基础列缺参（缺值/类型违规）时仅当 columnValues 全部覆盖才执行导入，否则零写入并返回缺参清单"
                     + "（将清单告知用户，用户补充补值后带 columnValues 再次调用）。"
                     + "关联列未命中无法文本补值，须改走界面导入。"
-                    + "双向关联(21)列链接解析失败（_ID 未命中且名称歧义/未命中）同样零写入，返回结构化失败清单"
-                    + "（单元格定位/原因），修正 Excel 文件中的链接名称或 _ID 后重新导入。")
+                    + "双向关联(21)/语义关联(25)列链接解析失败（_ID 未命中且名称歧义/未命中）同样零写入，"
+                    + "返回结构化失败清单（单元格定位/原因），修正 Excel 文件中的链接名称或 _ID 后重新导入。")
     public ExcelImportAgentResult importExcel(
             @AgentParam(value = "noteId", type = "long", required = true, description = "目标笔记 id")
             Long noteId,
@@ -265,7 +281,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         // 同请求内预检即导入：文件指纹天然一致，无需两阶段回传
         ExcelImportPrecheckResult precheck = precheck(noteId, dwtableId, file, userId);
 
-        // U3（R8/R10）：21 列链接解析失败为强失败（无法补参覆盖）→ 结构化清单返回，零写入。
+        // U3/U4（R8/R10）：21/25 列链接解析失败为强失败（无法补参覆盖）→ 结构化清单返回，零写入。
         // 清单与界面预检共用 DTO（单元格定位/原因/容错命中说明），修正文件后重导
         if (!precheck.getLinkFailures().isEmpty())
         {
@@ -273,8 +289,8 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             result.setSuccess(false);
             result.setLinkFailures(precheck.getLinkFailures());
             result.setMessage("导入未执行（零写入）：有 " + precheck.getLinkFailures().size()
-                    + " 项双向关联列链接解析失败（目标记录无法唯一确定），请按清单修正 Excel 文件中的"
-                    + "链接名称或 _ID 后重新导入");
+                    + " 项链接解析失败（双向关联的目标记录/语义链接的引用笔记无法唯一确定），"
+                    + "请按清单修正 Excel 文件中的链接名称或 _ID 后重新导入");
             log.info("[EXCEL-AGENT] 链接解析失败拒绝导入 noteId={}, dwtableId={}, userId={}, linkFailures={}",
                     noteId, dwtableId, userId, precheck.getLinkFailures().size());
             return result;
@@ -617,12 +633,14 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     // ==================== 列分析 ====================
 
     /**
-     * 遍历参与导入的列（已映射到表头 且 类型 ∈ 六类基础 1/2/3/4/5/7 + 关联 18/21），
+     * 遍历参与导入的列（已映射到表头 且 类型 ∈ 六类基础 1/2/3/4/5/7 + 关联 18/21/25），
      * 逐列汇总预检清单。替换式语义：隐藏列映射即参与（导入时取消隐藏）；
      * 表头未映射的列将删除（进 replaceImpact），不再产生缺列/关联缺列缺参。
      * <p>
-     * 关联列分流（U3 双轨制）：18 走既有文本匹配（弹框补选救援不变）；
-     * 21 走 ID 优先 + 名称回退（{@link #analyzeDoubleLinkColumn}，失败进链接失败清单强阻断）。
+     * 关联列分流（U3/U4 双轨制）：18 走既有文本匹配（弹框补选救援不变）；
+     * 21 走 ID 优先 + 名称回退（{@link #analyzeDoubleLinkColumn}，失败进链接失败清单强阻断）；
+     * 25 走行 id 优先 + 笔记名回退（{@link #analyzeSemanticLinkColumn}，候选=库内全部笔记标题，
+     * 失败同清单强阻断）。
      */
     private void analyzeColumns(ExcelImportPrecheckResult result, Long noteId, Long dwtableId, Long userId,
             List<RowData> rows, List<NoteColumn> columns, ColumnMapping mapping)
@@ -637,6 +655,9 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         // 被关联表上下文缓存（同表多列共享一次 KTD4 批量预解析）
         Map<Long, LinkTableContext> contextByTableId = new HashMap<>();
 
+        // 25 列候选笔记上下文缓存（同一次预检共享一次全量笔记查询）
+        SemanticNoteContext semanticNoteContext = null;
+
         for (NoteColumn column : columns)
         {
             if (column == null || column.getType() == null)
@@ -645,7 +666,8 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             }
             Long type = column.getType();
             boolean link = type == ExcelColumnMatcher.TYPE_SINGLE_LINK || type == ExcelColumnMatcher.TYPE_DOUBLE_LINK;
-            if (!link && !BASIC_TYPES.contains(type))
+            boolean semantic = type == ExcelColumnMatcher.TYPE_SEMANTIC_LINK;
+            if (!link && !semantic && !BASIC_TYPES.contains(type))
             {
                 continue;
             }
@@ -669,6 +691,16 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                     analyzeLinkColumn(result, noteId, userId, column, type, headerIndex.intValue(),
                             mapping, rows, contextByTableId);
                 }
+            }
+            else if (semantic)
+            {
+                // U4：25 列双轨制（notelink 行 id 优先 + 笔记名回退，失败进链接失败清单）
+                if (semanticNoteContext == null)
+                {
+                    semanticNoteContext = semanticNoteContext();
+                }
+                analyzeSemanticLinkColumn(result, column, headerIndex.intValue(), mapping, rows,
+                        semanticNoteContext);
             }
             else
             {
@@ -1107,6 +1139,199 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             names.add(record.getName() == null ? "" : record.getName());
         }
         return names;
+    }
+
+    // ==================== 25 列双轨解析（U4：行 id 优先、笔记名回退） ====================
+
+    /**
+     * 语义关联列（25）逐行预检分析（U4，R2/R6-R9）：单元格先按 {@code _ID} 逐条目校验
+     * NoteNotelink 行存在性——命中即按行 id 恢复该行（名称不参与，ID 为准）；{@code _ID}
+     * 缺失/未命中位置按同位名称条目经 {@link LinkNameResolver} 对<b>全部笔记标题</b>回退，
+     * 歧义/未命中进<b>链接失败清单</b>（与 21 列同组、同缺参清单并列阻断，确认前零写入；
+     * 多值任一条目失败整表零写入，R9）。空名称条目 = U1 悬空导出回读的死链，跳过不失败。
+     */
+    private void analyzeSemanticLinkColumn(ExcelImportPrecheckResult result, NoteColumn column,
+            int headerIndex, ColumnMapping mapping, List<RowData> rows, SemanticNoteContext noteContext)
+    {
+        int idHeaderIndex = mapping.linkIdHeaderIndex(column);
+        // notelink 旧行查询缓存（同列共享，null 值占位防重复查库）
+        Map<Long, NoteNotelink> notelinkById = new HashMap<>();
+
+        for (RowData row : rows)
+        {
+            String idText = idHeaderIndex >= 0 ? mapping.cellText(row, idHeaderIndex) : "";
+            String nameText = mapping.cellText(row, headerIndex);
+            SemanticCellResolution resolution =
+                    resolveSemanticLinkCell(idText, nameText, noteContext, notelinkById);
+            for (LinkEntryFailure failure : resolution.failures)
+            {
+                LinkFailure item = new LinkFailure();
+                item.setColumnId(column.getId());
+                item.setColumnName(dtoColumnName(column));
+                item.setRowNumber(row.getRowNumber());
+                item.setEntryText(failure.entryText);
+                item.setReason(failure.reason);
+                item.setExplanation(failure.explanation);
+                result.getLinkFailures().add(item);
+            }
+        }
+    }
+
+    /**
+     * 25 列候选笔记上下文（U4/R6）：一次查库内全部笔记（delFlag=0）构建
+     * 候选标题列表（同名保留——重复名在 resolver 内判歧义）与 标题→笔记 id 映射
+     * （回退命中后取引用来源笔记 id；同名重复时后写覆盖无碍——同名必判歧义不会 MATCHED）。
+     */
+    private SemanticNoteContext semanticNoteContext()
+    {
+        List<NoteNote> notes = noteNoteMapper.selectAllNoteList();
+        List<String> titles = new ArrayList<>(notes.size());
+        Map<String, Long> noteIdByTitle = new HashMap<>();
+        for (NoteNote note : notes)
+        {
+            if (note == null)
+            {
+                continue;
+            }
+            String title = note.getTitle() == null ? "" : note.getTitle();
+            titles.add(title);
+            if (note.getId() != null)
+            {
+                noteIdByTitle.put(title, note.getId());
+            }
+        }
+        return new SemanticNoteContext(titles, noteIdByTitle);
+    }
+
+    /**
+     * 25 列单元格解析（U4 双轨制，预检与执行两阶段共用；R2/R6-R9 + U1 悬空回读边界）。
+     * <p>
+     * 逐条目语义（{@code _ID} 与名称条目按导出顺序一一对应，载体为 NoteNotelink 行 id）：
+     * <ul>
+     *   <li>{@code _ID} 命中（行存在）→ 按行 id 恢复原行（捕获旧行核心字段备用，
+     *       名称被外部改写不参与、不产生失败——ID 为准）；</li>
+     *   <li>{@code _ID} 缺失/未命中 → 同位名称条目经 {@link LinkNameResolver} 回退
+     *       （候选=全部笔记标题，条目语法"笔记名（锚词）"的锚词由 resolver 剥离），
+     *       命中 → 以笔记 id + 锚词新建行（blockId 降级为 null）；空名称条目 =
+     *       U1 悬空导出回读的死链，按“无链接”跳过不计失败；</li>
+     *   <li>任一名称条目歧义/未命中 → 失败条目（多值任一失败由调用方整表阻断，R9）。</li>
+     * </ul>
+     */
+    private SemanticCellResolution resolveSemanticLinkCell(String idText, String nameText,
+            SemanticNoteContext noteContext, Map<Long, NoteNotelink> notelinkById)
+    {
+        SemanticCellResolution resolution = new SemanticCellResolution();
+
+        // `_ID` 逐行 id 解析（逗号拆分、trim、去空 token；非法 token 记 null 占位、按未命中走名称回退）
+        List<Long> ids = new ArrayList<>();
+        if (idText != null && !idText.trim().isEmpty())
+        {
+            for (String part : idText.split(","))
+            {
+                String token = part.trim();
+                if (token.isEmpty())
+                {
+                    continue;
+                }
+                Long id;
+                try
+                {
+                    id = Long.valueOf(token);
+                }
+                catch (NumberFormatException e)
+                {
+                    id = null;
+                }
+                ids.add(id);
+            }
+        }
+
+        if (!ids.isEmpty())
+        {
+            // 含空条目的 CSV 拆分保持与 `_ID` 的位置一一对应（resolve 会跳过空条目丢失位置）
+            List<String> nameEntries = LinkNameResolver.splitCsvEntries(
+                    nameText == null ? "" : nameText.trim());
+            for (int i = 0; i < ids.size(); i++)
+            {
+                Long id = ids.get(i);
+                NoteNotelink existing = id == null ? null : lookupNotelink(id, notelinkById);
+                if (existing != null)
+                {
+                    // 行 id 命中：恢复原行（核心字段已随行捕获，事务段按行 id upsert）
+                    resolution.restored.add(existing);
+                    continue;
+                }
+                String entry = i < nameEntries.size() ? nameEntries.get(i).trim() : "";
+                if (entry.isEmpty())
+                {
+                    // U1 悬空导出回读：`_ID` 指向已删 notelink 行且名称为空 → 该条目按“无链接”跳过不失败
+                    continue;
+                }
+                resolveSemanticNameEntry(entry, noteContext, true, resolution);
+            }
+            return resolution;
+        }
+
+        // 无 `_ID`：纯名称解析（整串优先 + CSV 拆分逐条目，空串条目跳过）
+        if (nameText != null && !nameText.trim().isEmpty())
+        {
+            for (LinkNameResolver.EntryResult entryResult
+                    : linkNameResolver.resolve(nameText, noteContext.titles))
+            {
+                applySemanticEntryResult(entryResult, noteContext, false, resolution);
+            }
+        }
+        return resolution;
+    }
+
+    /**
+     * 单条目名称解析（`_ID` 回退路径）：条目本身含逗号时 resolver 的整串优先恰为整条目匹配。
+     */
+    private void resolveSemanticNameEntry(String entry, SemanticNoteContext noteContext,
+            boolean idFallback, SemanticCellResolution resolution)
+    {
+        for (LinkNameResolver.EntryResult entryResult : linkNameResolver.resolve(entry, noteContext.titles))
+        {
+            applySemanticEntryResult(entryResult, noteContext, idFallback, resolution);
+        }
+    }
+
+    /**
+     * 名称解析结果落地（25 列）：MATCHED → 笔记 id + 锚词的新建行预案（blockId 降级）；
+     * AMBIGUOUS/NOT_FOUND → 失败条目（原因区分纯名称与 ID 回退两来源，容错命中说明随附）。
+     */
+    private static void applySemanticEntryResult(LinkNameResolver.EntryResult entryResult,
+            SemanticNoteContext noteContext, boolean idFallback, SemanticCellResolution resolution)
+    {
+        if (entryResult.isMatched())
+        {
+            Long noteId = noteContext.noteIdByTitle.get(entryResult.getMatchedName());
+            if (noteId != null)
+            {
+                resolution.fallbacks.add(new SemanticFallback(noteId, entryResult.getAnchor()));
+            }
+            return;
+        }
+        String prefix = idFallback ? "行 id 未命中且" : "";
+        String reason = entryResult.isAmbiguous()
+                ? prefix + "名称歧义（多条同名笔记，语义链接无法唯一确定引用来源笔记）"
+                : prefix + "名称未命中（库内不存在同名笔记）";
+        resolution.failures.add(new LinkEntryFailure(entryResult.getRawEntry(), reason,
+                entryResult.getExplanation()));
+    }
+
+    /**
+     * 按 id 查 NoteNotelink 行（带缓存；未命中缓存 null 占位防重复查库）。
+     */
+    private NoteNotelink lookupNotelink(Long id, Map<Long, NoteNotelink> notelinkById)
+    {
+        if (notelinkById.containsKey(id))
+        {
+            return notelinkById.get(id);
+        }
+        NoteNotelink link = noteNotelinkMapper.selectNoteNotelinkById(id);
+        notelinkById.put(id, link);
+        return link;
     }
 
     // ==================== 被关联表上下文（R23 + KTD4） ====================
@@ -1651,7 +1876,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             }
         }
 
-        // kept 参与列 = 已映射且类型 ∈ 六类基础 + 18/21（隐藏列映射即参与，导入时取消隐藏）
+        // kept 参与列 = 已映射且类型 ∈ 六类基础 + 18/21/25（隐藏列映射即参与，导入时取消隐藏）
         Map<NoteColumn, Integer> headerIndexByColumn = new IdentityHashMap<>();
         List<NoteColumn> participants = new ArrayList<>();
         Set<Long> referencedIds = new HashSet<>();
@@ -1673,7 +1898,8 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             Long type = column.getType();
             if (type != null && (BASIC_TYPES.contains(type)
                     || type == ExcelColumnMatcher.TYPE_SINGLE_LINK
-                    || type == ExcelColumnMatcher.TYPE_DOUBLE_LINK))
+                    || type == ExcelColumnMatcher.TYPE_DOUBLE_LINK
+                    || type == ExcelColumnMatcher.TYPE_SEMANTIC_LINK))
             {
                 participants.add(column);
             }
@@ -1756,15 +1982,49 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         IdentityHashMap<NoteColumn, String[]> excelValuesByColumn = new IdentityHashMap<>();
         IdentityHashMap<NoteColumn, boolean[]> violationsByColumn = new IdentityHashMap<>();
         IdentityHashMap<NoteColumn, LinkColumnAnalysis> linkAnalysisByColumn = new IdentityHashMap<>();
+        IdentityHashMap<NoteColumn, SemanticColumnAnalysis> semanticAnalysisByColumn = new IdentityHashMap<>();
+        // 25 列候选笔记上下文（同一次导入共享一次全量笔记查询）+ 旧行查询缓存
+        SemanticNoteContext semanticNoteContext = null;
+        Map<Long, NoteNotelink> notelinkById = new HashMap<>();
 
         for (NoteColumn column : participants)
         {
             String columnName = column.getName() == null ? "" : column.getName().trim();
             Long type = column.getType();
             boolean link = type == ExcelColumnMatcher.TYPE_SINGLE_LINK || type == ExcelColumnMatcher.TYPE_DOUBLE_LINK;
+            boolean semantic = type == ExcelColumnMatcher.TYPE_SEMANTIC_LINK;
             // 替换式语义：participants 全部已映射（未映射列已进 deletedColumns），headerIndex 恒非空
             int headerIndex = headerIndexByColumn.get(column).intValue();
-            if (link)
+            if (semantic)
+            {
+                // U4：25 列行 id 优先逐行解析（与预检同款）。失败即漂移拒绝——预检已将
+                // 链接失败列为阻断项，此处触发必为预检-导入间隙的数据变化或绕过预检的
+                // 直调（fail-fast 于任何写入之前，整表零写入）；旧行核心字段随解析捕获，
+                // 事务段 25 重建按行 id 恢复
+                if (semanticNoteContext == null)
+                {
+                    semanticNoteContext = semanticNoteContext();
+                }
+                int idHeaderIndex = mapping.linkIdHeaderIndex(column);
+                SemanticColumnAnalysis analysis = new SemanticColumnAnalysis();
+                for (int r = 0; r < rowCount; r++)
+                {
+                    String idText = idHeaderIndex >= 0 ? mapping.cellText(rows.get(r), idHeaderIndex) : "";
+                    String nameText = mapping.cellText(rows.get(r), headerIndex);
+                    SemanticCellResolution cell =
+                            resolveSemanticLinkCell(idText, nameText, semanticNoteContext, notelinkById);
+                    analysis.cellsPerRow.add(cell);
+                    if (!cell.failures.isEmpty())
+                    {
+                        LinkEntryFailure failure = cell.failures.get(0);
+                        throw driftException("语义关联列“" + columnName + "”第 "
+                                + rows.get(r).getRowNumber() + " 行的链接条目“"
+                                + failure.entryText + "”解析失败（" + failure.reason + "）");
+                    }
+                }
+                semanticAnalysisByColumn.put(column, analysis);
+            }
+            else if (link)
             {
                 LinkTableContext context = linkTableContext(column, noteId, userId, contextByTableId);
                 LinkColumnAnalysis analysis = new LinkColumnAnalysis();
@@ -1920,6 +2180,10 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         plan.unhideColumns.addAll(unhideColumns);
         plan.survivingColumnIds.addAll(referencedIds);
         plan.clearedLinkColumns.addAll(collectClearedLinkColumns(noteId, dwtableId, mapping));
+        // U4：本表归属笔记规范值（25 列重建行 linkNoteId = NoteDwtable.noteId，
+        // 历史 null 的 COALESCE 兜底规则仅用于查询、不进新建/重建行）
+        plan.linkNoteId = dwtable.getNoteId();
+        plan.semanticAnalysisByColumn.putAll(semanticAnalysisByColumn);
         for (int r = 0; r < rowCount; r++)
         {
             RowPlan rowPlan = new RowPlan();
@@ -1927,6 +2191,7 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             {
                 Long type = column.getType();
                 boolean link = type == ExcelColumnMatcher.TYPE_SINGLE_LINK || type == ExcelColumnMatcher.TYPE_DOUBLE_LINK;
+                boolean semantic = type == ExcelColumnMatcher.TYPE_SEMANTIC_LINK;
                 NoteDwtableItem item = new NoteDwtableItem();
                 item.setDwtId(dwtableId);
                 item.setColumnId(column.getId());
@@ -1959,6 +2224,14 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                         // R15：空单元格/显式留空/死链回读跳过 → 空串 value，不建立关联
                         item.setValue("");
                     }
+                }
+                else if (semantic)
+                {
+                    // U4：25 列 item 的 value=名称条目串原样（显示值，与导出文本列口径一致）；
+                    // NoteNotelink 行由事务段 25 重建段按解析产物恢复/新建（item 自增 id 是行内坐标）
+                    String semanticText = mapping.cellText(rows.get(r),
+                            headerIndexByColumn.get(column).intValue()).trim();
+                    item.setValue(semanticText);
                 }
                 else
                 {
@@ -2557,6 +2830,8 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
      *   <li>写入阶段（仅 rows 非空）：逐行 NoteRecord insert（sort 从 1 递增、name 已派生、自增 id 回填）→
      *       kept items + pending 列 items 累积 ≥500 flush → 选项追加（FOR UPDATE）→
      *       items 全量最终 flush（零缓冲不变量）→ 双链对称写入；</li>
+     *   <li>25 列语义链接重建（U4，rows 为空也执行清旧行——悬空 notelink 不残留）：每列先清旧行，
+     *       `_ID` 命中按行 id upsert 恢复原行、名称回退 insert 新行；</li>
      *   <li>重算编排（<b>无条件执行</b>——清空引发的跨表重算不依赖新行）。</li>
      * </ol>
      * 任一步骤抛 {@link ServiceException} 整体回滚（含跨表清理与选项追加）。
@@ -2654,6 +2929,10 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             }
             executeSymmetricWrite(plan);
         }
+
+        // (h2) 25 列语义链接重建（U4，21 对称写回之后、跨表重算之前；rows 为空也执行——
+        // 只有表头的清空场景同样要清旧行，指向已删 items 的悬空 notelink 不残留）
+        rebuildSemanticLinks(plan);
 
         // (i) 重算编排（无条件执行：清空/删除引发的跨表重算不依赖新行）
         executeRecompute(plan);
@@ -3047,6 +3326,103 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     }
 
     /**
+     * 25 列（语义关联）重建（U4，R2/R6；事务段 (h2)，21 对称写回之后、跨表重算之前）。
+     * <p>
+     * 每个被导入的 25 列：重建前按列调用既有 {@code deleteNoteNotelinkByColumnId} 清旧行
+     * （旧行核心字段已在计划段按 `_ID` 捕获），随后逐条目重建：
+     * <ul>
+     *   <li>`_ID` 命中 → 按行 id upsert 恢复原行（{@code updateNoteNotelinkCoordinates}：
+     *       保留行 id 与 blockId——源笔记正文锚点 data-link-id 不断链——恢复
+     *       noteId/contextText/itemValue，刷新 linkRecordId/linkItemId 为本表新坐标、
+     *       linkDwTableId=本表、linkNoteId=本表归属笔记规范值）；</li>
+     *   <li>名称回退 → insert 新行（linkDwTableId=本表、linkColumnId/linkItemId=本表新坐标、
+     *       linkNoteId 规范值、noteId=解析命中的引用来源笔记、blockId=null 接受锚点降级、
+     *       contextText=锚词）。</li>
+     * </ul>
+     * rows 为空的纯清空场景同样执行清旧行（本表 items 已全删，悬空 notelink 不残留）。
+     */
+    private void rebuildSemanticLinks(ImportPlan plan)
+    {
+        for (Map.Entry<NoteColumn, SemanticColumnAnalysis> entry
+                : plan.semanticAnalysisByColumn.entrySet())
+        {
+            NoteColumn column = entry.getKey();
+            if (column == null || column.getId() == null)
+            {
+                continue;
+            }
+            SemanticColumnAnalysis analysis = entry.getValue();
+            // 清旧行：本列全部旧 notelink（含 `_ID` 未引用的悬空行；命中行的核心字段已捕获，
+            // 随后按行 id upsert 以原主键恢复——行 id 保留，data-link-id 不断链）
+            noteNotelinkMapper.deleteNoteNotelinkByColumnId(column.getId());
+            for (int r = 0; r < plan.rows.size(); r++)
+            {
+                RowPlan row = plan.rows.get(r);
+                SemanticCellResolution cell = analysis.cellsPerRow.get(r);
+                if (cell == null || (cell.restored.isEmpty() && cell.fallbacks.isEmpty()))
+                {
+                    continue;
+                }
+                NoteDwtableItem semanticItem = semanticItemOf(row, column.getId());
+                if (semanticItem == null || semanticItem.getId() == null)
+                {
+                    // 防御：25 列 item 未落库或未回填自增 id（零缓冲不变量破坏），宁可中止不可写坏坐标
+                    throw new ServiceException("导入失败：语义关联列“"
+                            + (column.getName() == null ? "" : column.getName())
+                            + "”的单元格数据落库后未取得自增 id，无法完成语义链接重建");
+                }
+                for (NoteNotelink restored : cell.restored)
+                {
+                    // 行 id 命中：恢复原行（核心字段按捕获值恢复，坐标刷新为本表新记录/新单元格）
+                    NoteNotelink link = new NoteNotelink();
+                    link.setId(restored.getId());
+                    link.setNoteId(restored.getNoteId());
+                    link.setBlockId(restored.getBlockId());
+                    link.setContextText(restored.getContextText());
+                    link.setItemValue(restored.getItemValue());
+                    link.setLinkNoteId(plan.linkNoteId);
+                    link.setLinkDwTableId(plan.dwtableId);
+                    link.setLinkRecordId(row.record.getId());
+                    link.setLinkColumnId(column.getId());
+                    link.setLinkItemId(semanticItem.getId());
+                    noteNotelinkMapper.updateNoteNotelinkCoordinates(link);
+                }
+                for (SemanticFallback fallback : cell.fallbacks)
+                {
+                    // 名称回退：新建行（blockId=null 锚点降级、contextText=锚词，
+                    // itemValue 对齐前端创建路径取锚词）
+                    NoteNotelink link = new NoteNotelink();
+                    link.setNoteId(fallback.noteId);
+                    link.setBlockId(null);
+                    link.setContextText(fallback.anchor);
+                    link.setItemValue(fallback.anchor);
+                    link.setLinkNoteId(plan.linkNoteId);
+                    link.setLinkDwTableId(plan.dwtableId);
+                    link.setLinkRecordId(row.record.getId());
+                    link.setLinkColumnId(column.getId());
+                    link.setLinkItemId(semanticItem.getId());
+                    noteNotelinkMapper.insertNoteNotelink(link);
+                }
+            }
+        }
+    }
+
+    /**
+     * 取行内指定 25 列的 item（批量 insert 落库后含自增 id，notelink 行内坐标引用之）。
+     */
+    private static NoteDwtableItem semanticItemOf(RowPlan row, Long columnId)
+    {
+        for (NoteDwtableItem item : row.items)
+        {
+            if (columnId.equals(item.getColumnId()))
+            {
+                return item;
+            }
+        }
+        return null;
+    }
+
+    /**
      * 重算编排（KTD8，先 flush 后调用，经 {@link INoteRecordService} 接口——Spring 代理
      * 加入导入事务）：目标表全部 lookup 列两步级联 → 目标表直接引用导入 18/21 列的集合运算列 →
      * 对称写入涉及的被关联表以配对列为源的 lookup 与集合运算列；按列 id 去重避免重复重算。
@@ -3137,6 +3513,20 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
 
         /** 其他表中引用将被清空的关联列（kept 21 配对列 + 他表指向本表的 18 列） */
         final List<NoteColumn> clearedLinkColumns = new ArrayList<>();
+
+        /** 本表归属笔记 id（25 列重建行 linkNoteId 的规范值 = NoteDwtable.noteId，U4） */
+        Long linkNoteId;
+
+        /** 25 列分析产物（U4：列 → 逐行解析结果，事务段 25 重建段消费） */
+        final Map<NoteColumn, SemanticColumnAnalysis> semanticAnalysisByColumn =
+                new IdentityHashMap<>();
+    }
+
+    /** 25 列（语义关联）的阶段二分析产物（U4） */
+    private static final class SemanticColumnAnalysis
+    {
+        /** 逐行解析产物（与数据行等长同序：`_ID` 命中的待恢复旧行 + 名称回退的新建行预案） */
+        final List<SemanticCellResolution> cellsPerRow = new ArrayList<>();
     }
 
     /** 待新建列：未落库 NoteColumn（无 id，事务段 insert 后回填）+ 逐行预解析值（trim 文本） */
@@ -3249,6 +3639,50 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         List<NoteRecord> records()
         {
             return new ArrayList<>(recordById.values());
+        }
+    }
+
+    /** 25 列候选笔记上下文（U4/R6）：候选标题列表 + 标题→笔记 id 映射（一次全量查询的产物） */
+    private static final class SemanticNoteContext
+    {
+        /** 候选名列表（{@link LinkNameResolver} 口径：同名重复保留，重复名在组件内判歧义） */
+        final List<String> titles;
+
+        /** 标题 → 笔记 id（回退命中后取引用来源笔记 id；同名重复后写覆盖无碍——同名必判歧义） */
+        final Map<String, Long> noteIdByTitle;
+
+        SemanticNoteContext(List<String> titles, Map<String, Long> noteIdByTitle)
+        {
+            this.titles = titles;
+            this.noteIdByTitle = noteIdByTitle;
+        }
+    }
+
+    /** 25 列单元格解析产物（U4）：`_ID` 命中的待恢复旧行 + 名称回退命中的新建行预案 + 失败条目 */
+    private static final class SemanticCellResolution
+    {
+        /** `_ID` 命中的旧行（含行 id 与 noteId/blockId/contextText/itemValue 核心字段，事务段恢复用） */
+        final List<NoteNotelink> restored = new ArrayList<>();
+
+        /** 名称回退命中的新建行预案（noteId=引用来源笔记 id、anchor=锚词 → contextText） */
+        final List<SemanticFallback> fallbacks = new ArrayList<>();
+
+        final List<LinkEntryFailure> failures = new ArrayList<>();
+    }
+
+    /** 25 列名称回退的单条目新建预案（U4/R6） */
+    private static final class SemanticFallback
+    {
+        /** 引用来源笔记 id（NoteNotelink.noteId） */
+        final Long noteId;
+
+        /** 锚词（null=条目无锚词语法；写入 contextText/itemValue，blockId 降级为 null） */
+        final String anchor;
+
+        SemanticFallback(Long noteId, String anchor)
+        {
+            this.noteId = noteId;
+            this.anchor = anchor;
         }
     }
 

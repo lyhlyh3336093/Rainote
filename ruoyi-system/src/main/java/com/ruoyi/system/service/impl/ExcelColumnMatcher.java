@@ -22,7 +22,7 @@ import com.ruoyi.system.service.impl.ExcelWorkbookReader.ParsedSheet;
 import com.ruoyi.system.service.impl.ExcelWorkbookReader.RowData;
 
 /**
- * Excel 导入的 sheet 选定与表头→目标列映射工具（U3，R2/R5/R6/R11；替换式语义）。
+ * Excel 导入的 sheet 选定与表头→目标列映射工具（U3/U4，R2/R5/R6/R11；替换式语义）。
  * <p>
  * 三个职责（全部静态、无状态，预检与导入两阶段共用）：
  * <ul>
@@ -33,11 +33,12 @@ import com.ruoyi.system.service.impl.ExcelWorkbookReader.RowData;
  *   <li>{@link #mapColumns(List, List)}——表头→目标列映射（R5/R6，替换式语义）：精确匹配
  *       （区分大小写）优先，round-trip 双列后缀（{@code 列名_文本}/{@code 列名_ID}）与
  *       record_id 源列仅识别未精确命中的表头；<b>隐藏列参与匹配</b>（Excel 出现同名列即
- *       取消隐藏并导入数据）；排除类型列（公式 20/23、集合运算 24、语义关联 25、lookup 26、
+ *       取消隐藏并导入数据）；排除类型列（公式 20/23、集合运算 24、lookup 26、
  *       系统列 1001-1005）同名跳过但记录被引用（列保留）；未匹配表头为新建纯文本列候选；
- *       18/21 关联列参与导入——名称主列同时接受<b>列原名</b>（精确匹配）与
+ *       18/21/25 关联列参与导入——名称主列同时接受<b>列原名</b>（精确匹配）与
  *       {@code 列名_文本}（round-trip 与外部手写两种来源）；{@code 列名_ID} 剥离后缀命中
- *       21 列时<b>登记 ID 锚点列</b>（U3：ID 优先重建，经
+ *       21 列时<b>登记 ID 锚点列</b>（U3：目标记录 id 优先重建）、命中 25 列时同款登记
+ *       <b>行 id 锚点列</b>（U4：NoteNotelink 行 id 优先重建，经
  *       {@link ColumnMapping#linkIdHeaderIndex} 消费、不导入值），命中 18 列仍忽略；</li>
  *   <li>{@link #validateCellText(NoteColumn, String)}——单元格显示文本的类型校验（R11/KTD9）：
  *       数字(2)/日期(5)/复选框(7) 三类，空缺值不算违规，违规返回中文描述供预检聚合为缺参。</li>
@@ -74,11 +75,15 @@ public final class ExcelColumnMatcher
     /** 双向关联 */
     public static final long TYPE_DOUBLE_LINK = 21L;
 
+    /** 语义关联 */
+    public static final long TYPE_SEMANTIC_LINK = 25L;
+
     /**
-     * 不导入值的列类型（R17）：20 公式 / 23 数学公式 / 24 集合运算 / 25 语义关联 / 26 lookup。
-     * 18 单向关联 / 21 双向关联参与导入（值来源为文本匹配，U4 处理）。
+     * 不导入值的列类型（R17）：20 公式 / 23 数学公式 / 24 集合运算 / 26 lookup。
+     * 18 单向关联 / 21 双向关联参与导入（值来源为文本匹配，U3 处理）；
+     * 25 语义关联参与导入（U4：`_ID` notelink 行 id 优先 + 笔记名回退，重建 NoteNotelink 行）。
      */
-    private static final Set<Long> EXCLUDED_TYPES = new HashSet<>(Arrays.asList(20L, 23L, 24L, 25L, 26L));
+    private static final Set<Long> EXCLUDED_TYPES = new HashSet<>(Arrays.asList(20L, 23L, 24L, 26L));
 
     /** 日期显示文本的两种合法格式（KTD9：严格校验，其他格式算违规） */
     private static final DateTimeFormatter DATE_TIME_FORMATTER =
@@ -261,10 +266,11 @@ public final class ExcelColumnMatcher
      *       映射到真实列是合法的显式意图）；<b>隐藏列参与匹配</b>（替换式语义：Excel 出现该列
      *       即取消隐藏并导入数据，不静默丢弃）；</li>
      *   <li>未命中的表头才做 round-trip 识别：首列且恰为 {@code record_id} 的表头是导出固定的
-     *       记录 id 源列 → 忽略；{@code 列名_文本} 剥离后缀命中 type 18/21 关联列 → 该表头为其
-     *       文本值来源；{@code 列名_ID} 剥离后缀命中 21 列 → 登记 ID 锚点列（U3，不导入值、
-     *       经 {@link ColumnMapping#linkIdHeaderIndex} 消费），命中 18 列 → 忽略（源 id 不映射）；</li>
-     *   <li>排除类型列（公式/集合运算/语义关联/lookup）与系统列同名 → 跳过但记录
+     *       记录 id 源列 → 忽略；{@code 列名_文本} 剥离后缀命中 type 18/21/25 关联列 → 该表头为其
+     *       文本值来源；{@code 列名_ID} 剥离后缀命中 21/25 列 → 登记 ID 锚点列（U3/U4，
+     *       不导入值、经 {@link ColumnMapping#linkIdHeaderIndex} 消费），命中 18 列 → 忽略
+     *       （源 id 不映射）；</li>
+     *   <li>排除类型列（公式/集合运算/lookup）与系统列同名 → 跳过但记录
      *       {@link HeaderEntry#getSkippedColumn()}（替换式语义：列保留、值由系统计算，
      *       不进删除清单）；</li>
      *   <li>其余未匹配表头 = <b>新建列候选</b>（{@link HeaderEntry#isUnmatched()}，替换式语义：
@@ -393,7 +399,7 @@ public final class ExcelColumnMatcher
                     entries.set(i, new HeaderEntry(i, header, null, excludedReason(suffixTarget), suffixTarget));
                     continue;
                 }
-                // 剥离后缀未命中 18/21 关联列 → 落入未匹配（新建列候选）
+                // 剥离后缀未命中 18/21/25 关联列 → 落入未匹配（新建列候选）
             }
             else if (header.endsWith(ID_SUFFIX) && header.length() > ID_SUFFIX.length())
             {
@@ -408,6 +414,14 @@ public final class ExcelColumnMatcher
                         // 冲突检测与删除/保留分类），经 ColumnMapping#linkIdHeaderIndex 消费
                         entries.set(i, new HeaderEntry(i, header, null,
                                 "双向关联列 id 锚点列（" + bare + "_ID），供链接按 ID 重建，不导入值",
+                                null, false, link));
+                    }
+                    else if (link.getType() == TYPE_SEMANTIC_LINK)
+                    {
+                        // U4（R2/R6）：25 列 `_ID` 同款登记——语义链接行 id 优先重建的机器锚点列
+                        //（载体为 NoteNotelink 行 id，与名称条目顺序一一对应），不导入值
+                        entries.set(i, new HeaderEntry(i, header, null,
+                                "语义关联列行 id 锚点列（" + bare + "_ID），供语义链接按行 id 重建，不导入值",
                                 null, false, link));
                     }
                     else
@@ -546,7 +560,7 @@ public final class ExcelColumnMatcher
     }
 
     /**
-     * 参与导入的列类型：非排除类型（公式/集合运算/语义关联/lookup）且非系统列（18/21 参与）。
+     * 参与导入的列类型：非排除类型（公式/集合运算/lookup）且非系统列（18/21/25 参与）。
      */
     private static boolean isImportable(NoteColumn column)
     {
@@ -555,12 +569,14 @@ public final class ExcelColumnMatcher
     }
 
     /**
-     * 关联列类型：18 单向关联 / 21 双向关联（round-trip 双列后缀的合法剥离目标）。
+     * 关联列类型：18 单向关联 / 21 双向关联 / 25 语义关联（round-trip 双列后缀的合法剥离目标；
+     * 25 的 `_文本` 为“引用笔记名（锚词）”条目串、`_ID` 为 NoteNotelink 行 id，U4）。
      */
     private static boolean isLinkType(NoteColumn column)
     {
         Long type = column.getType();
-        return type != null && (type == TYPE_SINGLE_LINK || type == TYPE_DOUBLE_LINK);
+        return type != null && (type == TYPE_SINGLE_LINK || type == TYPE_DOUBLE_LINK
+                || type == TYPE_SEMANTIC_LINK);
     }
 
     /**
@@ -593,10 +609,6 @@ public final class ExcelColumnMatcher
         if (t == 24L)
         {
             return "集合运算列的值由系统重算，不导入";
-        }
-        if (t == 25L)
-        {
-            return "语义关联列不参与导入";
         }
         if (t == 26L)
         {
@@ -777,9 +789,9 @@ public final class ExcelColumnMatcher
         }
 
         /**
-         * 21 列 `_ID` 锚点表头的下标（U3；无锚点列或非 21 列返回 -1）。
+         * 21/25 列 `_ID` 锚点表头的下标（U3/U4；无锚点列返回 -1）。
          * 身份比较（列实例与调用方来自同一列清单），供预检/执行两阶段读取 id 单元格
-         * （ID 优先重建的机器锚点，R3/R5）。
+         * （ID 优先重建的机器锚点，R3/R5/R6——21 载体为目标记录 id、25 载体为 NoteNotelink 行 id）。
          */
         public int linkIdHeaderIndex(NoteColumn column)
         {
@@ -807,8 +819,8 @@ public final class ExcelColumnMatcher
      *       （列保留、值由系统计算，供调用方判定"被引用不删除"）；其余跳过为 null；</li>
      *   <li>{@link #unmatched}——目标表无任何同名列（= 新建纯文本列候选）；
      *       同名重复表头仅首个标记；</li>
-     *   <li>{@link #getLinkIdColumn()}——表头为 21 列的 {@code 列名_ID} 锚点列时登记该
-     *       双向关联列（U3：ID 优先重建的机器锚点，column 保持 null 不作值映射）；其余为 null。</li>
+     *   <li>{@link #getLinkIdColumn()}——表头为 21/25 列的 {@code 列名_ID} 锚点列时登记该
+     *       关联列（U3/U4：ID 优先重建的机器锚点，column 保持 null 不作值映射）；其余为 null。</li>
      * </ul>
      */
     public static final class HeaderEntry
@@ -831,7 +843,7 @@ public final class ExcelColumnMatcher
         /** 目标表无同名列（替换式语义 = 新建纯文本列候选） */
         private final boolean unmatched;
 
-        /** 21 列 `_ID` 锚点列登记的目标双向关联列（U3；非锚点表头为 null） */
+        /** 21/25 列 `_ID` 锚点列登记的目标关联列（U3/U4；非锚点表头为 null） */
         private final NoteColumn linkIdColumn;
 
         HeaderEntry(int headerIndex, String headerName, NoteColumn column, String reason)

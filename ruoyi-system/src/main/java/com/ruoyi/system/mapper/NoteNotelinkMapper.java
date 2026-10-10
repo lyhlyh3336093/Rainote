@@ -65,6 +65,18 @@ public interface NoteNotelinkMapper
     public int updateNoteNotelink(NoteNotelink noteNotelink);
 
     /**
+     * U4: 25 列(语义关联)重建——按主键 upsert 行内坐标与核心字段(供 Excel 导入事务段调用)
+     * <p>
+     * 重建时序为"先清旧行(deleteNoteNotelinkByColumnId)再逐条目恢复"：本语句显式携带原主键
+     * insert，行已不存在时以<b>原行 id 恢复插入</b>(行 id 保留——源笔记正文锚点 data-link-id
+     * 不断链)；行仍存在(同一条目被重复引用等场景)时按主键 update 行内坐标与核心字段。
+     *
+     * @param noteNotelink 笔记链接(id 必填=原行 id；核心字段来自旧行捕获、行内坐标指向本表新记录)
+     * @return 受影响行数(insert 计 1 / update 计 2，MySQL ON DUPLICATE KEY UPDATE 语义)
+     */
+    public int updateNoteNotelinkCoordinates(NoteNotelink noteNotelink);
+
+    /**
      * 批量删除笔记链接
      *
      * @param ids 需要删除的数据主键集合

@@ -17,8 +17,9 @@ import java.util.List;
  *   <li>新选项创建项（{@link NewOption}）：单选/多选未命中选项自动追加（R19）；</li>
  *   <li>对称写入跨表影响（{@link SymmetricWriteImpact}）：21 双向关联列将修改的被关联表记录数；</li>
  *   <li>忽略 sheet/跳过表头提示（R2/R5/R6）；
- *   <li>链接失败清单（{@link LinkFailure}）：21 列 ID 未命中且名称解析歧义/未命中
- *       （U3 双轨制 ID 优先、名称回退；与缺参清单并列阻断，确认前零写入）；</li>
+ *   <li>链接失败清单（{@link LinkFailure}）：21 列（目标记录）/ 25 列（引用笔记）`_ID` 未命中
+ *       且名称解析歧义/未命中（U3/U4 双轨制 ID 优先、名称回退；与缺参清单并列阻断，
+ *       确认前零写入）；</li>
  *   <li>关联列选择器候选（{@link RelationCandidates}）：已过 R23 归属校验的内嵌数据源（KTD7）；</li>
  *   <li>文件指纹（{@link FileFingerprint}）：size + md5，阶段二重新上传文件时比对（KTD5）。</li>
  * </ul>
@@ -65,9 +66,10 @@ public class ExcelImportPrecheckResult
     private List<RelationCandidates> relationCandidates = new ArrayList<>();
 
     /**
-     * 链接失败清单（U3，R8）：21 列单元格 ID 未命中且名称解析歧义/未命中（含多值任一条目失败）。
-     * 与缺参清单<b>并列阻断</b>——清单非空即确认前零写入；条目含单元格定位（列+行号）、
-     * 失败原因与容错命中说明。21 列强失败为新设行为（取代旧弹框补选；18 列弹框补选维持不变）。
+     * 链接失败清单（U3/U4，R8）：21 列（目标记录）/ 25 列（引用笔记）单元格 `_ID` 未命中
+     * 且名称解析歧义/未命中（含多值任一条目失败）。与缺参清单<b>并列阻断</b>——清单非空即
+     * 确认前零写入；条目含单元格定位（列+行号）、失败原因与容错命中说明。21/25 列强失败为
+     * 新设行为（取代旧弹框补选；18 列弹框补选维持不变）。
      */
     private List<LinkFailure> linkFailures = new ArrayList<>();
 

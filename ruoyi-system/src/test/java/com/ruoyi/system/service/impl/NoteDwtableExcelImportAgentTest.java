@@ -34,6 +34,8 @@ import com.ruoyi.system.agent.security.AgentOwnershipChecker;
 import com.ruoyi.system.domain.NoteColumn;
 import com.ruoyi.system.domain.NoteDwtable;
 import com.ruoyi.system.domain.NoteDwtableItem;
+import com.ruoyi.system.domain.NoteNotelink;
+import com.ruoyi.system.domain.NoteNote;
 import com.ruoyi.system.domain.NoteRecord;
 import com.ruoyi.system.domain.dto.ExcelImportAgentResult;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult;
@@ -42,6 +44,7 @@ import com.ruoyi.system.mapper.NoteColumnMapper;
 import com.ruoyi.system.mapper.NoteDwtableItemMapper;
 import com.ruoyi.system.mapper.NoteDwtableMapper;
 import com.ruoyi.system.mapper.NoteNotelinkMapper;
+import com.ruoyi.system.mapper.NoteNoteMapper;
 import com.ruoyi.system.mapper.NoteRecordMapper;
 import com.ruoyi.system.mapper.NoteViewMapper;
 import com.ruoyi.system.service.INoteRecordService;
@@ -66,6 +69,7 @@ import static org.mockito.Mockito.when;
  * 表头未映射列的删除/新建 replaceImpact 行为（不再产生缺参）、成功结果替换摘要
  * （"替换：删除原 N 行"）与 agent 基线 replaceDeletedColumns、18 列关联未命中失败清单
  * （零写入 + 结构化清单）、21 列链接解析失败结构化清单（U3/R10：与界面共用 DTO、零写入）、
+ * 25 列语义链接失败清单与 round-trip 行恢复（U4/R10：同 DTO、行 id 保留零写入）、
  * 歧义预选成功报告、路径穿越拒绝、非 profile 前缀拒绝、
  * 文件不存在、归属失败穿透。
  *
@@ -95,9 +99,13 @@ class NoteDwtableExcelImportAgentTest
     @Mock
     private NoteDwtableItemMapper noteDwtableItemMapper;
 
-    /** 替换式导入：被删列的孤儿语义链接清理（service 新注入，@InjectMocks 自动装配） */
+    /** 替换式导入：被删列的孤儿语义链接清理 + 25 列重建（service 新注入，@InjectMocks 自动装配） */
     @Mock
     private NoteNotelinkMapper noteNotelinkMapper;
+
+    /** 25 列名称回退的候选笔记标题来源（U4：service 新注入） */
+    @Mock
+    private NoteNoteMapper noteNoteMapper;
 
     /** 导入记录归属视图解析（service 新注入；网格 dataList 按视图 viewId 过滤记录） */
     @Mock
@@ -118,6 +126,10 @@ class NoteDwtableExcelImportAgentTest
 
     @Captor
     private ArgumentCaptor<List<NoteDwtableItem>> itemsCaptor;
+
+    /** 25 列重建的 notelink 行捕获（U4） */
+    @Captor
+    private ArgumentCaptor<NoteNotelink> notelinkCaptor;
 
     @TempDir
     Path profileRoot;
@@ -460,6 +472,110 @@ class NoteDwtableExcelImportAgentTest
         verify(noteDwtableItemMapper, never()).insertNoteDwtableItems(anyList());
         verify(noteDwtableItemMapper, never()).updateNoteDwtableItem(any(NoteDwtableItem.class));
         verify(noteDwtableItemMapper, never()).insertNoteDwtableItem(any(NoteDwtableItem.class));
+    }
+
+    // ===== U4（R8/R10）：25 列（语义关联）链接解析失败 → 结构化清单返回、零写入（同 DTO） =====
+
+    @Test
+    void importExcelShouldReturnLinkFailuresForSemanticLink() throws IOException
+    {
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(java.util.Arrays.asList(
+                column(101L, "名称", 1L, null),
+                column(104L, "语义", 25L, null)));
+        when(noteNoteMapper.selectAllNoteList()).thenReturn(new ArrayList<>(
+                Collections.singletonList(noteNote(40L, "引用笔记"))));
+
+        // 空 `_ID` + 名称未命中（"不存在的笔记"）→ 强失败
+        byte[] bytes = singleSheetBytes(new String[] {"record_id", "名称", "语义_ID", "语义_文本"},
+                Collections.singletonList(new String[] {"1", "a", "", "不存在的笔记（锚词）"}));
+        String filePath = writeUploadFile("2026/09/16/语义链接失败.xlsx", bytes);
+
+        ExcelImportAgentResult result = service.importExcel(
+                NOTE_ID, DWTABLE_ID, filePath, null, USER_ID);
+
+        // 与界面共用 DTO 的结构化链接失败清单（单元格定位/原因/容错命中说明）
+        assertFalse(result.isSuccess());
+        assertTrue(result.getMissingParams().isEmpty());
+        assertEquals(1, result.getLinkFailures().size());
+        ExcelImportPrecheckResult.LinkFailure failure = result.getLinkFailures().get(0);
+        assertEquals(Long.valueOf(104L), failure.getColumnId());
+        assertEquals("语义", failure.getColumnName());
+        assertEquals(2, failure.getRowNumber());
+        assertEquals("不存在的笔记（锚词）", failure.getEntryText());
+        assertNotNull(failure.getReason());
+        assertTrue(failure.getReason().contains("未命中"));
+        assertNotNull(failure.getExplanation());
+        assertTrue(result.getMessage().contains("链接解析失败"));
+        assertTrue(result.getMessage().contains("零写入"));
+        // 无半写入：零记录/零 item 落库、零 notelink 重建（清旧行亦不执行）
+        verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
+        verify(noteDwtableItemMapper, never()).insertNoteDwtableItems(anyList());
+        verify(noteNotelinkMapper, never()).deleteNoteNotelinkByColumnId(any(Long.class));
+        verify(noteNotelinkMapper, never()).insertNoteNotelink(any(NoteNotelink.class));
+        verify(noteNotelinkMapper, never()).updateNoteNotelinkCoordinates(any(NoteNotelink.class));
+    }
+
+    // ===== U4（R2/R6）：25 列 round-trip —— `_ID` 命中恢复原行（行 id 保留），agent 路径同写入 =====
+
+    @Test
+    void importExcelShouldRestoreSemanticLinkOnRoundTrip() throws IOException
+    {
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenReturn(java.util.Arrays.asList(
+                column(101L, "名称", 1L, null),
+                column(104L, "语义", 25L, null)));
+        when(noteNoteMapper.selectAllNoteList()).thenReturn(new ArrayList<>(
+                Collections.singletonList(noteNote(40L, "引用笔记"))));
+        NoteNotelink existing = new NoteNotelink();
+        existing.setId(901L);
+        existing.setNoteId(40L);
+        existing.setBlockId(701L);
+        existing.setContextText("锚词");
+        existing.setItemValue("锚词");
+        when(noteNotelinkMapper.selectNoteNotelinkById(901L)).thenReturn(existing);
+        // 25 列重建依赖 item 自增 id（行内坐标 linkItemId）——覆盖 setUp 桩补 useGeneratedKeys 回填
+        java.util.concurrent.atomic.AtomicLong itemIdSequence = new java.util.concurrent.atomic.AtomicLong(5000L);
+        when(noteDwtableItemMapper.insertNoteDwtableItems(anyList())).thenAnswer(inv -> {
+            List<NoteDwtableItem> items = inv.getArgument(0);
+            for (NoteDwtableItem item : items)
+            {
+                item.setId(itemIdSequence.getAndIncrement());
+            }
+            return items.size();
+        });
+
+        byte[] bytes = singleSheetBytes(new String[] {"record_id", "名称", "语义_ID", "语义_文本"},
+                Collections.singletonList(new String[] {"1", "a", "901", "引用笔记（锚词）"}));
+        String filePath = writeUploadFile("2026/09/16/语义往返.xlsx", bytes);
+
+        ExcelImportAgentResult result = service.importExcel(
+                NOTE_ID, DWTABLE_ID, filePath, null, USER_ID);
+
+        assertTrue(result.isSuccess());
+        assertEquals(Integer.valueOf(1), result.getImportedCount());
+        assertTrue(result.getLinkFailures().isEmpty());
+        // 25 列重建：清旧行 + 按行 id 恢复原行（行 id 与 blockId 保留，坐标指向本表新记录）
+        verify(noteNotelinkMapper).deleteNoteNotelinkByColumnId(104L);
+        verify(noteNotelinkMapper).updateNoteNotelinkCoordinates(notelinkCaptor.capture());
+        NoteNotelink restored = notelinkCaptor.getValue();
+        assertEquals(Long.valueOf(901L), restored.getId());
+        assertEquals(Long.valueOf(40L), restored.getNoteId());
+        assertEquals(Long.valueOf(701L), restored.getBlockId());
+        assertEquals("锚词", restored.getContextText());
+        assertEquals(NOTE_ID, restored.getLinkNoteId());
+        assertEquals(DWTABLE_ID, restored.getLinkDwTableId());
+        assertEquals(Long.valueOf(104L), restored.getLinkColumnId());
+        assertNotNull(restored.getLinkItemId());
+        assertNotNull(restored.getLinkRecordId());
+        verify(noteNotelinkMapper, never()).insertNoteNotelink(any(NoteNotelink.class));
+    }
+
+    /** 笔记桩构造（25 列名称回退的候选标题来源） */
+    private NoteNote noteNote(Long id, String title)
+    {
+        NoteNote note = new NoteNote();
+        note.setId(id);
+        note.setTitle(title);
+        return note;
     }
 
     @Test
