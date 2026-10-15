@@ -100,6 +100,39 @@
         其余 {{ hiddenLinkFailureCount }} 条
       </div>
 
+      <!-- 待建双向链接列（U2/R1/R2）：`X_文本`+`X_ID` 成对表头且目标表无此列——逐列选择
+           目标表（按原生双向链接语义建列，并在目标表自动创建配对列互写链接）或跳过
+           （按普通文本列导入）；任一项未赋值即禁用确认导入（零写入门禁，与缺参/链接失败门禁叠加） -->
+      <template v-if="pendingLinkGroups.length > 0">
+        <a-divider orientation="left" class="precheck-divider">
+          待建双向链接列（{{ pendingLinkGroups.length }} 项，须逐列指定目标表或跳过）
+        </a-divider>
+        <div class="precheck-hint" style="margin-bottom: 8px">
+          检测到「X_文本 + X_ID」成对表头而目标表无此列：选择目标表将按原生双向链接语义建列，
+          并在目标表自动创建配对列；选择「跳过」则按普通文本列导入。
+        </div>
+      </template>
+      <div v-for="g in visiblePendingLinkGroups" :key="`plc-${g.headerName}`" class="precheck-form-row">
+        <div class="precheck-label">
+          <span class="precheck-name">{{ g.headerName }}</span>
+          <span class="precheck-hint">{{ g.textHeader }} + {{ g.idHeader }} → 目标表配对列「{{ g.suggestedPairedName }}」</span>
+        </div>
+        <a-select
+          v-model:value="g.selected"
+          show-search
+          placeholder="选择目标表（或跳过）"
+          style="width: 100%"
+          :options="g.options"
+          :disabled="state.loading"
+          option-filter-prop="label"
+        />
+      </div>
+      <!-- #14 同模式渲染上限：超上限截断防拖垮弹框，超出部分以计数行折叠（未赋值项优先可见，
+           见 visiblePendingLinkGroups，防隐藏行无法赋值导致确认永久禁用） -->
+      <div v-if="hiddenPendingLinkCount > 0" class="precheck-hint" style="margin-bottom: 8px">
+        其余 {{ hiddenPendingLinkCount }} 项
+      </div>
+
       <!-- 歧义项：预选 sort 靠前可改选（R14/KTD7） -->
       <template v-if="ambiguityGroups.length > 0">
         <a-divider orientation="left" class="precheck-divider">同名记录歧义（已预选，可改选）</a-divider>
@@ -168,6 +201,19 @@ const UNHANDLED_RENDER_LIMIT = 50;
  */
 const LINK_FAILURE_RENDER_LIMIT = 50;
 
+/**
+ * 待建双向链接列渲染上限（#14 LINK_FAILURE_RENDER_LIMIT 同模式）：每行含全量候选表下拉，
+ * 库内表数多时超长清单无上限渲染会拖垮弹框；50 条兼顾滚动定位与首屏开销，超出部分以
+ * "其余 N 项"计数行折叠（不可展开）。
+ */
+const PENDING_LINK_RENDER_LIMIT = 50;
+
+/**
+ * 跳过选项哨兵（下拉内"跳过（按文本列导入）"项的 value，字面量类型区别于任何目标表 id）：
+ * 组件交互先例均为 a-select（无 checkbox 用例），跳过做成下拉内选项最贴近既有风格。
+ */
+const LINK_COLUMN_SKIP = 'skip';
+
 /** 基础列/违规列缺参输入分组 */
 interface BasicGroup {
   columnName: string;
@@ -195,6 +241,22 @@ interface AmbiguityGroup extends RelationGroup {
   candidateCount: number;
 }
 
+/** 待建双向链接列赋值行（U2/R2）：候选目标表 + 跳过项组成单下拉；selected 为 null 即未赋值（阻断确认） */
+interface PendingLinkGroup {
+  /** 裸名 X（确认请求 assignments 的 headerName 匹配键） */
+  headerName: string;
+  /** 文本值来源表头（`X_文本`） */
+  textHeader: string;
+  /** ID 锚点来源表头（`X_ID`） */
+  idHeader: string;
+  /** 建议配对列名（目标表自动创建，不提供改名） */
+  suggestedPairedName: string;
+  /** 下拉选项：候选目标表 + 尾部跳过项 */
+  options: { label: string; value: number | 'skip' }[];
+  /** 赋值：目标表 id（link 建列）/ 'skip'（跳过按文本列导入）/ null（未赋值，阻断确认导入） */
+  selected: number | 'skip' | null;
+}
+
 /** 关联列整体（一个 18/21 列一组，承载折叠状态） */
 interface RelationColumn {
   columnId: number;
@@ -211,6 +273,9 @@ interface RelationColumn {
  *   <li>补参模式（hasBlockingIssues）：缺参逐列补值 + 关联列逐值记录选择器（KTD7）；
  *       21/25 列链接解析失败（R8 强失败，无法补参）以只读分组呈现并禁用确认导入
  *       （零写入门禁），须修正文件后重新预检；</li>
+ *   <li>待建双向链接列（U2/R1/R2）：`X_文本`+`X_ID` 成对表头且目标表无此列——逐列选择
+ *       目标表（按原生双向链接语义建列并在目标表互建配对列）或跳过（按文本列导入），
+ *       未全部赋值前确认导入禁用（零写入门禁与缺参/链接失败叠加）；</li>
  *   <li>只读确认模式（无缺参无歧义但有影响面信息）：仅影响面摘要 + 确认/取消（R13 轻量确认）。</li>
  * </ul>
  * 候选数据源仅用预检响应内嵌的 relationCandidates（已过后端归属校验），
@@ -239,6 +304,7 @@ export default defineComponent({
     const basicGroups = reactive<BasicGroup[]>([]);
     const relationColumns = reactive<RelationColumn[]>([]);
     const ambiguityGroups = reactive<AmbiguityGroup[]>([]);
+    const pendingLinkGroups = reactive<PendingLinkGroup[]>([]);
 
     /** 列类型 → 输入提示/占位文案 */
     const typeHint = (columnType: number | null): { hint: string; placeholder: string } => {
@@ -273,6 +339,7 @@ export default defineComponent({
       basicGroups.splice(0, basicGroups.length);
       relationColumns.splice(0, relationColumns.length);
       ambiguityGroups.splice(0, ambiguityGroups.length);
+      pendingLinkGroups.splice(0, pendingLinkGroups.length);
       const p = props.precheck;
       if (!p) return;
 
@@ -328,6 +395,21 @@ export default defineComponent({
           selectedId: a.preselectedRecordId ?? null,
           markedBlank: false,
           candidateCount: a.candidateCount,
+        });
+      }
+
+      // 待建双向链接列（U2/R2）：候选目标表 + 尾部跳过项组成单下拉；初始一律未赋值（阻断确认）
+      for (const pl of p.pendingLinkColumns || []) {
+        pendingLinkGroups.push({
+          headerName: pl.headerName,
+          textHeader: pl.textHeader,
+          idHeader: pl.idHeader,
+          suggestedPairedName: pl.suggestedPairedName,
+          options: [
+            ...(pl.candidateTables || []).map((t) => ({ label: t.name, value: t.id })),
+            { label: '跳过（按文本列导入）', value: LINK_COLUMN_SKIP },
+          ],
+          selected: null,
         });
       }
     };
@@ -440,6 +522,24 @@ export default defineComponent({
     const hiddenLinkFailureCount = computed(() =>
       linkFailures.value.length - visibleLinkFailures.value.length);
 
+    /**
+     * 渲染上限内的待建链接列（#14 LINK_FAILURE_RENDER_LIMIT 同模式截断 + 计数行折叠）。
+     * 常规（≤上限）按原序全量渲染；超上限时未赋值项优先占满窗口——已赋值项让位折叠，
+     * 否则被截断的隐藏行永远无法赋值、确认按钮永久禁用（对齐折叠分支"只显示未处理项"先例）。
+     */
+    const visiblePendingLinkGroups = computed<PendingLinkGroup[]>(() => {
+      if (pendingLinkGroups.length <= PENDING_LINK_RENDER_LIMIT) {
+        return pendingLinkGroups;
+      }
+      const unassigned = pendingLinkGroups.filter((g) => g.selected == null);
+      const assigned = pendingLinkGroups.filter((g) => g.selected != null);
+      return [...unassigned, ...assigned].slice(0, PENDING_LINK_RENDER_LIMIT);
+    });
+
+    /** 超出渲染上限的待建链接列数（"其余 N 项"折叠计数行） */
+    const hiddenPendingLinkCount = computed(() =>
+      pendingLinkGroups.length - visiblePendingLinkGroups.value.length);
+
     /** 替换式导入警示：有删除（行/列）或跨表入链影响（重指向/清空）即必显（数据变更不可无提示发生） */
     const hasReplace = computed(() => {
       const p = props.precheck;
@@ -519,9 +619,11 @@ export default defineComponent({
     });
 
     /** 确认可用：全部基础列校验通过（空=接受）且无链接解析失败（强失败零写入门禁：
-     *  21/25 列失败无法补参，须取消并修正文件后重新预检） */
+     *  21/25 列失败无法补参，须取消并修正文件后重新预检），且待建双向链接列已全部赋值
+     *  （目标表或跳过——任一未赋值即保持零写入阻断，U2/R2） */
     const canConfirm = computed(() => basicGroups.every((g) => !g.error)
-      && linkFailures.value.length === 0);
+      && linkFailures.value.length === 0
+      && pendingLinkGroups.every((g) => g.selected != null));
 
     /** 组装阶段二补参 JSON（按 ExcelImportParams 契约与 KTD5 发射规则） */
     const buildParamsPayload = (): ExcelImportParamsPayload => {
@@ -548,6 +650,16 @@ export default defineComponent({
           name: g.name,
           recordId: g.selectedId ?? null,
         });
+      }
+      // linkColumnAssignments：待建链接列逐项赋值（目标表=link 按原生 21 语义建列并互建配对列；
+      // 跳过=skip 按现状两个文本列导入）。confirm 的 canConfirm 门禁已保证 selected 全部非空
+      const linkColumnAssignments: { headerName: string; targetTableId: number | null; action: 'link' | 'skip' }[] = [];
+      for (const g of pendingLinkGroups) {
+        if (g.selected === LINK_COLUMN_SKIP) {
+          linkColumnAssignments.push({ headerName: g.headerName, targetTableId: null, action: 'skip' });
+        } else {
+          linkColumnAssignments.push({ headerName: g.headerName, targetTableId: g.selected, action: 'link' });
+        }
       }
       // precheckBaseline：从预检结果构建（反向漂移 fail-fast 比对基线）
       const missingColumns: string[] = [];
@@ -576,6 +688,7 @@ export default defineComponent({
         },
         columnValues,
         relationSelections,
+        linkColumnAssignments,
       };
     };
 
@@ -623,6 +736,9 @@ export default defineComponent({
       linkFailures,
       visibleLinkFailures,
       hiddenLinkFailureCount,
+      pendingLinkGroups,
+      visiblePendingLinkGroups,
+      hiddenPendingLinkCount,
       COLLAPSE_THRESHOLD,
       unhandledCount,
       visibleGroups,

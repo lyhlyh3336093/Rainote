@@ -194,6 +194,28 @@ export interface ExcelLinkFailure {
     explanation: string | null;
 }
 
+/** 待建双向链接列的候选目标表（预检原样返回库内全部数据表，前端下拉渲染） */
+export interface ExcelCandidateTable {
+    /** 数据表 id */
+    id: number;
+    /** 数据表名 */
+    name: string;
+}
+
+/** 待建双向链接列（`X_文本`+`X_ID` 成对出现且目标表无名为 X 的 18/21/25 列，不再静默建普通文本列） */
+export interface ExcelPendingLinkColumn {
+    /** 裸名 X（待建的本表双向链接列名，亦为确认请求 assignments 的 headerName 匹配键） */
+    headerName: string;
+    /** 文本值来源表头（`X_文本`） */
+    textHeader: string;
+    /** ID 锚点来源表头（`X_ID`） */
+    idHeader: string;
+    /** 建议配对列名（自动派生"X的双向链接"，与原生创建路径一致不提供改名） */
+    suggestedPairedName: string;
+    /** 候选目标表全列表 */
+    candidateTables: ExcelCandidateTable[];
+}
+
 /** 替换式导入影响面（删除类/跨表入链影响字段任一非空/非零 → 必须弹框确认后才执行导入） */
 export interface ExcelReplaceImpact {
     /** 将被删除的现有数据行数（目标表全部记录） */
@@ -234,7 +256,9 @@ export interface ExcelImportPrecheckResult {
     linkFailures: ExcelLinkFailure[];
     /** 替换式导入影响面 */
     replaceImpact: ExcelReplaceImpact;
-    /** 是否存在阻断性问题（缺参/歧义/链接失败任一非空） */
+    /** 待建双向链接列清单（`X_文本`+`X_ID` 成对且目标表无此列；非空即阻断，须逐列赋值目标表或跳过后方可确认导入） */
+    pendingLinkColumns: ExcelPendingLinkColumn[];
+    /** 是否存在阻断性问题（缺参/歧义/链接失败/待建链接列任一非空） */
     hasBlockingIssues: boolean;
 }
 
@@ -259,6 +283,8 @@ export interface ExcelImportParamsPayload {
     columnValues: Record<string, string>;
     /** 关联列逐值选择：每个（列名+未命中名/歧义名）一条，recordId=null 表示显式留空 */
     relationSelections: { columnName: string; name: string; recordId: number | null }[];
+    /** 待建双向链接列赋值：每个 pendingLinkColumn 一条（headerName=裸名 X；link=建列 targetTableId 必填，skip=按文本列导入） */
+    linkColumnAssignments: { headerName: string; targetTableId: number | null; action: 'link' | 'skip' }[];
 }
 
 /**

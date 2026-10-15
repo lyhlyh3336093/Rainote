@@ -673,6 +673,8 @@ export default defineComponent({
       },
       columnValues: {},
       relationSelections: [],
+      // 干净分支必无待建链接列(pending 非空即 hasBlockingIssues,不会走直连),空赋值对齐契约
+      linkColumnAssignments: [],
     });
     // 是否有须弹框确认的影响面信息(无缺参无歧义时的分流判据,R13)
     // 替换式语义(决策:有删除即弹框):将删除任何行/列或跨表入链影响(重指向/清空条目,U6 重指向口径)
