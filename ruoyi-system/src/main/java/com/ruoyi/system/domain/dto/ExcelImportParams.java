@@ -39,6 +39,20 @@ public class ExcelImportParams
     /** 关联列逐值选择：每个（列名+未命中名/歧义名）一条，recordId=null 表示显式留空 */
     private List<RelationSelection> relationSelections = new ArrayList<>();
 
+    /**
+     * 待建双向链接列赋值（U1/R2/R3）：每个 pendingLinkColumn 一条（headerName=裸名 X）。
+     * link=按原生 21 创建语义建列（本表 X 列 + 目标表配对列 + property 互写 + 两侧既有
+     * 记录补空 item），建列后 `X_文本`/`X_ID` 值走现有 21 列路径；skip=按现状两个文本列。
+     * 缺省兼容：不带本参数时 pending 非空即后端阻断（行为等同缺参，零写入）。
+     */
+    private List<LinkColumnAssignment> linkColumnAssignments = new ArrayList<>();
+
+    /** 待建双向链接列赋值动作：建列（事务内按原生 21 语义，R3） */
+    public static final String LINK_ACTION_LINK = "link";
+
+    /** 待建双向链接列赋值动作：跳过（按现状两个文本列处理，R3） */
+    public static final String LINK_ACTION_SKIP = "skip";
+
     public ExcelImportPrecheckResult.FileFingerprint getFileFingerprint()
     {
         return fileFingerprint;
@@ -77,6 +91,16 @@ public class ExcelImportParams
     public void setRelationSelections(List<RelationSelection> relationSelections)
     {
         this.relationSelections = relationSelections;
+    }
+
+    public List<LinkColumnAssignment> getLinkColumnAssignments()
+    {
+        return linkColumnAssignments;
+    }
+
+    public void setLinkColumnAssignments(List<LinkColumnAssignment> linkColumnAssignments)
+    {
+        this.linkColumnAssignments = linkColumnAssignments;
     }
 
     /**
@@ -271,6 +295,55 @@ public class ExcelImportParams
         public void setRecordId(Long recordId)
         {
             this.recordId = recordId;
+        }
+    }
+
+    /**
+     * 待建双向链接列赋值（U1/R3）：headerName 为裸名 X（预检 pendingLinkColumns 的
+     * headerName 匹配键），action 取 {@link #LINK_ACTION_LINK}（建列，targetTableId 必填）
+     * 或 {@link #LINK_ACTION_SKIP}（跳过，按现状两个文本列处理）。
+     * 服务端独立校验：目标表须存在、与本表同 noteId 且过归属校验（对齐既有 21 列 R23）；
+     * 目标表已有名为 X 或 "X的双向链接" 的列 → 拒绝整表零写入（R4 防重，提示改裸名）。
+     */
+    public static class LinkColumnAssignment
+    {
+        /** 裸名 X（待建链接列的赋值键） */
+        private String headerName;
+
+        /** 目标表 id（action=link 必填；action=skip 可空） */
+        private Long targetTableId;
+
+        /** 赋值动作：link=建列 / skip=按现状两个文本列 */
+        private String action;
+
+        public String getHeaderName()
+        {
+            return headerName;
+        }
+
+        public void setHeaderName(String headerName)
+        {
+            this.headerName = headerName;
+        }
+
+        public Long getTargetTableId()
+        {
+            return targetTableId;
+        }
+
+        public void setTargetTableId(Long targetTableId)
+        {
+            this.targetTableId = targetTableId;
+        }
+
+        public String getAction()
+        {
+            return action;
+        }
+
+        public void setAction(String action)
+        {
+            this.action = action;
         }
     }
 }

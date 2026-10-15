@@ -79,7 +79,15 @@ public class ExcelImportPrecheckResult
     /** 替换式导入影响面（删除类字段非空/非零即前端必须弹框确认后才执行导入） */
     private ReplaceImpact replaceImpact = new ReplaceImpact();
 
-    /** 是否存在阻断性问题（缺参/歧义/链接失败任一非空 → 前端打开补参或失败弹框，R13/R8 分流） */
+    /**
+     * 待建双向链接列清单（U1/R1/R2）：`X_文本`+`X_ID` 成对出现且目标表不存在名为 X 的
+     * 18/21/25 列时识别——不再静默建普通文本列。清单非空即<b>阻断确认</b>（hasBlockingIssues
+     * 置位）：前端须在弹框为每列赋值目标表（action=link 建列）或选择跳过（action=skip 按
+     * 现状两个文本列），确认请求携带 assignments 回传；旧调用不带 assignments 时后端兜底阻断。
+     */
+    private List<PendingLinkColumn> pendingLinkColumns = new ArrayList<>();
+
+    /** 是否存在阻断性问题（缺参/歧义/链接失败/待建链接列未赋值任一非空 → 前端打开补参或失败弹框，R13/R8 分流） */
     private boolean hasBlockingIssues;
 
     public FileFingerprint getFileFingerprint()
@@ -200,6 +208,16 @@ public class ExcelImportPrecheckResult
     public void setHasBlockingIssues(boolean hasBlockingIssues)
     {
         this.hasBlockingIssues = hasBlockingIssues;
+    }
+
+    public List<PendingLinkColumn> getPendingLinkColumns()
+    {
+        return pendingLinkColumns;
+    }
+
+    public void setPendingLinkColumns(List<PendingLinkColumn> pendingLinkColumns)
+    {
+        this.pendingLinkColumns = pendingLinkColumns;
     }
 
     /**
@@ -1092,6 +1110,123 @@ public class ExcelImportPrecheckResult
         public void setExplanation(String explanation)
         {
             this.explanation = explanation;
+        }
+    }
+
+    /**
+     * 待建双向链接列（U1/R1/R2）：`X_文本`+`X_ID` 成对出现且裸名 X 不是目标表既有
+     * 18/21/25 列的表头形态——Excel 导出产物来自其他表的双向链接列，导入到无该列的表时
+     * 需按原生 21 语义重建（本表 X 列 + 目标表配对列 + property 互写）。清单非空即阻断
+     * 确认：前端弹框为每列赋值目标表或选择跳过，确认请求携带 assignments 回传。
+     */
+    public static class PendingLinkColumn
+    {
+        /** 裸名 X（待建的本表 21 列名，亦为 assignments 的 headerName 匹配键） */
+        private String headerName;
+
+        /** 文本值来源表头（`X_文本`） */
+        private String textHeader;
+
+        /** ID 锚点来源表头（`X_ID`） */
+        private String idHeader;
+
+        /** 建议配对列名（自动派生"X的双向链接"，与原生创建路径一致不提供改名） */
+        private String suggestedPairedName;
+
+        /** 候选目标表全列表（库内全部 note_dwtable，前端下拉渲染） */
+        private List<CandidateTable> candidateTables = new ArrayList<>();
+
+        public String getHeaderName()
+        {
+            return headerName;
+        }
+
+        public void setHeaderName(String headerName)
+        {
+            this.headerName = headerName;
+        }
+
+        public String getTextHeader()
+        {
+            return textHeader;
+        }
+
+        public void setTextHeader(String textHeader)
+        {
+            this.textHeader = textHeader;
+        }
+
+        public String getIdHeader()
+        {
+            return idHeader;
+        }
+
+        public void setIdHeader(String idHeader)
+        {
+            this.idHeader = idHeader;
+        }
+
+        public String getSuggestedPairedName()
+        {
+            return suggestedPairedName;
+        }
+
+        public void setSuggestedPairedName(String suggestedPairedName)
+        {
+            this.suggestedPairedName = suggestedPairedName;
+        }
+
+        public List<CandidateTable> getCandidateTables()
+        {
+            return candidateTables;
+        }
+
+        public void setCandidateTables(List<CandidateTable> candidateTables)
+        {
+            this.candidateTables = candidateTables;
+        }
+    }
+
+    /**
+     * 待建双向链接列的候选目标表（U1/R2：预检原样返回库内全部 note_dwtable，前端下拉渲染；
+     * 归属/同笔记校验在确认请求消费 assignments 时执行——对齐既有 21 列 R23 先例）。
+     */
+    public static class CandidateTable
+    {
+        /** 数据表 id */
+        private Long id;
+
+        /** 数据表名 */
+        private String name;
+
+        public CandidateTable()
+        {
+        }
+
+        public CandidateTable(Long id, String name)
+        {
+            this.id = id;
+            this.name = name;
+        }
+
+        public Long getId()
+        {
+            return id;
+        }
+
+        public void setId(Long id)
+        {
+            this.id = id;
+        }
+
+        public String getName()
+        {
+            return name;
+        }
+
+        public void setName(String name)
+        {
+            this.name = name;
         }
     }
 }

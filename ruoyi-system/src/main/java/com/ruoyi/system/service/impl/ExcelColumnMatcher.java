@@ -11,6 +11,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -451,7 +452,116 @@ public final class ExcelColumnMatcher
                 entries.set(i, new HeaderEntry(i, header, null, "重复表头，同名新建列仅首个生效"));
             }
         }
-        return new ColumnMapping(entries);
+
+        // 第三遍（U1/R1）：成对未匹配表头 → 待建双向链接列形态（pendingLink）。
+        // `X_文本` 与 `X_ID` 成对出现且双双未精确命中、剥离后缀也未命中任何现有列
+        // （含排除类型列）→ 不再各自静默新建文本列，改为待建链接列（service 预检收集
+        // pendingLinkColumns 分组，确认请求赋值目标表后事务内按原生 21 语义建列）。
+        // 单独出现的 `X_文本`/`X_ID` 维持现状（新建文本列，回归红线）。
+        Map<String, int[]> pendingIdxByBare = new LinkedHashMap<>();
+        for (int i = 0; i < safeHeaders.size(); i++)
+        {
+            HeaderEntry entry = entries.get(i);
+            if (entry == null || !entry.isUnmatched())
+            {
+                continue;
+            }
+            String header = entry.getHeaderName();
+            String bare = null;
+            if (header.endsWith(TEXT_SUFFIX) && header.length() > TEXT_SUFFIX.length())
+            {
+                bare = header.substring(0, header.length() - TEXT_SUFFIX.length());
+            }
+            else if (header.endsWith(ID_SUFFIX) && header.length() > ID_SUFFIX.length())
+            {
+                bare = header.substring(0, header.length() - ID_SUFFIX.length());
+            }
+            if (bare != null)
+            {
+                int[] slots = pendingIdxByBare.computeIfAbsent(bare, k -> new int[] {-1, -1});
+                if (slots[0] < 0 && header.endsWith(TEXT_SUFFIX))
+                {
+                    slots[0] = i;
+                }
+                else if (slots[1] < 0 && header.endsWith(ID_SUFFIX))
+                {
+                    slots[1] = i;
+                }
+            }
+        }
+        List<PendingLinkPair> pendingPairs = new ArrayList<>();
+        for (Map.Entry<String, int[]> pendingEntry : pendingIdxByBare.entrySet())
+        {
+            String bare = pendingEntry.getKey();
+            int[] slots = pendingEntry.getValue();
+            if (slots[0] < 0 || slots[1] < 0)
+            {
+                // 不成对：维持现状（新建文本列，场景 5 红线）
+                continue;
+            }
+            HeaderEntry textEntry = entries.get(slots[0]);
+            HeaderEntry idEntry = entries.get(slots[1]);
+            entries.set(slots[0], new HeaderEntry(slots[0], textEntry.getHeaderName(), null,
+                    "待建双向链接列的文本值来源（与“" + bare + "_ID”成对），须在确认导入时赋值目标表",
+                    null, false, null, bare));
+            entries.set(slots[1], new HeaderEntry(slots[1], idEntry.getHeaderName(), null,
+                    "待建双向链接列的 id 锚点列（" + bare + "_ID），须在确认导入时赋值目标表",
+                    null, false, null, bare));
+            pendingPairs.add(new PendingLinkPair(bare, slots[0], slots[1],
+                    textEntry.getHeaderName(), idEntry.getHeaderName()));
+        }
+        return new ColumnMapping(entries, pendingPairs);
+    }
+
+    // ==================== 待建双向链接列（U1：形态识别与表头重绑） ====================
+
+    /**
+     * 把 pending 形态表头重绑到待建的 21 列（U1/R3，service 消费 assignments 后调用）。
+     * <p>
+     * 输入的 {@code linkColumnsByBareName} 为裸名 X → 虚拟 21 列（action=link 的赋值项；
+     * service 侧构造、事务段 insert 回填 id）。重绑形态与既有 21 列 round-trip 完全一致：
+     * {@code X_文本} → 列的文本值来源（column 映射）；{@code X_ID} → ID 锚点列
+     * （{@link HeaderEntry#getLinkIdColumn()} 登记、不导入值），使值解析
+     * （resolveDoubleLinkCell 的 ID 优先+名称回退）与对称写回原样工作。
+     * 不在映射中的裸名（skip 跳过项）维持 pending 态，由 service 按现状两个文本列处理。
+     * 静态纯函数：不查库，输入列对象由调用方构造。
+     */
+    public static ColumnMapping rebindPendingLinks(ColumnMapping mapping,
+            Map<String, NoteColumn> linkColumnsByBareName)
+    {
+        if (mapping.getPendingLinkPairs().isEmpty()
+                || linkColumnsByBareName == null || linkColumnsByBareName.isEmpty())
+        {
+            return mapping;
+        }
+        List<HeaderEntry> rebound = new ArrayList<>(mapping.getEntries());
+        for (int i = 0; i < rebound.size(); i++)
+        {
+            HeaderEntry entry = rebound.get(i);
+            if (entry == null || entry.getPendingLinkBareName() == null)
+            {
+                continue;
+            }
+            String bare = entry.getPendingLinkBareName();
+            NoteColumn linkColumn = linkColumnsByBareName.get(bare);
+            if (linkColumn == null)
+            {
+                // skip/未赋值：维持 pending 态（service 按现状文本列处理）
+                continue;
+            }
+            if (entry.getHeaderName().endsWith(TEXT_SUFFIX))
+            {
+                rebound.set(i, new HeaderEntry(entry.getHeaderIndex(), entry.getHeaderName(),
+                        linkColumn, null));
+            }
+            else
+            {
+                rebound.set(i, new HeaderEntry(entry.getHeaderIndex(), entry.getHeaderName(), null,
+                        "双向关联列 id 锚点列（" + bare + "_ID），供链接按 ID 重建，不导入值",
+                        null, false, linkColumn));
+            }
+        }
+        return new ColumnMapping(rebound, mapping.getPendingLinkPairs());
     }
 
     // ==================== 单元格显示值类型校验（R11/KTD9） ====================
@@ -703,15 +813,30 @@ public final class ExcelColumnMatcher
     {
         private final List<HeaderEntry> entries;
 
+        /** 待建双向链接列的成对表头（U1/R1，按裸名出现顺序） */
+        private final List<PendingLinkPair> pendingLinkPairs;
+
         private ColumnMapping(List<HeaderEntry> entries)
         {
-            this.entries = Collections.unmodifiableList(entries);
+            this(entries, Collections.<PendingLinkPair>emptyList());
+        }
+
+        private ColumnMapping(List<HeaderEntry> entries, List<PendingLinkPair> pendingLinkPairs)
+        {
+            this.entries = Collections.unmodifiableList(new ArrayList<>(entries));
+            this.pendingLinkPairs = Collections.unmodifiableList(new ArrayList<>(pendingLinkPairs));
         }
 
         /** 全部表头条目（含已映射与跳过，与输入表头等长同序） */
         public List<HeaderEntry> getEntries()
         {
             return entries;
+        }
+
+        /** 待建双向链接列的成对表头清单（U1/R1：`X_文本`+`X_ID` 成对且裸名无既有列） */
+        public List<PendingLinkPair> getPendingLinkPairs()
+        {
+            return pendingLinkPairs;
         }
 
         /** headerIndex 对应的目标列；未映射/越界返回 null */
@@ -820,7 +945,11 @@ public final class ExcelColumnMatcher
      *   <li>{@link #unmatched}——目标表无任何同名列（= 新建纯文本列候选）；
      *       同名重复表头仅首个标记；</li>
      *   <li>{@link #getLinkIdColumn()}——表头为 21/25 列的 {@code 列名_ID} 锚点列时登记该
-     *       关联列（U3/U4：ID 优先重建的机器锚点，column 保持 null 不作值映射）；其余为 null。</li>
+     *       关联列（U3/U4：ID 优先重建的机器锚点，column 保持 null 不作值映射）；其余为 null；
+     *       21/25 列的 {@code 列名_文本} 同理映射列本身；其余为 null。</li>
+     *   <li>{@link #getPendingLinkBareName()}——U1/R1 待建双向链接列形态：表头为成对未匹配的
+     *       {@code X_文本}/{@code X_ID} 时登记裸名 X（确认导入时赋值目标表建列或按现状文本列跳过）；
+     *       其余为 null。</li>
      * </ul>
      */
     public static final class HeaderEntry
@@ -846,6 +975,9 @@ public final class ExcelColumnMatcher
         /** 21/25 列 `_ID` 锚点列登记的目标关联列（U3/U4；非锚点表头为 null） */
         private final NoteColumn linkIdColumn;
 
+        /** U1 待建双向链接列的裸名（成对未匹配的 `X_文本`/`X_ID` 表头；非 pending 形态为 null） */
+        private final String pendingLinkBareName;
+
         HeaderEntry(int headerIndex, String headerName, NoteColumn column, String reason)
         {
             this(headerIndex, headerName, column, reason, null, false);
@@ -866,6 +998,13 @@ public final class ExcelColumnMatcher
         HeaderEntry(int headerIndex, String headerName, NoteColumn column, String reason,
                 NoteColumn skippedColumn, boolean unmatched, NoteColumn linkIdColumn)
         {
+            this(headerIndex, headerName, column, reason, skippedColumn, unmatched, linkIdColumn, null);
+        }
+
+        HeaderEntry(int headerIndex, String headerName, NoteColumn column, String reason,
+                NoteColumn skippedColumn, boolean unmatched, NoteColumn linkIdColumn,
+                String pendingLinkBareName)
+        {
             this.headerIndex = headerIndex;
             this.headerName = headerName;
             this.column = column;
@@ -873,6 +1012,7 @@ public final class ExcelColumnMatcher
             this.skippedColumn = skippedColumn;
             this.unmatched = unmatched;
             this.linkIdColumn = linkIdColumn;
+            this.pendingLinkBareName = pendingLinkBareName;
         }
 
         public int getHeaderIndex()
@@ -908,6 +1048,80 @@ public final class ExcelColumnMatcher
         public NoteColumn getLinkIdColumn()
         {
             return linkIdColumn;
+        }
+
+        /** U1 待建双向链接列的裸名（非 pending 形态为 null） */
+        public String getPendingLinkBareName()
+        {
+            return pendingLinkBareName;
+        }
+
+        /** 是否待建双向链接列形态表头（成对未匹配的 `X_文本`/`X_ID`，U1/R1） */
+        public boolean isPendingLinkHeader()
+        {
+            return pendingLinkBareName != null;
+        }
+    }
+
+    /**
+     * 待建双向链接列的成对表头（U1/R1）：`X_文本`+`X_ID` 成对出现且裸名 X 不是目标表
+     * 任何既有列（18/21/25 关联列会被 round-trip 识别、其他类型列命中即不参与）。
+     * 预检收集为 {@code pendingLinkColumns} 分组（弹框赋值目标表），确认请求携带
+     * assignments（link 建列 / skip 按现状两个文本列）。
+     */
+    public static final class PendingLinkPair
+    {
+        /** 裸名 X（待建的本表 21 列名） */
+        private final String bareName;
+
+        /** `X_文本` 表头下标（0-based） */
+        private final int textHeaderIndex;
+
+        /** `X_ID` 表头下标（0-based） */
+        private final int idHeaderIndex;
+
+        /** `X_文本` 表头名 */
+        private final String textHeaderName;
+
+        /** `X_ID` 表头名 */
+        private final String idHeaderName;
+
+        PendingLinkPair(String bareName, int textHeaderIndex, int idHeaderIndex,
+                String textHeaderName, String idHeaderName)
+        {
+            this.bareName = bareName;
+            this.textHeaderIndex = textHeaderIndex;
+            this.idHeaderIndex = idHeaderIndex;
+            this.textHeaderName = textHeaderName;
+            this.idHeaderName = idHeaderName;
+        }
+
+        /** 裸名 X（待建的本表 21 列名，亦为赋值键 headerName） */
+        public String getBareName()
+        {
+            return bareName;
+        }
+
+        public int getTextHeaderIndex()
+        {
+            return textHeaderIndex;
+        }
+
+        public int getIdHeaderIndex()
+        {
+            return idHeaderIndex;
+        }
+
+        /** `X_文本` 表头名（值文本来源） */
+        public String getTextHeaderName()
+        {
+            return textHeaderName;
+        }
+
+        /** `X_ID` 表头名（ID 锚点来源） */
+        public String getIdHeaderName()
+        {
+            return idHeaderName;
         }
     }
 }

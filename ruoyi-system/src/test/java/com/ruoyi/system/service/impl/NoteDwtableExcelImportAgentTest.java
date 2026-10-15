@@ -686,5 +686,38 @@ class NoteDwtableExcelImportAgentTest
         assertEquals("无权访问该多维表", exception.getMessage());
         verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
     }
+
+    // ===== U1（R5）：agent 无法交互弹框——待建双向链接列转链接失败清单，零写入 =====
+
+    @Test
+    void importExcelShouldReturnLinkFailuresForPendingLinkColumns() throws IOException
+    {
+        // `X_文本`+`X_ID` 成对出现且本表无"关联"列 → pending 形态（agent 无法赋值目标表）
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class)))
+                .thenReturn(java.util.Arrays.asList(column(101L, "名称", 1L, null)));
+        byte[] bytes = singleSheetBytes(new String[] {"record_id", "名称", "关联_文本", "关联_ID"},
+                Collections.singletonList(new String[] {"1", "a", "B记录", "100"}));
+        String filePath = writeUploadFile("2026/10/15/待建链接列.xlsx", bytes);
+
+        ExcelImportAgentResult result = service.importExcel(
+                NOTE_ID, DWTABLE_ID, filePath, null, USER_ID);
+
+        // R5：pending 形态转链接失败清单（文案固定），零写入
+        assertFalse(result.isSuccess());
+        assertEquals(1, result.getLinkFailures().size());
+        ExcelImportPrecheckResult.LinkFailure failure = result.getLinkFailures().get(0);
+        assertEquals("关联", failure.getColumnName());
+        assertEquals("关联_文本+关联_ID", failure.getEntryText());
+        assertTrue(failure.getReason().contains("缺少目标表参数"));
+        assertTrue(failure.getReason().contains("请改走界面导入"));
+        assertTrue(result.getMessage().contains("零写入"));
+        assertTrue(result.getMessage().contains("请改走界面导入"));
+        // 无半写入：零记录/零列/零 item 落库
+        verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
+        verify(noteColumnMapper, never()).insertNoteColumn(any(NoteColumn.class));
+        verify(noteDwtableItemMapper, never()).insertNoteDwtableItems(anyList());
+        verify(noteDwtableItemMapper, never()).insertNoteDwtableItem(any(NoteDwtableItem.class));
+        verify(noteDwtableItemMapper, never()).updateNoteDwtableItem(any(NoteDwtableItem.class));
+    }
 }
 

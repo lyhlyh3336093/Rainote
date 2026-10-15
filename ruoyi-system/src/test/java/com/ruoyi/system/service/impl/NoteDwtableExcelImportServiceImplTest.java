@@ -924,6 +924,18 @@ class NoteDwtableExcelImportServiceImplTest
     private String paramsJson(byte[] fingerprintBytes, String missingColumns, String missNames,
             String ambiguity, String columnValues, String relationSelections, String replaceDeletedColumns)
     {
+        return paramsJson(fingerprintBytes, missingColumns, missNames, ambiguity,
+                columnValues, relationSelections, replaceDeletedColumns, null);
+    }
+
+    /**
+     * 构造 params JSON（U1 扩展）：linkColumnAssignments 为待建链接列赋值数组
+     * （[{"headerName":"X","targetTableId":80,"action":"link"|"skip"}]，null → 空数组）。
+     */
+    private String paramsJson(byte[] fingerprintBytes, String missingColumns, String missNames,
+            String ambiguity, String columnValues, String relationSelections, String replaceDeletedColumns,
+            String linkColumnAssignments)
+    {
         JSONObject root = new JSONObject();
         JSONObject fingerprint = new JSONObject();
         fingerprint.put("size", (long) fingerprintBytes.length);
@@ -939,6 +951,8 @@ class NoteDwtableExcelImportServiceImplTest
         root.put("columnValues", JSONObject.parseObject(columnValues == null ? "{}" : columnValues));
         root.put("relationSelections",
                 JSONArray.parseArray(relationSelections == null ? "[]" : relationSelections));
+        root.put("linkColumnAssignments",
+                JSONArray.parseArray(linkColumnAssignments == null ? "[]" : linkColumnAssignments));
         return root.toJSONString();
     }
 
@@ -4029,5 +4043,305 @@ class NoteDwtableExcelImportServiceImplTest
         NoteNotelink inserted = notelinkCaptor.getValue();
         assertEquals(Long.valueOf(40L), inserted.getNoteId());
         assertEquals("锚词", inserted.getContextText());
+    }
+
+    // ==================================================================
+    // U1（R1-R4）：待建双向链接列——`X_文本`+`X_ID` 成对未匹配表头的识别、缺参收集、
+    // 赋值建列（原生 21 语义）与 skip 回落；场景 5/7 的单独表头与既有回归见上方各段
+    // ==================================================================
+
+    /** U1 公共桩：本表仅"名称"列、目标表(80)无列、目标表含既有记录 B记录(100)、候选表全列表 */
+    private void mockPendingLinkScenario()
+    {
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenAnswer(inv -> {
+            NoteColumn query = inv.getArgument(0);
+            if (RELATED_TABLE_ID.equals(query.getDwtableId()))
+            {
+                return new ArrayList<NoteColumn>();
+            }
+            return new ArrayList<>(Collections.singletonList(column(101L, "名称", 1L, null, 0L)));
+        });
+        mockRelatedTable(relatedTable("被关联表", NOTE_ID));
+        mockRelatedRecords(Collections.singletonList(record(100L, "B记录", 1L)));
+        // R2：候选表为库内全部 note_dwtable（本表 + 被关联表）
+        NoteDwtable self = new NoteDwtable();
+        self.setId(DWTABLE_ID);
+        self.setName("目标表");
+        self.setNoteId(NOTE_ID);
+        when(noteDwtableMapper.selectNoteDwtableList(any(NoteDwtable.class)))
+                .thenReturn(Arrays.asList(self, relatedTable("被关联表", NOTE_ID)));
+    }
+
+    /** U1 场景 1：成对表头识别 pending + 赋值 link → 事务内建两列互写 property、目标表
+     *  既有记录补空 item、值按 ID 重建 + 对称写回（预检阻断 + 分组内容断言） */
+    @Test
+    void precheckAndImport_pendingLink_linkAssignment_buildsColumnsAndValues()
+    {
+        mockPendingLinkScenario();
+        // 模拟 (f2) 补空 item 落库后的锁读现值：按查询坐标返回空值配对 item（id=900）
+        when(noteDwtableItemMapper.selectNoteDwtableItemByRecordAndColumnForUpdate(any(NoteDwtableItem.class)))
+                .thenAnswer(inv -> {
+                    NoteDwtableItem query = inv.getArgument(0);
+                    NoteDwtableItem current = new NoteDwtableItem();
+                    current.setId(900L);
+                    current.setDwtId(query.getDwtId());
+                    current.setRecordId(query.getRecordId());
+                    current.setColumnId(query.getColumnId());
+                    return current;
+                });
+
+        // 导出产物形态：`X_文本`+`X_ID` 成对，目标表无"关联"列（表 B 的双向链接列导入到本表）
+        byte[] bytes = singleSheetBytes(
+                new String[] {"record_id", "名称", "关联_文本", "关联_ID"},
+                Collections.singletonList(new String[] {"1", "a", "B记录", "100"}));
+
+        // 预检（R1/R2）：识别为 pendingLinkColumns 分组（不静默建文本列），阻断确认
+        ExcelImportPrecheckResult precheck =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
+        assertEquals(1, precheck.getPendingLinkColumns().size());
+        ExcelImportPrecheckResult.PendingLinkColumn pending = precheck.getPendingLinkColumns().get(0);
+        assertEquals("关联", pending.getHeaderName());
+        assertEquals("关联_文本", pending.getTextHeader());
+        assertEquals("关联_ID", pending.getIdHeader());
+        assertEquals("关联的双向链接", pending.getSuggestedPairedName());
+        assertEquals(2, pending.getCandidateTables().size());
+        assertEquals(Long.valueOf(RELATED_TABLE_ID), pending.getCandidateTables().get(1).getId());
+        assertEquals("被关联表", pending.getCandidateTables().get(1).getName());
+        assertTrue(precheck.isHasBlockingIssues());
+        // 不再进 newColumnNames（预检时未知 link/skip，由弹框赋值决定）；
+        // skippedHeaders 仅剩 record_id 源列（pending 表头不进跳过清单）
+        assertTrue(precheck.getReplaceImpact().getNewColumnNames().isEmpty());
+        assertEquals(1, precheck.getSkippedHeaders().size());
+        assertEquals("record_id", precheck.getSkippedHeaders().get(0).getHeaderName());
+        assertTrue(precheck.getLinkFailures().isEmpty());
+
+        // 导入（R3）：assignments 携带 link + 目标表 80
+        int count = runImport(bytes, paramsJson(bytes, null, null, null, null, null, null,
+                "[{\"headerName\":\"关联\",\"targetTableId\":80,\"action\":\"link\"}]"));
+        assertEquals(1, count);
+
+        // 建列 1/2：本表"关联"列（type=21、isShow=0、sort=本表 next sort——名称列 sort=null
+        // → max 0 → 1；property 由 insert 后 update 互写补全，引用可变故互写内容见下方 update 断言）
+        verify(noteColumnMapper, times(2)).insertNoteColumn(columnCaptor.capture());
+        NoteColumn sourceColumn = columnCaptor.getAllValues().get(0);
+        assertEquals("关联", sourceColumn.getName());
+        assertEquals(Long.valueOf(21L), sourceColumn.getType());
+        assertEquals(DWTABLE_ID, sourceColumn.getDwtableId());
+        assertEquals(Long.valueOf(0L), sourceColumn.getIsShow());
+        assertEquals(Long.valueOf(1L), sourceColumn.getSort());
+        // 建列 2/2：目标表配对列（名自动派生、isShow=0、property 互写 back_field_id/back_field_name）
+        NoteColumn pairedColumn = columnCaptor.getAllValues().get(1);
+        assertEquals("关联的双向链接", pairedColumn.getName());
+        assertEquals(Long.valueOf(21L), pairedColumn.getType());
+        assertEquals(RELATED_TABLE_ID, pairedColumn.getDwtableId());
+        assertEquals(Long.valueOf(0L), pairedColumn.getIsShow());
+        JSONObject pairedProp = JSONObject.parseObject(pairedColumn.getProperty());
+        assertEquals(true, pairedProp.getBoolean("multiple"));
+        assertEquals(Long.valueOf(DWTABLE_ID), pairedProp.getLong("table_id"));
+        assertEquals("目标表", pairedProp.getString("table_name"));
+        assertEquals(sourceColumn.getId(), pairedProp.getLong("back_field_id"));
+        assertEquals("关联", pairedProp.getString("back_field_name"));
+        // property 互写回填：本表列 update 后含 back_field_id=配对列 id / back_field_name=配对列名
+        verify(noteColumnMapper, times(1)).updateNoteColumn(columnCaptor.capture());
+        NoteColumn updated = columnCaptor.getValue();
+        assertEquals("关联", updated.getName());
+        JSONObject updatedProp = JSONObject.parseObject(updated.getProperty());
+        assertEquals(pairedColumn.getId(), updatedProp.getLong("back_field_id"));
+        assertEquals("关联的双向链接", updatedProp.getString("back_field_name"));
+        assertEquals(Long.valueOf(80L), updatedProp.getLong("table_id"));
+
+        // 目标表既有记录补空 item（原生语义两侧补空；本表侧由替换全删重建 + 值 items 覆盖）
+        verify(noteDwtableItemMapper, times(1)).insertNoteDwtableItem(itemCaptor.capture());
+        NoteDwtableItem blankItem = itemCaptor.getValue();
+        assertEquals(Long.valueOf(100L), blankItem.getRecordId());
+        assertEquals(RELATED_TABLE_ID, blankItem.getDwtId());
+        assertEquals(pairedColumn.getId(), blankItem.getColumnId());
+        assertEquals("", blankItem.getValue());
+
+        // 值按 ID 重建：本表新记录的"关联"列 item（linkRecordId=100 来自 `_ID`，跳转可用）
+        verify(noteDwtableItemMapper, times(1)).insertNoteDwtableItems(itemsCaptor.capture());
+        NoteDwtableItem sourceItem = null;
+        for (NoteDwtableItem item : itemsCaptor.getValue())
+        {
+            if (sourceColumn.getId().equals(item.getColumnId()))
+            {
+                sourceItem = item;
+            }
+        }
+        assertNotNull(sourceItem);
+        assertEquals("100", sourceItem.getLinkRecordId());
+        assertEquals("B记录", sourceItem.getValue());
+        assertEquals(pairedColumn.getId(), sourceItem.getLinkColumnId());
+        assertNotNull(sourceItem.getRecordId());
+
+        // 对称写回（复用既有路径）：配对 item 追加新记录 id/源 item id/新记录名，源 item 回写配对 item id
+        //（itemCaptor 累积捕获：get(0)=上方补空 item 的 insert，get(1)/get(2)=本次两次 update）
+        verify(noteDwtableItemMapper, times(2)).updateNoteDwtableItem(itemCaptor.capture());
+        NoteDwtableItem pairedUpdate = itemCaptor.getAllValues().get(1);
+        NoteDwtableItem sourceUpdate = itemCaptor.getAllValues().get(2);
+        assertEquals(Long.valueOf(100L), pairedUpdate.getRecordId());
+        assertEquals(pairedColumn.getId(), pairedUpdate.getColumnId());
+        assertEquals(String.valueOf(sourceItem.getRecordId()), pairedUpdate.getLinkRecordId());
+        assertEquals(String.valueOf(sourceItem.getId()), pairedUpdate.getLinkItemId());
+        assertEquals("a", pairedUpdate.getValue());
+        assertEquals(sourceColumn.getId(), pairedUpdate.getLinkColumnId());
+        assertEquals("900", sourceUpdate.getLinkItemId());
+        assertEquals("100", sourceUpdate.getLinkRecordId());
+    }
+
+    /** U1 场景 2：action=skip → 按现状两个文本列（`X_文本`/`X_ID` 各建 type=1），无 21 结构 */
+    @Test
+    void import_pendingLink_skipAssignment_createsTwoTextColumns()
+    {
+        mockPendingLinkScenario();
+
+        byte[] bytes = singleSheetBytes(
+                new String[] {"record_id", "名称", "关联_文本", "关联_ID"},
+                Collections.singletonList(new String[] {"1", "a", "B记录", "100"}));
+
+        ExcelImportPrecheckResult precheck =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(bytes), USER_ID);
+        assertEquals(1, precheck.getPendingLinkColumns().size());
+
+        int count = runImport(bytes, paramsJson(bytes, null, null, null, null, null, null,
+                "[{\"headerName\":\"关联\",\"targetTableId\":80,\"action\":\"skip\"}]"));
+        assertEquals(1, count);
+
+        // 两个纯文本列（type=1、无 property 互写、无对称写/无补空 item）
+        verify(noteColumnMapper, times(2)).insertNoteColumn(columnCaptor.capture());
+        NoteColumn textColumn = columnCaptor.getAllValues().get(0);
+        NoteColumn idColumn = columnCaptor.getAllValues().get(1);
+        assertEquals("关联_文本", textColumn.getName());
+        assertEquals(Long.valueOf(1L), textColumn.getType());
+        assertEquals("关联_ID", idColumn.getName());
+        assertEquals(Long.valueOf(1L), idColumn.getType());
+        verify(noteColumnMapper, never()).updateNoteColumn(any(NoteColumn.class));
+        verify(noteDwtableItemMapper, never()).insertNoteDwtableItem(any(NoteDwtableItem.class));
+        verify(noteDwtableItemMapper, never()).updateNoteDwtableItem(any(NoteDwtableItem.class));
+        verify(noteDwtableItemMapper, never())
+                .selectNoteDwtableItemByRecordAndColumnForUpdate(any(NoteDwtableItem.class));
+
+        // 值按文本落库：名称 + 两个文本列共 3 个 item（文本列不建 21 结构，值原样）
+        verify(noteDwtableItemMapper, times(1)).insertNoteDwtableItems(itemsCaptor.capture());
+        List<NoteDwtableItem> items = itemsCaptor.getValue();
+        assertEquals(3, items.size());
+        NoteDwtableItem textItem = null;
+        NoteDwtableItem idItem = null;
+        for (NoteDwtableItem item : items)
+        {
+            if (textColumn.getId().equals(item.getColumnId()))
+            {
+                textItem = item;
+            }
+            if (idColumn.getId().equals(item.getColumnId()))
+            {
+                idItem = item;
+            }
+        }
+        assertNotNull(textItem);
+        assertEquals("B记录", textItem.getValue());
+        assertNotNull(idItem);
+        assertEquals("100", idItem.getValue());
+    }
+
+    /** U1 场景 3a：未赋值确认（不带 assignments，兼容缺省）→ 阻断零写入 */
+    @Test
+    void import_pendingLink_withoutAssignment_blocksZeroWrites()
+    {
+        mockPendingLinkScenario();
+
+        byte[] bytes = singleSheetBytes(
+                new String[] {"record_id", "名称", "关联_文本", "关联_ID"},
+                Collections.singletonList(new String[] {"1", "a", "B记录", "100"}));
+
+        ServiceException ex = assertThrows(ServiceException.class,
+                () -> runImport(bytes, paramsJson(bytes, null, null, null, null, null, null, null)));
+        assertTrue(ex.getMessage().contains("关联"));
+        assertTrue(ex.getMessage().contains("缺少赋值"));
+        verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
+        verify(noteColumnMapper, never()).insertNoteColumn(any(NoteColumn.class));
+        verify(noteDwtableItemMapper, never()).insertNoteDwtableItems(anyList());
+        verify(noteDwtableItemMapper, never()).insertNoteDwtableItem(any(NoteDwtableItem.class));
+        verify(noteDwtableItemMapper, never()).updateNoteDwtableItem(any(NoteDwtableItem.class));
+    }
+
+    /** U1 场景 3b：赋值非法表 id（目标表不存在）→ 失败清单拒绝，零写入 */
+    @Test
+    void import_pendingLink_invalidTargetTable_failsZeroWrites()
+    {
+        mockPendingLinkScenario();
+
+        byte[] bytes = singleSheetBytes(
+                new String[] {"record_id", "名称", "关联_文本", "关联_ID"},
+                Collections.singletonList(new String[] {"1", "a", "B记录", "100"}));
+
+        ServiceException ex = assertThrows(ServiceException.class,
+                () -> runImport(bytes, paramsJson(bytes, null, null, null, null, null, null,
+                        "[{\"headerName\":\"关联\",\"targetTableId\":999,\"action\":\"link\"}]")));
+        assertTrue(ex.getMessage().contains("关联"));
+        assertTrue(ex.getMessage().contains("目标表不存在"));
+        verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
+        verify(noteColumnMapper, never()).insertNoteColumn(any(NoteColumn.class));
+        verify(noteDwtableItemMapper, never()).insertNoteDwtableItems(anyList());
+    }
+
+    /** U1 场景 4：目标表已有同名配对列（R4 防重）→ 拒绝整表零写入（提示改裸名） */
+    @Test
+    void import_pendingLink_targetTableHasPairedColumn_rejectsZeroWrites()
+    {
+        // 目标表(80)已有"关联的双向链接"列 → R4 防重触发
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class))).thenAnswer(inv -> {
+            NoteColumn query = inv.getArgument(0);
+            if (RELATED_TABLE_ID.equals(query.getDwtableId()))
+            {
+                return new ArrayList<>(Collections.singletonList(relatedColumn(502L, "关联的双向链接")));
+            }
+            return new ArrayList<>(Collections.singletonList(column(101L, "名称", 1L, null, 0L)));
+        });
+        mockRelatedTable(relatedTable("被关联表", NOTE_ID));
+
+        byte[] bytes = singleSheetBytes(
+                new String[] {"record_id", "名称", "关联_文本", "关联_ID"},
+                Collections.singletonList(new String[] {"1", "a", "B记录", "100"}));
+
+        ServiceException ex = assertThrows(ServiceException.class,
+                () -> runImport(bytes, paramsJson(bytes, null, null, null, null, null, null,
+                        "[{\"headerName\":\"关联\",\"targetTableId\":80,\"action\":\"link\"}]")));
+        assertTrue(ex.getMessage().contains("目标表已存在名为“关联”或“关联的双向链接”的列"));
+        assertTrue(ex.getMessage().contains("请修改 Excel 表头裸名"));
+        verify(noteRecordMapper, never()).insertNoteRecord(any(NoteRecord.class));
+        verify(noteColumnMapper, never()).insertNoteColumn(any(NoteColumn.class));
+        verify(noteDwtableItemMapper, never()).insertNoteDwtableItems(anyList());
+        verify(noteDwtableItemMapper, never()).insertNoteDwtableItem(any(NoteDwtableItem.class));
+    }
+
+    /** U1 场景 5：只有 `X_文本` 或只有 `X_ID` → 现状文本列（不识别 pending） */
+    @Test
+    void precheck_pendingLink_singleHeader_notRecognized()
+    {
+        when(noteColumnMapper.selectNoteColumnList(any(NoteColumn.class)))
+                .thenReturn(new ArrayList<>(Collections.singletonList(column(101L, "名称", 1L, null, 0L))));
+
+        // 只有 `关联_文本`：维持现状（新建文本列候选）
+        byte[] textOnly = singleSheetBytes(
+                new String[] {"record_id", "名称", "关联_文本"},
+                Collections.singletonList(new String[] {"1", "a", "B记录"}));
+        ExcelImportPrecheckResult textResult =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(textOnly), USER_ID);
+        assertTrue(textResult.getPendingLinkColumns().isEmpty());
+        assertFalse(textResult.isHasBlockingIssues());
+        assertEquals(Collections.singletonList("关联_文本"),
+                textResult.getReplaceImpact().getNewColumnNames());
+
+        // 只有 `关联_ID`：同样维持现状
+        byte[] idOnly = singleSheetBytes(
+                new String[] {"record_id", "名称", "关联_ID"},
+                Collections.singletonList(new String[] {"1", "a", "100"}));
+        ExcelImportPrecheckResult idResult =
+                precheckService.precheck(NOTE_ID, DWTABLE_ID, xlsxFile(idOnly), USER_ID);
+        assertTrue(idResult.getPendingLinkColumns().isEmpty());
+        assertFalse(idResult.isHasBlockingIssues());
+        assertEquals(Collections.singletonList("关联_ID"),
+                idResult.getReplaceImpact().getNewColumnNames());
     }
 }

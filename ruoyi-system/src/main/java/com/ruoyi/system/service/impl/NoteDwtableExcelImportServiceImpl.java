@@ -48,12 +48,14 @@ import com.ruoyi.system.domain.dto.ExcelImportAgentResult;
 import com.ruoyi.system.domain.dto.ExcelImportParams;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.AmbiguityItem;
+import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.CandidateTable;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.DefaultValueFill;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.FileFingerprint;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.LinkFailure;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.MissingParam;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.MissName;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.NewOption;
+import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.PendingLinkColumn;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.RecordCandidate;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.ReplaceImpact;
 import com.ruoyi.system.domain.dto.ExcelImportPrecheckResult.DeletedColumnInfo;
@@ -74,6 +76,7 @@ import com.ruoyi.system.service.INoteDwtableExcelImportService;
 import com.ruoyi.system.service.INoteRecordService;
 import com.ruoyi.system.service.impl.ExcelColumnMatcher.ColumnMapping;
 import com.ruoyi.system.service.impl.ExcelColumnMatcher.HeaderEntry;
+import com.ruoyi.system.service.impl.ExcelColumnMatcher.PendingLinkPair;
 import com.ruoyi.system.service.impl.ExcelColumnMatcher.SheetSelection;
 import com.ruoyi.system.service.impl.ExcelWorkbookReader.ParsedSheet;
 import com.ruoyi.system.service.impl.ExcelWorkbookReader.RowData;
@@ -306,6 +309,34 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         MultipartFile file = readUploadedFile(filePath);
         // 同请求内预检即导入：文件指纹天然一致，无需两阶段回传
         ExcelImportPrecheckResult precheck = precheck(noteId, dwtableId, file, userId);
+
+        // U1（R5）：agent 无法交互弹框——待建双向链接列（`X_文本`+`X_ID` 成对未匹配）无法
+        // 赋值目标表，转链接失败清单（文案固定）零写入，请用户改走界面导入
+        if (!precheck.getPendingLinkColumns().isEmpty())
+        {
+            List<LinkFailure> pendingFailures = new ArrayList<>(precheck.getPendingLinkColumns().size());
+            for (PendingLinkColumn pending : precheck.getPendingLinkColumns())
+            {
+                if (pending == null)
+                {
+                    continue;
+                }
+                LinkFailure failure = new LinkFailure();
+                failure.setColumnName(pending.getHeaderName());
+                failure.setEntryText(pending.getTextHeader() + "+" + pending.getIdHeader());
+                failure.setReason("缺少目标表参数，无法自动建立双向链接列，请改走界面导入");
+                pendingFailures.add(failure);
+            }
+            ExcelImportAgentResult result = new ExcelImportAgentResult();
+            result.setSuccess(false);
+            result.setLinkFailures(pendingFailures);
+            result.setMessage("导入未执行（零写入）：有 " + pendingFailures.size()
+                    + " 个待建双向链接列（表头 `X_文本`+`X_ID` 成对但目标表缺少该列），"
+                    + "缺少目标表参数，无法自动建立双向链接列，请改走界面导入");
+            log.info("[EXCEL-AGENT] 待建链接列拒绝导入 noteId={}, dwtableId={}, userId={}, pendingLinkColumns={}",
+                    noteId, dwtableId, userId, pendingFailures.size());
+            return result;
+        }
 
         // U3/U4（R8/R10）：21/25 列链接解析失败为强失败（无法补参覆盖）→ 结构化清单返回，零写入。
         // 清单与界面预检共用 DTO（单元格定位/原因/容错命中说明），修正指引按失败类型区分
@@ -672,6 +703,9 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         result.setFileFingerprint(fp);
         result.setIgnoredSheets(new ArrayList<>(selection.getIgnoredSheetNames()));
         appendSkippedHeaders(result, mapping, noteId, dwtableId);
+        // U1（R2）：待建双向链接列收集——`X_文本`+`X_ID` 成对未匹配表头（matcher 第三遍判定），
+        // 附候选目标表全列表（库内全部 note_dwtable，前端下拉渲染）
+        appendPendingLinkColumns(result, mapping);
         // U5 互指声明集（预检口径）：kept 21 列逐行解析目标，入链重指向影响面分类消费
         Map<Long, List<Set<Long>>> declaredTargetsByColumnId =
                 analyzeColumns(result, noteId, dwtableId, userId, selection.getRows(), columns, mapping);
@@ -679,17 +713,19 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         // U5（R12 裁决）+ U6：入链重指向预检分析——名称回退歧义进链接失败清单（与缺参并列
         // 阻断，确认前零写入）；重指向/单元格级清空影响面进 ReplaceImpact（呈现口径）
         analyzeInboundRepoint(result, noteId, dwtableId, selection, columns, mapping, declaredTargetsByColumnId);
-        // U3（R8）：链接失败清单与缺参清单并列阻断（21 列强失败，确认前零写入）
+        // U3（R8）：链接失败清单与缺参清单并列阻断（21 列强失败，确认前零写入）；
+        // U1（R2）：存在 pending 且确认请求未带对应 assignment → 阻断（预检时必然未完成赋值）
         result.setHasBlockingIssues(!result.getMissingParams().isEmpty()
                 || !result.getAmbiguityItems().isEmpty()
-                || !result.getLinkFailures().isEmpty());
+                || !result.getLinkFailures().isEmpty()
+                || !result.getPendingLinkColumns().isEmpty());
 
         log.info("[EXCEL-PRECHECK] 预检完成 noteId={}, dwtableId={}, userId={}, totalRows={}, missingParams={}, "
-                        + "ambiguityItems={}, linkFailures={}, replaceImpact{{}行/{}删列/{}新列/{}重指向列/{}清空条目/{}取消隐藏}, "
+                        + "ambiguityItems={}, linkFailures={}, pendingLinkColumns={}, replaceImpact{{}行/{}删列/{}新列/{}重指向列/{}清空条目/{}取消隐藏}, "
                         + "defaultValueFills={}, newOptions={}, symmetricWriteImpact={}, ignoredSheets={}, skippedHeaders={}",
                 noteId, dwtableId, userId, selection.getRows().size(),
                 result.getMissingParams().size(), result.getAmbiguityItems().size(),
-                result.getLinkFailures().size(),
+                result.getLinkFailures().size(), result.getPendingLinkColumns().size(),
                 result.getReplaceImpact().getDeletedRowCount(), result.getReplaceImpact().getDeletedColumns().size(),
                 result.getReplaceImpact().getNewColumnNames().size(),
                 result.getReplaceImpact().getRepointedLinkColumns().size(),
@@ -1567,21 +1603,56 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     /**
      * 忽略提示 + 跳过表头清单；后端日志记录跳过列名与原因（不含单元格值，R25/R7）。
      * 替换式语义：未匹配表头（{@link HeaderEntry#isUnmatched()}）为新建列候选，
-     * 进 replaceImpact.newColumnNames，不进 skippedHeaders。
+     * 进 replaceImpact.newColumnNames，不进 skippedHeaders；待建链接列形态表头
+     * （U1）进独立的 pendingLinkColumns 分组，同样不进 skippedHeaders。
      */
     private static void appendSkippedHeaders(ExcelImportPrecheckResult result, ColumnMapping mapping,
             Long noteId, Long dwtableId)
     {
         for (HeaderEntry entry : mapping.getSkippedEntries())
         {
-            if (entry.isUnmatched())
+            if (entry.isUnmatched() || entry.isPendingLinkHeader())
             {
-                // 新建列候选（replaceImpact 已汇总），不算跳过
+                // 新建列候选（replaceImpact 已汇总）/ 待建链接列（pendingLinkColumns 已汇总），不算跳过
                 continue;
             }
             result.getSkippedHeaders().add(new SkippedHeader(entry.getHeaderName(), entry.getReason()));
             log.info("[EXCEL-PRECHECK] 跳过表头 noteId={}, dwtableId={}, headerName={}, reason={}",
                     noteId, dwtableId, entry.getHeaderName(), entry.getReason());
+        }
+    }
+
+    /**
+     * 待建双向链接列收集（U1/R1/R2）：matcher 判定的成对未匹配表头（`X_文本`+`X_ID`）
+     * 组装为 {@link PendingLinkColumn} 分组（裸名、两表头、建议配对列名、候选目标表）。
+     * 候选表原样返回库内全部 note_dwtable（delFlag=0，R2——归属/同笔记校验在确认请求
+     * 消费 assignments 时执行，对齐既有 21 列 R23 先例）。
+     */
+    private void appendPendingLinkColumns(ExcelImportPrecheckResult result, ColumnMapping mapping)
+    {
+        List<PendingLinkPair> pairs = mapping.getPendingLinkPairs();
+        if (pairs.isEmpty())
+        {
+            return;
+        }
+        List<CandidateTable> candidates = new ArrayList<>();
+        for (NoteDwtable table : noteDwtableMapper.selectNoteDwtableList(new NoteDwtable()))
+        {
+            if (table == null || table.getId() == null)
+            {
+                continue;
+            }
+            candidates.add(new CandidateTable(table.getId(), table.getName() == null ? "" : table.getName()));
+        }
+        for (PendingLinkPair pair : pairs)
+        {
+            PendingLinkColumn pending = new PendingLinkColumn();
+            pending.setHeaderName(pair.getBareName());
+            pending.setTextHeader(pair.getTextHeaderName());
+            pending.setIdHeader(pair.getIdHeaderName());
+            pending.setSuggestedPairedName(pair.getBareName() + "的双向链接");
+            pending.setCandidateTables(candidates);
+            result.getPendingLinkColumns().add(pending);
         }
     }
 
@@ -1675,8 +1746,11 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         {
             NoteColumn column = entry.getColumn();
             if (column == null || column.getType() == null
-                    || column.getType() != ExcelColumnMatcher.TYPE_DOUBLE_LINK)
+                    || column.getType() != ExcelColumnMatcher.TYPE_DOUBLE_LINK
+                    || column.getId() == null)
             {
+                // U1：待建链接列（虚拟 21 列）无既有 id 与 back_field_id（建列后回填），
+                // 新列无既有配对列可收集，跳过（parseBackFieldId 严格语义不适用于虚拟列）
                 continue;
             }
             Long pairId = parseBackFieldId(column);
@@ -1921,6 +1995,11 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         {
             params.setRelationSelections(new ArrayList<ExcelImportParams.RelationSelection>());
         }
+        // U1：待建链接列赋值显式 null 归一为空集合（旧调用不带此参数 → pending 非空即阻断）
+        if (params.getLinkColumnAssignments() == null)
+        {
+            params.setLinkColumnAssignments(new ArrayList<ExcelImportParams.LinkColumnAssignment>());
+        }
         // 单段条目数上限：params 可达 10MB，防超大 columnValues/relationSelections 造成下游 CPU 放大
         if (params.getColumnValues().size() > PARAM_ENTRIES_LIMIT)
         {
@@ -1930,6 +2009,11 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         if (params.getRelationSelections().size() > PARAM_ENTRIES_LIMIT)
         {
             throw new ServiceException("导入参数条目数超限（relationSelections 超过 " + PARAM_ENTRIES_LIMIT
+                    + " 条），请重新预检");
+        }
+        if (params.getLinkColumnAssignments().size() > PARAM_ENTRIES_LIMIT)
+        {
+            throw new ServiceException("导入参数条目数超限（linkColumnAssignments 超过 " + PARAM_ENTRIES_LIMIT
                     + " 条），请重新预检");
         }
         return params;
@@ -1971,6 +2055,33 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         ColumnMapping mapping = ExcelColumnMatcher.mapColumns(selection.getHeaders(), columns);
         List<RowData> rows = selection.getRows();
         int rowCount = rows.size();
+
+        // ===== U1（R3）：待建双向链接列——消费确认请求的 assignments =====
+        // link 项构造虚拟 21 列并重绑表头（`X_文本`→值来源、`X_ID`→ID 锚点），使后续值路径
+        // （resolveDoubleLinkCell 的 ID 优先+名称回退）与对称写回原样工作；skip 项回落现状
+        // 两个文本列（新建 pendingColumns）；存在 pending 但缺对应 assignment → 阻断（兼容
+        // 缺省：旧调用不带 linkColumnAssignments 时 pending 非空即拒绝，行为等同缺参）
+        List<PendingLinkBuild> pendingLinkBuilds = new ArrayList<>();
+        List<PendingLinkPair> skippedPendingLinks = resolvePendingLinkAssignments(noteId, dwtableId, userId,
+                columns, mapping, params, pendingLinkBuilds);
+        if (!pendingLinkBuilds.isEmpty())
+        {
+            Map<String, NoteColumn> linkColumnsByBareName = new LinkedHashMap<>();
+            for (PendingLinkBuild build : pendingLinkBuilds)
+            {
+                linkColumnsByBareName.put(build.bareName, build.sourceColumn);
+            }
+            mapping = ExcelColumnMatcher.rebindPendingLinks(mapping, linkColumnsByBareName);
+        }
+        // 虚拟 21 列集合（身份索引：21 列分析段 back_field_id 延后回填的识别基础）
+        Set<NoteColumn> pendingVirtualColumns = Collections.newSetFromMap(new IdentityHashMap<NoteColumn, Boolean>());
+        Map<NoteColumn, PendingLinkBuild> pendingBuildByColumn =
+                new IdentityHashMap<NoteColumn, PendingLinkBuild>();
+        for (PendingLinkBuild build : pendingLinkBuilds)
+        {
+            pendingVirtualColumns.add(build.sourceColumn);
+            pendingBuildByColumn.put(build.sourceColumn, build);
+        }
 
         // ===== 替换式分类 =====
         // 补参列名校验用全列索引（与现状一致）
@@ -2020,21 +2131,16 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         List<PendingColumn> pendingColumns = new ArrayList<>();
         for (HeaderEntry entry : mapping.getUnmatchedEntries())
         {
-            NoteColumn pending = new NoteColumn();
-            pending.setName(entry.getHeaderName());
-            pending.setType(1L);
-            pending.setDwtableId(dwtableId);
-            pending.setIsShow(0L);
-            String[] values = new String[rowCount];
-            for (int r = 0; r < rowCount; r++)
-            {
-                values[r] = mapping.cellText(rows.get(r), entry.getHeaderIndex()).trim();
-            }
-            PendingColumn pendingColumn = new PendingColumn();
-            pendingColumn.column = pending;
-            pendingColumn.headerIndex = entry.getHeaderIndex();
-            pendingColumn.values = values;
-            pendingColumns.add(pendingColumn);
+            pendingColumns.add(newPendingTextColumn(entry.getHeaderName(), entry.getHeaderIndex(),
+                    dwtableId, mapping, rows, rowCount));
+        }
+        // U1：skip 的待建链接列 → 按现状两个文本列（`X_文本`/`X_ID` 各自建列，值来源不变）
+        for (PendingLinkPair pair : skippedPendingLinks)
+        {
+            pendingColumns.add(newPendingTextColumn(pair.getTextHeaderName(), pair.getTextHeaderIndex(),
+                    dwtableId, mapping, rows, rowCount));
+            pendingColumns.add(newPendingTextColumn(pair.getIdHeaderName(), pair.getIdHeaderIndex(),
+                    dwtableId, mapping, rows, rowCount));
         }
 
         // unhide 取消隐藏列 = kept 中的隐藏列
@@ -2134,12 +2240,17 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                 LinkTableContext context = linkTableContext(column, noteId, userId, contextByTableId);
                 LinkColumnAnalysis analysis = new LinkColumnAnalysis();
                 analysis.context = context;
-                analysis.backFieldId = parseBackFieldId(column);
+                // U1：待建链接列（虚拟 21 列）的 back_field_id 建列后才有（事务段 (f2) 回填，
+                // 解析期不参与互指校验/对称编排）；既有列维持原语义解析
+                boolean pendingVirtual = pendingVirtualColumns.contains(column);
+                analysis.backFieldId = pendingVirtual ? null : parseBackFieldId(column);
                 if (type == ExcelColumnMatcher.TYPE_DOUBLE_LINK)
                 {
                     // U3：21 列 ID 优先逐行解析（与预检同款）。失败即漂移拒绝——预检已将
                     // 链接失败列为阻断项，此处触发必为预检-导入间隙的数据变化或绕过预检的
-                    // 直调（fail-fast 于任何写入之前，整表零写入）
+                    // 直调（fail-fast 于任何写入之前，整表零写入）。
+                    // U1：虚拟列例外——预检期不知道目标表、未做过值解析，赋值后首次解析失败
+                    // 属用户输入问题（值与目标表不匹配），用专门文案指引修正
                     int idHeaderIndex = mapping.linkIdHeaderIndex(column);
                     List<String> candidates = candidateNameList(context);
                     for (int r = 0; r < rowCount; r++)
@@ -2152,6 +2263,13 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                         if (!cell.failures.isEmpty())
                         {
                             LinkEntryFailure failure = cell.failures.get(0);
+                            if (pendingVirtual)
+                            {
+                                throw new ServiceException("待建双向链接列“" + columnName + "”第 "
+                                        + rows.get(r).getRowNumber() + " 行的链接条目“"
+                                        + sanitizeInline(failure.entryText) + "”解析失败（" + failure.reason
+                                        + "），请修正 Excel 中的链接名称或 _ID 后重试，或在预检弹框更换目标表");
+                            }
                             throw driftException("关联列“" + columnName + "”第 "
                                     + rows.get(r).getRowNumber() + " 行的链接条目“"
                                     + sanitizeInline(failure.entryText) + "”解析失败（" + failure.reason + "）");
@@ -2281,6 +2399,8 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         plan.participants.addAll(participants);
         plan.newOptionsByColumnId = newOptionsByColumnId;
         plan.pendingColumns.addAll(pendingColumns);
+        // U1：待建双向链接列计划项（事务段 (f2) 按原生 21 语义建列并回填坐标）
+        plan.pendingLinkColumns.addAll(pendingLinkBuilds);
         plan.deletedColumns.addAll(deletedColumns);
         plan.unhideColumns.addAll(unhideColumns);
         plan.survivingColumnIds.addAll(referencedIds);
@@ -2303,6 +2423,13 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                 if (link)
                 {
                     LinkColumnAnalysis analysis = linkAnalysisByColumn.get(column);
+                    // U1：待建链接列（虚拟 21 列）的 item/对称明细登记到计划项——columnId/
+                    // linkColumnId/backFieldId 建列后回填（事务段 (f2) 按 insert 回填的坐标定位）
+                    PendingLinkBuild pendingBuild = pendingBuildByColumn.get(column);
+                    if (pendingBuild != null)
+                    {
+                        pendingBuild.sourceItems.add(item);
+                    }
                     // U3：21 列用分析段的双轨解析产物（ID 优先 + 名称回退）；18 列走补参优先解析
                     List<NoteRecord> resolved = type == ExcelColumnMatcher.TYPE_DOUBLE_LINK
                             ? analysis.recordsPerRow.get(r)
@@ -2322,6 +2449,10 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
                             symmetric.relatedTableId = analysis.context.getTable().getId();
                             symmetric.records = resolved;
                             rowPlan.symmetricLinks.add(symmetric);
+                            if (pendingBuild != null)
+                            {
+                                pendingBuild.symmetricLinks.add(symmetric);
+                            }
                         }
                     }
                     else
@@ -2380,6 +2511,11 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             {
                 continue;
             }
+            if (column.getId() == null)
+            {
+                // U1：待建链接列（虚拟 21 列）无既有 id——新列无旧条目，互指声明集不适用
+                continue;
+            }
             LinkColumnAnalysis analysis = linkAnalysisByColumn.get(column);
             if (analysis == null)
             {
@@ -2404,6 +2540,175 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         // ===== 重算编排清单（KTD8，替换式扩展） =====
         buildRecomputeTargets(plan, columns, headerIndexByColumn);
         return plan;
+    }
+
+    // ==================== U1：待建双向链接列（assignments 消费 + 事务段建列） ====================
+
+    /**
+     * 消费确认请求的待建链接列赋值（U1/R2/R3/R4，非事务前置段 fail-fast 于任何写入之前）：
+     * <ul>
+     *   <li>存在 pending 但请求未带对应 assignment → 阻断（兼容缺省：旧调用不带
+     *       linkColumnAssignments 时 pending 非空即拒绝，行为等同缺参）；</li>
+     *   <li>action=skip → 该列回 {@code skippedPendingLinks}，按现状两个文本列处理；</li>
+     *   <li>action=link → 目标表校验（存在 + 与本表同 noteId + 归属，对齐既有 21 列 R23
+     *       先例）+ R4 防重（本表已有名为 X 的列或本次将新建同名文本列 / 目标表已有名为
+     *       X 或 "X 的双向链接" 的列 → 拒绝整表零写入，提示改裸名）→ 构造虚拟 21 列
+     *       （property 先带 table_id 供值解析上下文；back 字段建列后互写回填）。</li>
+     * </ul>
+     *
+     * @param pendingLinkBuilds 出参：action=link 项的建列计划（虚拟 21 列 + 目标表信息）
+     * @return action=skip 的成对表头（按现状两个文本列处理）
+     */
+    private List<PendingLinkPair> resolvePendingLinkAssignments(Long noteId, Long dwtableId, Long userId,
+            List<NoteColumn> columns, ColumnMapping mapping, ExcelImportParams params,
+            List<PendingLinkBuild> pendingLinkBuilds)
+    {
+        List<PendingLinkPair> pairs = mapping.getPendingLinkPairs();
+        if (pairs.isEmpty())
+        {
+            return Collections.emptyList();
+        }
+        // assignment 按裸名索引（重复 headerName 取首个，与 matcher 同名表头取首个的口径一致）
+        Map<String, ExcelImportParams.LinkColumnAssignment> assignmentByHeader = new LinkedHashMap<>();
+        for (ExcelImportParams.LinkColumnAssignment assignment : params.getLinkColumnAssignments())
+        {
+            if (assignment == null || assignment.getHeaderName() == null
+                    || assignment.getHeaderName().trim().isEmpty())
+            {
+                throw new ServiceException("导入参数中的待建链接列赋值缺少表头名，请重新预检");
+            }
+            assignmentByHeader.putIfAbsent(assignment.getHeaderName().trim(), assignment);
+        }
+        // R4 第一道：本次将新建文本列名集（unmatched 表头 + skip 项两表头——建 X 列时防同名）
+        Set<String> newColumnNames = new HashSet<>();
+        for (HeaderEntry entry : mapping.getUnmatchedEntries())
+        {
+            newColumnNames.add(entry.getHeaderName());
+        }
+        List<PendingLinkPair> skipped = new ArrayList<>();
+        for (PendingLinkPair pair : pairs)
+        {
+            String bare = pair.getBareName();
+            ExcelImportParams.LinkColumnAssignment assignment = assignmentByHeader.get(bare);
+            if (assignment == null)
+            {
+                // R2：存在 pending 且请求未带对应 assignment → 阻断（零写入）
+                throw new ServiceException("待建双向链接列“" + bare + "”缺少赋值（表头 " + pair.getTextHeaderName()
+                        + " + " + pair.getIdHeaderName() + " 成对出现），请在预检弹框选择目标表或跳过后重试");
+            }
+            String action = assignment.getAction() == null ? "" : assignment.getAction().trim();
+            if (ExcelImportParams.LINK_ACTION_SKIP.equals(action))
+            {
+                newColumnNames.add(pair.getTextHeaderName());
+                newColumnNames.add(pair.getIdHeaderName());
+                skipped.add(pair);
+                continue;
+            }
+            if (!ExcelImportParams.LINK_ACTION_LINK.equals(action))
+            {
+                throw new ServiceException("待建双向链接列“" + bare + "”的赋值动作非法（" + action
+                        + "，须为 link 或 skip），请重新预检");
+            }
+            Long targetTableId = assignment.getTargetTableId();
+            if (targetTableId == null)
+            {
+                throw new ServiceException("待建双向链接列“" + bare + "”缺少目标表 id，请重新预检");
+            }
+            // 目标表校验（对齐既有 21 列 R23：存在 + 同 noteId + 归属，admin 通行）
+            NoteDwtable targetTable = noteDwtableMapper.selectNoteDwtableById(targetTableId);
+            if (targetTable == null)
+            {
+                throw new ServiceException("待建双向链接列“" + bare + "”的目标表不存在，请重新预检");
+            }
+            if (!noteId.equals(targetTable.getNoteId()))
+            {
+                throw new ServiceException("待建双向链接列“" + bare + "”的目标表不在当前笔记内，请重新预检");
+            }
+            try
+            {
+                agentOwnershipChecker.checkDwtableOwnership(targetTableId, userId);
+            }
+            catch (ServiceException e)
+            {
+                throw new ServiceException("待建双向链接列“" + bare + "”的目标表归属校验失败：" + e.getMessage());
+            }
+            // R4 防重：本表已有名为 X 的列 / 本次将新建同名文本列 → 拒绝（本表要建 X 列）
+            for (NoteColumn column : columns)
+            {
+                if (column != null && bare.equals(column.getName() == null ? "" : column.getName().trim()))
+                {
+                    throw new ServiceException("本表已存在名为“" + bare + "”的列，无法建立双向链接列，"
+                            + "请修改 Excel 表头裸名后重试");
+                }
+            }
+            if (newColumnNames.contains(bare))
+            {
+                throw new ServiceException("本次导入将新建名为“" + bare + "”的文本列，与待建双向链接列同名冲突，"
+                        + "请修改 Excel 表头裸名后重试");
+            }
+            // R4 防重：目标表已有名为 X 或 "X 的双向链接" 的列 → 拒绝（提示改裸名，整表零写入）
+            String pairedName = bare + "的双向链接";
+            NoteColumn targetQuery = new NoteColumn();
+            targetQuery.setDwtableId(targetTableId);
+            for (NoteColumn targetColumn : noteColumnMapper.selectNoteColumnList(targetQuery))
+            {
+                if (targetColumn == null)
+                {
+                    continue;
+                }
+                String targetName = targetColumn.getName() == null ? "" : targetColumn.getName().trim();
+                if (bare.equals(targetName) || pairedName.equals(targetName))
+                {
+                    throw new ServiceException("目标表已存在名为“" + bare + "”或“" + pairedName
+                            + "”的列，无法建立双向链接列，请修改 Excel 表头裸名后重试");
+                }
+            }
+            // 构造虚拟 21 列（id 由事务段 insert 回填；property 先带 multiple/table_id 供
+            // 值解析上下文与归属校验消费，back_field_id/back_field_name 建列后按原生语义互写）
+            NoteColumn virtual = new NoteColumn();
+            virtual.setName(bare);
+            virtual.setType(ExcelColumnMatcher.TYPE_DOUBLE_LINK);
+            virtual.setDwtableId(dwtableId);
+            virtual.setIsShow(0L);
+            JSONObject property = new JSONObject();
+            property.put("multiple", true);
+            property.put("table_id", targetTableId);
+            virtual.setProperty(property.toJSONString());
+            PendingLinkBuild build = new PendingLinkBuild();
+            build.bareName = bare;
+            build.sourceColumn = virtual;
+            build.targetTableId = targetTableId;
+            build.targetTableName = targetTable.getName() == null ? "" : targetTable.getName();
+            build.pairedName = pairedName;
+            build.textHeaderIndex = pair.getTextHeaderIndex();
+            build.idHeaderIndex = pair.getIdHeaderIndex();
+            pendingLinkBuilds.add(build);
+        }
+        return skipped;
+    }
+
+    /**
+     * 新建纯文本列的计划项（unmatched 表头与 U1 skip 项共用）：type=1、isShow=0、
+     * 逐行预解析值（trim），事务段 insert 后组装 items。
+     */
+    private static PendingColumn newPendingTextColumn(String headerName, int headerIndex, Long dwtableId,
+            ColumnMapping mapping, List<RowData> rows, int rowCount)
+    {
+        NoteColumn pending = new NoteColumn();
+        pending.setName(headerName);
+        pending.setType(1L);
+        pending.setDwtableId(dwtableId);
+        pending.setIsShow(0L);
+        String[] values = new String[rowCount];
+        for (int r = 0; r < rowCount; r++)
+        {
+            values[r] = mapping.cellText(rows.get(r), headerIndex).trim();
+        }
+        PendingColumn pendingColumn = new PendingColumn();
+        pendingColumn.column = pending;
+        pendingColumn.headerIndex = headerIndex;
+        pendingColumn.values = values;
+        return pendingColumn;
     }
 
     /**
@@ -3024,6 +3329,13 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         // (f) 落库新建列（type=1，sort 递增，id 回填供 items 组装）
         createPendingColumns(plan);
 
+        // (f2) U1/R3：落库待建双向链接列（原生 21 创建语义：本表 X 列 + 目标表配对列 +
+        //      property 互写 back_field_id/back_field_name/table_id/table_name/multiple +
+        //      目标表既有记录补空 item；本表记录在替换式导入下已全删重建、值 items 由 (h)
+        //      写入段建立）+ 回填导入计划的虚拟列坐标（items 的 columnId/linkColumnId、
+        //      对称写回 backFieldId）——建列先于值 items 组装/对称写回消费
+        createPendingLinkColumns(plan);
+
         // (g) 取消隐藏（Excel 出现同名列即取消隐藏导数据）
         unhideColumns(plan);
 
@@ -3141,6 +3453,11 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         }
         for (NoteColumn participant : plan.participants)
         {
+            // U1：待建链接列（虚拟 21 列）尚无 id——事务段 (f2) 建列，跳过存在性校验
+            if (participant != null && participant.getId() == null)
+            {
+                continue;
+            }
             if (participant == null || !currentColumnIds.contains(participant.getId()))
             {
                 throw driftException("列“" + (participant == null || participant.getName() == null
@@ -3229,6 +3546,136 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             pending.column.setSort(Long.valueOf(++maxSort));
             noteColumnMapper.insertNoteColumn(pending.column);
         }
+    }
+
+    /**
+     * 落库待建双向链接列（U1/R3，事务段 (f2)），与原生 {@code NoteColumnServiceImpl}
+     * 的 21 分支同语义（L162-209，不抽公共方法——原生入口是控制器 vo 路径，超出范围）：
+     * <ol>
+     *   <li>R4 复查（TOCTOU 窗口防御，对齐 verifyReplacePreconditions 精神）：窗口内并发
+     *       建列产生重名 → 拒绝（提示改裸名），整表零写入（事务回滚）；</li>
+     *   <li>本表 X 列 insert（type=21、isShow=0、sort=本表 next sort，property 先带
+     *       multiple/table_id/table_name——back 字段互写后 update）；</li>
+     *   <li>目标表配对列 insert（名自动派生"X 的双向链接"、type=21、isShow=0、
+     *       sort=目标表 next sort，property 带 back_field_id=本表 X 列 id/back_field_name=X）；</li>
+     *   <li>本表 X 列 property 互写回填（back_field_id=配对列 id/back_field_name=配对列名）后 update；</li>
+     *   <li>目标表既有记录逐条补配对列空 item（value=""——本表记录已随替换全删重建，
+     *       值 items 由写入段建立，无需本表侧补空）；</li>
+     *   <li>回填导入计划的虚拟列坐标：sourceItems 的 columnId/linkColumnId、
+     *       symmetricLinks 的 backFieldId（供 (h) 写入段组装与 (h2) 对称写回消费）。</li>
+     * </ol>
+     */
+    private void createPendingLinkColumns(ImportPlan plan)
+    {
+        if (plan.pendingLinkColumns.isEmpty())
+        {
+            return;
+        }
+        NoteDwtable thisTable = noteDwtableMapper.selectNoteDwtableById(plan.dwtableId);
+        String thisTableName = thisTable == null || thisTable.getName() == null ? "" : thisTable.getName();
+        for (PendingLinkBuild build : plan.pendingLinkColumns)
+        {
+            String bare = build.bareName;
+            // R4 复查：窗口内并发建列重名 → 拒绝（本表将建 X 列；目标表将建配对列——自引用时同表）
+            if (selectColumnNames(plan.dwtableId).contains(bare))
+            {
+                throw new ServiceException("本表已存在名为“" + bare + "”的列，无法建立双向链接列，"
+                        + "请修改 Excel 表头裸名后重试");
+            }
+            Set<String> targetNames = selectColumnNames(build.targetTableId);
+            if (targetNames.contains(bare) || targetNames.contains(build.pairedName))
+            {
+                throw new ServiceException("目标表已存在名为“" + bare + "”或“" + build.pairedName
+                        + "”的列，无法建立双向链接列，请修改 Excel 表头裸名后重试");
+            }
+            // 1) 本表 X 列 insert（property 先带 multiple/table_id/table_name，back 字段互写后 update）
+            NoteColumn source = build.sourceColumn;
+            JSONObject sourceProp = new JSONObject();
+            sourceProp.put("multiple", true);
+            sourceProp.put("table_id", build.targetTableId);
+            sourceProp.put("table_name", build.targetTableName);
+            source.setProperty(sourceProp.toJSONString());
+            source.setSort(nextSort(plan.dwtableId));
+            noteColumnMapper.insertNoteColumn(source);
+            // 2) 目标表配对列 insert（isShow=0 隐藏、property 带 back_field_id=本表 X 列 id）
+            NoteColumn pairedColumn = new NoteColumn();
+            pairedColumn.setDwtableId(build.targetTableId);
+            pairedColumn.setIsShow(0L);
+            pairedColumn.setName(build.pairedName);
+            pairedColumn.setType(ExcelColumnMatcher.TYPE_DOUBLE_LINK);
+            JSONObject pairedProp = new JSONObject();
+            pairedProp.put("multiple", true);
+            pairedProp.put("table_id", plan.dwtableId);
+            pairedProp.put("table_name", thisTableName);
+            pairedProp.put("back_field_id", source.getId());
+            pairedProp.put("back_field_name", bare);
+            pairedColumn.setProperty(pairedProp.toJSONString());
+            pairedColumn.setSort(nextSort(build.targetTableId));
+            noteColumnMapper.insertNoteColumn(pairedColumn);
+            // 3) 本表 X 列 property 互写回填（back_field_id=配对列 id/back_field_name=配对列名）后 update
+            sourceProp.put("back_field_id", pairedColumn.getId());
+            sourceProp.put("back_field_name", build.pairedName);
+            source.setProperty(sourceProp.toJSONString());
+            noteColumnMapper.updateNoteColumn(source);
+            // 4) 回填导入计划的虚拟列坐标（items 的 columnId/linkColumnId、对称写回 backFieldId）
+            for (NoteDwtableItem item : build.sourceItems)
+            {
+                item.setColumnId(source.getId());
+                item.setLinkColumnId(pairedColumn.getId());
+            }
+            for (SymmetricLink link : build.symmetricLinks)
+            {
+                link.backFieldId = pairedColumn.getId();
+            }
+            // 5) 目标表既有记录补配对列空 item（原生语义两侧补空；本表侧已由替换全删+写入段覆盖）
+            NoteRecordVo linkRecordQuery = new NoteRecordVo();
+            linkRecordQuery.setDwtableId(build.targetTableId);
+            List<NoteRecord> targetRecords = noteRecordMapper.selectNoteRecordList(linkRecordQuery);
+            for (NoteRecord targetRecord : targetRecords)
+            {
+                NoteDwtableItem item = new NoteDwtableItem();
+                item.setRecordId(targetRecord.getId());
+                item.setDwtId(build.targetTableId);
+                item.setColumnId(pairedColumn.getId());
+                item.setValue("");
+                noteDwtableItemMapper.insertNoteDwtableItem(item);
+            }
+        }
+    }
+
+    /** 查表内全部列名（trim 后非空者；U1 R4 复查用） */
+    private Set<String> selectColumnNames(Long dwtableId)
+    {
+        NoteColumn query = new NoteColumn();
+        query.setDwtableId(dwtableId);
+        Set<String> names = new HashSet<>();
+        for (NoteColumn current : noteColumnMapper.selectNoteColumnList(query))
+        {
+            if (current != null && current.getName() != null && !current.getName().trim().isEmpty())
+            {
+                names.add(current.getName().trim());
+            }
+        }
+        return names;
+    }
+
+    /**
+     * 表内下一个可用 sort（max+1，与 {@code NoteColumnServiceImpl#getNextSort} 同语义，
+     * U1 建列的两侧 sort 派生用）。
+     */
+    private Long nextSort(Long dwtableId)
+    {
+        NoteColumn query = new NoteColumn();
+        query.setDwtableId(dwtableId);
+        long maxSort = 0L;
+        for (NoteColumn current : noteColumnMapper.selectNoteColumnList(query))
+        {
+            if (current != null && current.getSort() != null)
+            {
+                maxSort = Math.max(maxSort, current.getSort().longValue());
+            }
+        }
+        return Long.valueOf(maxSort + 1L);
     }
 
     /**
@@ -4508,6 +4955,9 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         /** 待新建列（未匹配表头 → 纯文本列，未落库无 id；事务段 insert 回填 id 后组装 items） */
         final List<PendingColumn> pendingColumns = new ArrayList<>();
 
+        /** U1：待建双向链接列计划项（虚拟 21 列 + 赋值目标表；事务段 (f2) 按原生 21 语义建列） */
+        final List<PendingLinkBuild> pendingLinkColumns = new ArrayList<>();
+
         /** 将删除的现有列（不被任何表头引用的非系统列；21 列级联删配对列） */
         final List<NoteColumn> deletedColumns = new ArrayList<>();
 
@@ -4578,6 +5028,41 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         int headerIndex;
 
         String[] values;
+    }
+
+    /**
+     * 待建双向链接列计划项（U1/R3）：`X_文本`+`X_ID` 成对未匹配表头 + 确认请求赋值的目标表。
+     * sourceColumn 为虚拟 21 列（计划期承载值解析产物；事务段 (f2) 按原生 21 语义建列——
+     * 本表 X 列 + 目标表配对列 + property 互写，insert 回填 id 后回填 sourceItems 坐标）。
+     */
+    static final class PendingLinkBuild
+    {
+        /** 裸名 X（本表待建 21 列名） */
+        String bareName;
+
+        /** 虚拟 21 列（本表 X 列载体：值解析期承载映射/解析产物，事务段 insert 回填 id） */
+        NoteColumn sourceColumn;
+
+        /** 赋值的目标表 id（配对列所在表） */
+        Long targetTableId;
+
+        /** 目标表名（本表列 property 互写的 table_name） */
+        String targetTableName;
+
+        /** 配对列名（自动派生"X 的双向链接"） */
+        String pairedName;
+
+        /** `X_文本` 表头下标（信息性） */
+        int textHeaderIndex;
+
+        /** `X_ID` 表头下标（信息性） */
+        int idHeaderIndex;
+
+        /** 本表 X 列逐行 items（建列后回填 columnId=本表 X 列 id / linkColumnId=配对列 id） */
+        final List<NoteDwtableItem> sourceItems = new ArrayList<>();
+
+        /** 本列逐行对称写回明细（建列后回填 backFieldId=配对列 id） */
+        final List<SymmetricLink> symmetricLinks = new ArrayList<>();
     }
 
     /** 单行写入计划 */
