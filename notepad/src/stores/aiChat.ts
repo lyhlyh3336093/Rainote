@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia';
 import { message } from 'ant-design-vue';
 import { useCookie } from '../hooks';
+import { API_BASE } from '../config/api';
 import {
     listSessions as fetchListSessions,
     createSession as fetchCreateSession,
@@ -177,9 +178,7 @@ export const useAiChatStore = defineStore('aiChat', {
             // 获取认证token和baseUrl（与useFetch拦截器相同的逻辑）
             const cookie = useCookie;
             const token = cookie.get('token');
-            const baseUrl = window.location.origin === 'http://www.rainote.cn'
-                ? 'http://www.rainote.cn:8089'
-                : '/api';
+            const baseUrl = API_BASE;
 
             try {
                 const response = await fetch(`${baseUrl}/ai/chat`, {

@@ -1,0 +1,33 @@
+# =====================================================================
+# 生产环境配置（阿里云 ECS 单机部署）
+# 启动方式：java -jar ruoyi-admin.jar --spring.profiles.active=druid,prod
+# 敏感值（数据库/Redis/token 密钥/GLM key）经 systemd Environment 注入，
+# 不写死在本文件（本文件会随仓库与 jar 分发）。
+# =====================================================================
+ruoyi:
+    # 上传根目录（Linux 路径，与本地开发 D:/ruoyi/uploadPath 区分）
+    profile: /home/ruoyi/uploadPath
+
+spring:
+    datasource:
+        druid:
+            master:
+                # 仅本机可达；账号密码经环境变量注入（RAINOTE_DB_USER/RAINOTE_DB_PASSWORD）
+                url: jdbc:mysql://127.0.0.1:3306/ry-vue?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=false&serverTimezone=GMT%2B8
+                username: ${RAINOTE_DB_USER:root}
+                password: ${RAINOTE_DB_PASSWORD:}
+            # 生产关闭 druid 监控台（弱口令面不暴露）
+            statViewServlet:
+                enabled: false
+    redis:
+        host: 127.0.0.1
+        port: 6379
+        password: ${RAINOTE_REDIS_PASSWORD:}
+
+# token 密钥生产强制环境变量注入（覆盖 application.yml 的开发默认值）
+token:
+    secret: ${RAINOTE_TOKEN_SECRET:}
+
+# 生产关闭 swagger
+swagger:
+    enabled: false

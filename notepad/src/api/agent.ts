@@ -7,12 +7,11 @@
  * 可设置 Authorization header，无需 event-source-polyfill。
  */
 import useCookie from '../hooks/useCookie';
+import { API_BASE } from '../config/api';
 
 const cookie = useCookie;
 
-const baseUrl = window.location.origin === 'http://www.rainote.cn'
-    ? 'http://www.rainote.cn:8089'
-    : '/api';
+const baseUrl = API_BASE;
 
 /** 后端统一响应格式 */
 export interface ApiResult<T = any> {

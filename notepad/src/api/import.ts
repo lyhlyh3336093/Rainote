@@ -9,11 +9,10 @@
  * 参考实现：notepad/src/api/export.ts（baseUrl 与 token 模式）。
  */
 import useCookie from '../hooks/useCookie';
+import { API_BASE } from '../config/api';
 
 const cookie = useCookie;
-const baseUrl = window.location.origin === 'http://www.rainote.cn'
-    ? 'http://www.rainote.cn:8089'
-    : '/api';
+const baseUrl = API_BASE;
 
 export interface ImportDwtableParams {
     /** 多维表格归属笔记 id（NoteDwtable.noteId） */

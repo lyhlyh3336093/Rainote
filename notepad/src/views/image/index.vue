@@ -52,6 +52,7 @@ import { defineComponent, reactive, ref, toRefs, computed, } from "vue";
 import { message, UploadChangeParam } from "ant-design-vue";
 import { useStore } from "../../stores/editor";
 import { useCookie } from "../../hooks";
+import { API_BASE } from "../../config/api";
 import { directive } from "v-viewer";
 import "viewerjs/dist/viewer.css";
 import { storeToRefs } from "pinia";
@@ -135,9 +136,7 @@ export default defineComponent({
     const headers = {
       Authorization: token,
     };
-    const action = window.location.origin ===
-      "http://www.rainote.cn" ?
-      "http://www.rainote.cn:8089/common/upload" : '/api/common/upload'
+    const action = `${API_BASE}/common/upload`
     return {
       cache,
       action,

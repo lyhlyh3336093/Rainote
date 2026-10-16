@@ -3,17 +3,14 @@ import { createFetch } from '@vueuse/core';
 import { message } from 'ant-design-vue';
 import useCookie from "./useCookie";
 import { whiteList } from '../router/authenticate.js';
+import { API_BASE } from '../config/api';
 
 const cookie = useCookie
 const errCodeList: any = [500];
 
 export default createFetch({
-    baseUrl: window.location.origin ===
-        "http://www.rainote.cn" ?
-        "http://www.rainote.cn:8089" : '/api',
-    // baseUrl: window.location.origin ===
-    // "http://www.rainote.cn" ?
-    //     "http://www.rainote.cn:8089" : 'http://127.0.0.1:8090',
+    // 统一走 '/api'（dev 由 vite 代理、生产由 nginx 反代，见 src/config/api.ts）
+    baseUrl: API_BASE,
     options: {
         timeout: 50000,
         afterFetch(ctx): any {
