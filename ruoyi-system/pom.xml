@@ -52,6 +52,13 @@
             <scope>test</scope>
         </dependency>
 
+        <!-- H2 内存数据库（备份导出测试：MySQL 兼容模式跑真导出） -->
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <scope>test</scope>
+        </dependency>
+
     </dependencies>
 
     <build>

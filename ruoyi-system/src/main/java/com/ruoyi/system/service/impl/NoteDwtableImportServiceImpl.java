@@ -29,6 +29,7 @@ import com.ruoyi.system.mapper.NoteDwtableItemMapper;
 import com.ruoyi.system.mapper.NoteDwtableMapper;
 import com.ruoyi.system.mapper.NoteRecordMapper;
 import com.ruoyi.system.mapper.NoteViewMapper;
+import com.ruoyi.system.service.BackupLockUtil;
 import com.ruoyi.system.service.INoteDwtableImportService;
 
 /**
@@ -97,6 +98,8 @@ public class NoteDwtableImportServiceImpl implements INoteDwtableImportService
     @Transactional(rollbackFor = Exception.class)
     public int importData(Long noteId, Long dwtableId, List<ParsedInsert> parsedList, Long userId)
     {
+        // 备份/还原写锁检查：进行中则拒绝导入（KTD3）
+        BackupLockUtil.checkNotLocked();
         if (dwtableId == null)
         {
             throw new ServiceException("导入失败：目标多维表格 id 为空");
@@ -167,6 +170,8 @@ public class NoteDwtableImportServiceImpl implements INoteDwtableImportService
             String sql,
             Long userId)
     {
+        // 备份/还原写锁检查：进行中则拒绝导入（KTD3）
+        BackupLockUtil.checkNotLocked();
         // KTD6：agent 路径自带归属校验（admin 通行）+ noteId 匹配断言
         agentOwnershipChecker.checkDwtableOwnership(dwtableId, userId);
         NoteDwtable dwtable = noteDwtableMapper.selectNoteDwtableById(dwtableId);

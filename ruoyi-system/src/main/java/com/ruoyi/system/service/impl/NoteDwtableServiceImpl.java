@@ -17,6 +17,7 @@ import com.ruoyi.system.mapper.*;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import com.ruoyi.system.domain.NoteDwtable;
+import com.ruoyi.system.service.BackupLockUtil;
 import com.ruoyi.system.service.INoteDwtableService;
 
 /**
@@ -127,6 +128,8 @@ public class NoteDwtableServiceImpl implements INoteDwtableService
     @Override
     public int insertNoteDwtable(@AgentParam(value = "dwtable", type = "object", objectType = "NoteDwtable", allowedFields = {"name", "noteId", "url"}, description = "多维表信息") NoteDwtable noteDwtable)
     {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
         if(noteDwtable.getDelFlag()==null){
             noteDwtable.setDelFlag(0L);
         }
@@ -146,6 +149,8 @@ public class NoteDwtableServiceImpl implements INoteDwtableService
     @Override
     public int updateNoteDwtable(@AgentParam(value = "dwtable", type = "object", objectType = "NoteDwtable", allowedFields = {"id", "name", "noteId", "url"}, description = "多维表信息") NoteDwtable noteDwtable)
     {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
         // 归属校验：通过 dwtableId → noteId → note.auth 链校验
         ownershipChecker.checkDwtableOwnership(noteDwtable.getId(), SecurityUtils.getUserId());
         return noteDwtableMapper.updateNoteDwtable(noteDwtable);
@@ -161,6 +166,8 @@ public class NoteDwtableServiceImpl implements INoteDwtableService
     @Override
     public int deleteNoteDwtableByIds(@AgentParam(value = "ids", type = "list", description = "多维表ID列表") String[] ids)
     {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
         // 归属校验：批量删除前逐个校验归属
         Long currentUserId = SecurityUtils.getUserId();
         for (String id : ids)
@@ -180,6 +187,8 @@ public class NoteDwtableServiceImpl implements INoteDwtableService
     @Override
     public int deleteNoteDwtableById(@AgentParam(value = "id", type = "long", description = "多维表ID") Long id)
     {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
         // 归属校验：防止越权删除他人多维表
         ownershipChecker.checkDwtableOwnership(id, SecurityUtils.getUserId());
         //删除数据表操作是级联删除，删除对象包括数据表下的视图view，记录record，表格数据item

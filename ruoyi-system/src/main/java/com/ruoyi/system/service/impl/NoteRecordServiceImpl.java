@@ -21,6 +21,7 @@ import org.springframework.expression.ExpressionParser;
 import org.springframework.expression.spel.standard.SpelExpressionParser;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import com.ruoyi.system.service.BackupLockUtil;
 import com.ruoyi.system.service.INoteRecordService;
 
 /**
@@ -92,6 +93,8 @@ public class NoteRecordServiceImpl implements INoteRecordService
     public int insertNoteRecord(@AgentParam(value = "record", type = "object", objectType = "NoteRecord", allowedFields = {"name", "property", "linkRecordId", "sort", "dwtableId", "viewId", "linkName"}, description = "记录数据") NoteRecord noteRecord,
                                 @AgentParam(value = "items", type = "list", description = "记录条目列表") List<Map<String, Object>> items)
     {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
         if(noteRecord.getDwtableId()==null){
             // dwtableId 缺失时尝试从 viewId 反查，但 viewId 也为 null 时抛明确错误而非 NPE
             if (noteRecord.getViewId() == null)
@@ -149,6 +152,8 @@ public class NoteRecordServiceImpl implements INoteRecordService
     @AgentOperation(name = "record.update", description = "更新记录")
     public int updateNoteRecord(@AgentParam(value = "record", type = "object", objectType = "NoteRecord", allowedFields = {"id", "name", "property", "linkRecordId", "sort", "dwtableId", "viewId", "linkName"}, description = "记录数据") NoteRecord noteRecord,
                                 @AgentParam(value = "items", type = "list", description = "记录条目列表") List<Map<String, Object>> items) {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
         // 归属校验：通过 recordId → dwtableId → noteId → note.auth 链校验
         ownershipChecker.checkRecordOwnership(noteRecord.getId(), SecurityUtils.getUserId());
         NoteDwtableItem queryParam = new NoteDwtableItem();
@@ -800,6 +805,8 @@ public class NoteRecordServiceImpl implements INoteRecordService
     @AgentOperation(name = "record.batchDelete", destructive = true, permissionKey = "system:record:remove", description = "批量删除记录")
     public int deleteNoteRecordByIds(@AgentParam(value = "ids", type = "list", description = "记录ID列表") String[] ids)
     {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
         // 归属校验：批量删除前逐个校验归属
         Long currentUserId = SecurityUtils.getUserId();
         for (String id : ids)
@@ -819,6 +826,8 @@ public class NoteRecordServiceImpl implements INoteRecordService
     @AgentOperation(name = "record.delete", destructive = true, permissionKey = "system:record:remove", description = "删除单个记录")
     public int deleteNoteRecordById(@AgentParam(value = "id", type = "long", description = "记录ID") Long id)
     {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
         // 归属校验：防止越权删除他人记录
         ownershipChecker.checkRecordOwnership(id, SecurityUtils.getUserId());
         //删除记录是级联操作，需要先删除记录里面的数据信息

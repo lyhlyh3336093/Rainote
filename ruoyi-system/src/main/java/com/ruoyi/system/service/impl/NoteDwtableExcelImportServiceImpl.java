@@ -72,6 +72,7 @@ import com.ruoyi.system.mapper.NoteNotelinkMapper;
 import com.ruoyi.system.mapper.NoteNoteMapper;
 import com.ruoyi.system.mapper.NoteRecordMapper;
 import com.ruoyi.system.mapper.NoteViewMapper;
+import com.ruoyi.system.service.BackupLockUtil;
 import com.ruoyi.system.service.INoteDwtableExcelImportService;
 import com.ruoyi.system.service.INoteRecordService;
 import com.ruoyi.system.service.impl.ExcelColumnMatcher.ColumnMapping;
@@ -304,6 +305,8 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
             Map<String, Object> columnValues,
             Long userId)
     {
+        // 备份/还原写锁检查：进行中则拒绝导入（KTD3）
+        BackupLockUtil.checkNotLocked();
         // KTD6 对称：agent 路径自带归属校验（admin 通行）+ noteId 匹配断言
         agentOwnershipChecker.checkDwtableOwnership(dwtableId, userId);
         MultipartFile file = readUploadedFile(filePath);
@@ -1942,6 +1945,8 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     @Override
     public int importExcelData(Long noteId, Long dwtableId, MultipartFile file, String paramsJson, Long userId)
     {
+        // 备份/还原写锁检查：进行中则拒绝导入（KTD3）
+        BackupLockUtil.checkNotLocked();
         // 防御性复查（Controller 已做归属校验 + noteId↔dwtableId 断言，照 importData 模式）
         NoteDwtable dwtable = noteDwtableMapper.selectNoteDwtableById(dwtableId);
         if (dwtable == null || !noteId.equals(dwtable.getNoteId()))
