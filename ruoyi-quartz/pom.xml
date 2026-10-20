@@ -35,6 +35,12 @@
             <artifactId>ruoyi-common</artifactId>
         </dependency>
 
+        <!-- 系统模块（RestoreSchedulerHook 接口反转：接口在 ruoyi-system，实现落本模块） -->
+        <dependency>
+            <groupId>com.ruoyi</groupId>
+            <artifactId>ruoyi-system</artifactId>
+        </dependency>
+
     </dependencies>
 
 </project>
