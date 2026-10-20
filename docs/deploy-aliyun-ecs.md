@@ -133,6 +133,12 @@ mysql -uroot -p -e "SELECT COUNT(*) FROM \`ry-vue\`.note_note;"   # 迁移验证
 
 ```bash
 mkdir -p /home/ruoyi/app /home/ruoyi/web /home/ruoyi/uploadPath /home/ruoyi/logs /home/ruoyi/backup
+
+# 备份落盘目录权限收口（应用内整机备份包/还原前快照写此目录，含全库数据与密码哈希；
+# 第 8 节 cron 每日 dump 亦落此目录）。rainote.service 以 root 运行即属主 root，
+# 若后续改用专用账户运行服务，chown 需同步改为该账户
+chown root:root /home/ruoyi/backup && chmod 700 /home/ruoyi/backup
+
 mv /root/ruoyi-admin.jar /home/ruoyi/app/
 unzip -o /root/uploadPath.zip -d /home/ruoyi/uploadPath/   # 既有附件就位
 mv /root/dist /home/ruoyi/web/dist
@@ -176,6 +182,11 @@ tail -50 /home/ruoyi/logs/sys-*.log             # 无 ERROR 即可
 
 ```bash
 cat > /etc/nginx/conf.d/rainote.conf <<'EOF'
+# 还原上传通道限速（U3）：按客户端 IP 1r/s + burst 5——匿名可达的大请求体是资源耗尽
+# 放大器，后端 @RateLimiter 晚于 multipart 落盘生效，nginx 层先限速收口。
+# 此指令须在 http 上下文（conf.d/*.conf 被含入 http 块，置文件顶部即可）。
+limit_req_zone $binary_remote_addr zone=restore_limit:10m rate=1r/s;
+
 server {
     listen 80;
     server_name www.rainote.cn rainote.cn;
@@ -191,9 +202,30 @@ server {
     ssl_certificate_key /home/ruoyi/cert/www.rainote.cn/www.rainote.cn.key;
     ssl_protocols TLSv1.2 TLSv1.3;
 
-    client_max_body_size 25m;
+    # 上传上限 512m：还原上传通道需要（整机备份包可达数百 MB，与后端 multipart
+    # 512MB 配套）。server 块内影响全部路由——/common/upload 等已鉴权通道同享
+    # 此上限属滥用面非漏洞（Risks 已评估）。
+    client_max_body_size 512m;
+
+    # 真实客户端 IP 说明：当前直连形态 $remote_addr 即真实客户端 IP，无需额外配置。
+    # 接入 SLB/CDN 后必须收口（否则 XFF 可伪造，污染 limit_req 键与后端 @RateLimiter
+    # IP 计数），届时取消注释并填可信代理网段：
+    # set_real_ip_from <SLB 回源网段>;
+    # real_ip_header X-Forwarded-For;
+    # real_ip_recursive on;
 
     gzip_static on;
+
+    # 数据还原上传通道（U3）：限速后转发，须置于 /api/ 之前（最长前缀优先匹配）
+    location /api/system/note/restore {
+        limit_req zone=restore_limit burst=5 nodelay;
+        proxy_pass http://127.0.0.1:8090/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 1800s;    # 还原执行含还原前快照生成，可达分钟级
+    }
 
     location /api/ {
         proxy_pass http://127.0.0.1:8090/;
