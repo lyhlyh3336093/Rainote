@@ -22,7 +22,7 @@ tags: [dwtable, sql-import, round-trip, hand-written-parser, zip-bomb, zip-slip,
 
 ## Context
 
-导出侧已有 `NoteDwtableSqlRenderer` + `SqlValueEscaper` + `SqlIdentifierSanitizer` 产出 `.sql`/分片 `.zip`；导入侧此前为空白，用户只能手工重建数据。本学习来自 `feat/multitable-import` 分支完整实施并通过评审（11 位评审员、256 项测试、评审修复 commit `b89bd540`）的对称导入管线：`.sql/.zip` 上传 → 手写 INSERT 解析 → 单事务批量写入。计划文档 `docs/plans/2026-08-25-001-feat-multitable-import-plan.md` 经 6-persona 文档评审确认核心约束：MyBatis 全程 `#{}` 参数化、列名区分大小写 + trim、PII（单元格值）不进日志 (session history)。
+导出侧已有 `NoteDwtableSqlRenderer` + `SqlValueEscaper` + `SqlIdentifierSanitizer` 产出 `.sql`/分片 `.zip`；导入侧此前为空白，用户只能手工重建数据（整机备份还原落地前的唯一场景；整机迁移另有备份还原通道，见 Related）。本学习来自 `feat/multitable-import` 分支完整实施并通过评审（11 位评审员、256 项测试、评审修复 commit `b89bd540`）的对称导入管线：`.sql/.zip` 上传 → 手写 INSERT 解析 → 单事务批量写入。计划文档 `docs/plans/2026-08-25-001-feat-multitable-import-plan.md` 经 6-persona 文档评审确认核心约束：MyBatis 全程 `#{}` 参数化、列名区分大小写 + trim、PII（单元格值）不进日志 (session history)。
 
 核心设计边界：**导入端只承诺与导出端 round-trip，不承诺解析任意 SQL**——这一边界决定了所有技术选型（手写窄域解析器而非 JSqlParser、位置契约而非名字契约、宽松跳过而非严格校验）。
 
@@ -107,7 +107,8 @@ mapper 新增 `selectMaxSortByDwtableId`（`select max(sort) from note_record wh
 - **行数硬上限（已落地）**：`importData` 入口对 `parsedList.size()` 设 50,000 行上限，超限快速失败抛 ServiceException（分批导入提示）——超长事务/undo log/锁持有防御的显式护栏，不再仅依赖 100MB 解压上限间接约束。
 - **导入非幂等**：前端超时文案引导"确认结果"而非盲目重试（防重试双写）；`selectMaxSortByDwtableId` 读取-递增非原子，并发导入 sort 可能交错。
 - **双实现漂移**：导入服务重实现默认值后，`insertNoteRecord` 演进不会自动传导——需语义等价测试对冲。
-- **Agent 路径**（已注册 `dwtable.importSql`）：agent 执行器直调 service 绕过 HTTP 控制器，包装方法必须**自带** `@Transactional` 与归属校验 + noteId 匹配断言——关键陷阱是内部 `importData` 为同类自调用不经 Spring 代理，事务只能由外层 agent 入口方法的注解保证；`destructive=true` 因导入为非幂等批量追加（重试双写不可撤销）。限流/操作日志的 agent 路径对称防护仍待 rainote-agent 执行器补齐。
+- **Agent 路径**（已注册 `dwtable.importSql`）：agent 执行器直调 service 绕过 HTTP 控制器，包装方法必须**自带** `@Transactional` 与归属校验 + noteId 匹配断言——关键陷阱是内部 `importData` 为同类自调用不经 Spring 代理，事务只能由外层 agent 入口方法的注解保证；`destructive=true` 因导入为非幂等批量追加（重试双写不可撤销）。限流/操作日志的 agent 路径防护**已补齐（2026-10-21 核实）**：操作日志侧 agent 步骤审计落库含 result 字段（见 `docs/solutions/design-patterns/agent-result-message-channel.md`）；限流侧 agent 经 `AgentController` 会话级限流（userId 维度分钟/日双窗口）覆盖——粒度与 HTTP 路径的操作级 `@RateLimiter`（60s/10）不同，属会话级而非操作级。
+- **备份/还原写锁互斥（2026-10 新增）**：`importData` 与 `importSql` 入口均前置 `BackupLockUtil.checkNotLocked()`——整机备份/还原执行期间导入被拒绝（"系统备份/还原进行中"），防止备份包撕裂/还原窗口并发写；机制见 `docs/solutions/architecture-patterns/full-backup-restore-mechanism.md` 机制5。
 
 ## Why This Matters
 
@@ -139,7 +140,8 @@ INSERT INTO `note_dwtable_1` (`record_id`, `col_a`, `col_b`) VALUES (1, 'It''s a
 
 ## Related
 
-- `docs/solutions/design-patterns/sql-identifier-unicode-sanitization.md` —— 导出侧标识符净化三层策略；导入解析器的列名/反转义契约与之为 round-trip 对称（本文第 1、6 节的契约源）。该文档的"净化链"表述目前仅覆盖导出方向，导入侧闭环后宜更新。
+- `docs/solutions/design-patterns/sql-identifier-unicode-sanitization.md` —— 导出侧标识符净化三层策略；导入解析器的列名/反转义契约与之为 round-trip 对称（本文第 1、6 节的契约源）。
+- `docs/solutions/architecture-patterns/full-backup-restore-mechanism.md` —— 整机备份还原机制：同为手写 SQL 解析+净化域（其 RestoreSqlSanitizer 是词法级语句白名单，与本管线的窄域 INSERT 解析器对照）；导入入口的写锁互斥（本文 §6）为其机制5 消费者。SQL 导入是**单表数据往返**；整机迁移/损坏恢复场景由备份还原覆盖（两者互补）。
 - `docs/solutions/design-patterns/lookup-column-code-simplification-patterns.md` —— 其"已知局限"记录了 N+1 lookup 查询并建议批量 Mapper；本文第 4 节的导入路径采用**上下文预解析**缓解同类问题，形成模式对照（两条路线并存）。
 - `docs/solutions/architecture-patterns/lookup-column-dedupe-cascade-recompute.md` —— 其"已知局限 2：无事务边界"是缺事务的反面案例；本文第 3 节为同域正例（单事务批量写入）。
 - 计划文档 `docs/plans/2026-08-25-001-feat-multitable-import-plan.md`（KTD1-KTD6 决策与 Deferred 清单的权威来源）。

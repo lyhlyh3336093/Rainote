@@ -1,7 +1,7 @@
 ---
 title: "SQL 标识符 Unicode 净化器模式（三层净化策略）"
 date: 2026-08-07
-last_refreshed: 2026-08-28
+last_refreshed: 2026-10-21
 category: design-patterns
 module: ruoyi-system
 problem_type: design_pattern
@@ -258,7 +258,7 @@ assertEquals("`col1`", SqlIdentifierSanitizer.sanitize("", 1L));
 
 关键防御点：**第 4、5 组测试是回归测试**。修复前这些断言会全部失败（中文被替换为下划线），修复后全绿。任何未来的"重构"若误把 `\p{L}\p{N}` 退化回 `[A-Za-z0-9]`，这两组测试会立即报警。
 
-额外建议补充的测试（防御 SQL 注入）：
+额外建议补充的测试（防御 SQL 注入，**已全部落地**于 `SqlIdentifierSanitizerTest`）：
 
 ```java
 // 含引号、分号、注释符等真正危险字符 → 必须被替换，不能原样进入 SQL
@@ -270,7 +270,9 @@ assertEquals("`col__name`", SqlIdentifierSanitizer.sanitize("col--name", 1L));
 assertEquals("`col__x__name`", SqlIdentifierSanitizer.sanitize("col/*x*/name", 1L));
 ```
 
-这些用例验证"Unicode 白名单不降低安全性"——危险字符依然被第三层替换逻辑清除。
+这些用例验证"Unicode 白名单不降低安全性"——危险字符依然被第三层替换逻辑清除。（**已落地**：上述三条注入防御用例现存在于 `SqlIdentifierSanitizerTest`，连同完整测试矩阵约 80+ 断言持续运行。）
+
+**姊妹形态——词法级语句白名单（2026-10 新增）**：本模式是**字符级白名单**（标识符，信任边界内输入——用户自己的表名列名，best-effort 修复 + 反引号兜底，fail-open）。整机备份还原引入了 `RestoreSqlSanitizer`——**词法级语句白名单**（SQL 语句，不可信无签名输入——外部上传的备份包，形态不匹配即整体拒绝 + 解析产物重渲染执行，fail-closed）。哲学同源（白名单而非黑名单），但信任模型与失败语义相反：输入可信度越低，失败语义必须越严。分层选型见 [full-backup-restore-mechanism.md](../architecture-patterns/full-backup-restore-mechanism.md) 机制1。
 
 ## Related
 
