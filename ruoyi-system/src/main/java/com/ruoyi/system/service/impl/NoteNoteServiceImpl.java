@@ -433,7 +433,8 @@ public class NoteNoteServiceImpl implements INoteNoteService
     @Override
     public int saveAsNewNote(NoteNote noteNote)
     {
-
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
 
         //获取用户信息
         SysUser user = sysUserMapper.selectUserById(noteNote.getAuth());
@@ -509,6 +510,8 @@ public class NoteNoteServiceImpl implements INoteNoteService
 
     @Override
     public int updateFirstLogin(Long userId) {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
         sysUserMapper.updateFirstLogin(userId);
         return 0;
     }
@@ -680,6 +683,8 @@ public class NoteNoteServiceImpl implements INoteNoteService
     @Override
     @Transactional(rollbackFor = Exception.class)
     public int deleteNoteFromGarbageByIds(String[] ids) {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
 
         List<String> allIds = new ArrayList<>(Arrays.asList(ids));
         for (String id:
@@ -743,6 +748,8 @@ public class NoteNoteServiceImpl implements INoteNoteService
      */
     @Override
     public int cancelCollectionByIds(String id) {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
         return noteNoteMapper.cancelCollectionById(id);
     }
 
@@ -754,6 +761,8 @@ public class NoteNoteServiceImpl implements INoteNoteService
      */
     @Override
     public int collectionNoteByIds(String id) {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
         return noteNoteMapper.collectionNoteById(id);
     }
 
@@ -766,6 +775,8 @@ public class NoteNoteServiceImpl implements INoteNoteService
      */
     @Override
     public int setTemplate(String id) {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
         return noteNoteMapper.setTemplate(id);
     }
 
@@ -777,6 +788,8 @@ public class NoteNoteServiceImpl implements INoteNoteService
      */
     @Override
     public int removeTemplate(String id) {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
         return noteNoteMapper.removeTemplate(id);
     }
 
@@ -789,6 +802,8 @@ public class NoteNoteServiceImpl implements INoteNoteService
     @Override
     @Transactional(rollbackFor = Exception.class)
     public int recoverNoteNoteByIds(String[] ids) {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
 
         List<String> allIds = new ArrayList<>(Arrays.asList(ids));
         for(String id: ids){

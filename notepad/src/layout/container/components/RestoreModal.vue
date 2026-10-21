@@ -1,4 +1,5 @@
 <template>
+  <!-- 执行中防护：禁遮罩点击/ESC 关闭，执行中隐藏右上角关闭钮，防误关弹窗丢失还原进度 -->
   <a-modal
     v-model:open="state.visible"
     title="数据还原"
@@ -6,6 +7,9 @@
     :footer="null"
     destroyOnClose
     centered
+    :maskClosable="false"
+    :keyboard="false"
+    :closable="!state.executing"
   >
     <div class="restore-body">
       <!-- 第一步：选择备份包并校验（预览步 confirmed=false，不写库） -->
@@ -122,7 +126,8 @@ watch(() => props.open, (open) => {
   state.visible = open
 }, { immediate: true })
 watch(() => state.visible, (v) => {
-  if (!v) reset()
+  // 执行中不清状态（还原写库进行中），与 close()/resetToPick() 既有守卫对齐
+  if (!v && !state.executing) reset()
   emit('update:open', v)
 })
 

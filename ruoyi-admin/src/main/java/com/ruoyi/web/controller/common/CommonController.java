@@ -20,6 +20,7 @@ import com.ruoyi.common.utils.StringUtils;
 import com.ruoyi.common.utils.file.FileUploadUtils;
 import com.ruoyi.common.utils.file.FileUtils;
 import com.ruoyi.framework.config.ServerConfig;
+import com.ruoyi.system.service.BackupLockUtil;
 
 /**
  * 通用请求处理
@@ -75,6 +76,8 @@ public class CommonController
     @PostMapping("/upload")
     public AjaxResult uploadFile(MultipartFile file) throws Exception
     {
+        // 备份/还原写锁检查：进行中则拒绝写入 profile 上传目录（KTD3）
+        BackupLockUtil.checkNotLocked();
         try
         {
             // 上传文件路径
@@ -101,6 +104,8 @@ public class CommonController
     @PostMapping("/uploads")
     public AjaxResult uploadFiles(List<MultipartFile> files) throws Exception
     {
+        // 备份/还原写锁检查：进行中则拒绝写入 profile 上传目录（KTD3）
+        BackupLockUtil.checkNotLocked();
         try
         {
             // 上传文件路径

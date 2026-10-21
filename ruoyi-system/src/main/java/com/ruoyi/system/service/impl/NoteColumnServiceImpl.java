@@ -382,6 +382,8 @@ public class NoteColumnServiceImpl implements INoteColumnService
     @Override
     public int updateColumnDefault(Long columnId, String defaultValue, Long userId)
     {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
         // KTD6: 直更前归属校验不可绕过（admin 通行）
         agentOwnershipChecker.checkColumnOwnership(columnId, userId);
 
@@ -408,6 +410,8 @@ public class NoteColumnServiceImpl implements INoteColumnService
      */
     @Override
     public int updateSort(List<Map<String, Object>> sorts){
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
 
         int result = 1;
         // 收集受影响的 dwtableId（去重），用于排序后按表重算 name
@@ -514,6 +518,8 @@ public class NoteColumnServiceImpl implements INoteColumnService
     @Override
     public int deduplicate(Long columnId)
     {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
         NoteColumn column = noteColumnMapper.selectNoteColumnById(columnId);
         if (column == null || column.getType() != 26L || column.getProperty() == null)
         {

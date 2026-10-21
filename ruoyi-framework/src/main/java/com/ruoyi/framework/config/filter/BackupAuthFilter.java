@@ -20,7 +20,8 @@ import com.ruoyi.framework.web.service.TokenService;
  * <p>
  * Spring MVC 在处理器调用前已完成 multipart 请求体的解析落盘，@PreAuthorize/@RateLimiter
  * 均晚于 512MB 请求体到达——本 Filter 是唯一的 pre-body 防线：/system/** 路径下
- * 未携带有效 token 的 POST 请求且 Content-Length 超过 1MB 时直接拒绝（不做 multipart
+ * 未携带有效 token 的 POST 请求且 Content-Length 超过 1MB 或未知（chunked 传输
+ * 编码）时直接拒绝（不做 multipart
  * 解析），阻断匿名可达大请求体的资源耗尽放大面（KTD5）。已登录用户与小请求不受影响，
  * 由后续控制器层的鉴权注解与 userId==1 兜底判定接管。
  *
@@ -44,18 +45,23 @@ public class BackupAuthFilter implements Filter
     {
         HttpServletRequest httpRequest = (HttpServletRequest) request;
         HttpServletResponse httpResponse = (HttpServletResponse) response;
-        // 短路顺序：先判请求体大小（零成本），仅超限时才查 token（Redis 读）
-        if ("POST".equalsIgnoreCase(httpRequest.getMethod())
-                && httpRequest.getContentLengthLong() > MAX_ANONYMOUS_BODY_BYTES
-                && tokenService.getLoginUser(httpRequest) == null)
+        // 短路顺序：先判请求体大小（零成本），仅长度未知或超限时才查 token（Redis 读）
+        if ("POST".equalsIgnoreCase(httpRequest.getMethod()))
         {
-            // 413（Payload Too Large）：匿名过大会话请求直接拒绝，不进入后续过滤器链
-            httpResponse.setStatus(HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE);
-            httpResponse.setContentType(MediaType.APPLICATION_JSON_VALUE);
-            httpResponse.setCharacterEncoding("UTF-8");
-            httpResponse.getWriter().write(JSON.toJSONString(
-                    AjaxResult.error("未登录状态的过大上传请求已被拒绝，请先登录")));
-            return;
+            // Content-Length 未知（chunked 传输编码，返回 -1）视同超限 fail-closed：
+            // 浏览器/SPA 的 POST 与 multipart 上传必带 Content-Length，正常通道不受影响
+            long len = httpRequest.getContentLengthLong();
+            if ((len < 0 || len > MAX_ANONYMOUS_BODY_BYTES)
+                    && tokenService.getLoginUser(httpRequest) == null)
+            {
+                // 413（Payload Too Large）：匿名过大或无长度会话请求直接拒绝，不进入后续过滤器链
+                httpResponse.setStatus(HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE);
+                httpResponse.setContentType(MediaType.APPLICATION_JSON_VALUE);
+                httpResponse.setCharacterEncoding("UTF-8");
+                httpResponse.getWriter().write(JSON.toJSONString(
+                        AjaxResult.error("未登录状态的过大上传请求已被拒绝，请先登录")));
+                return;
+            }
         }
         chain.doFilter(request, response);
     }

@@ -66,7 +66,7 @@ class BackupRestoreAgentTest
     void tearDown()
     {
         // 兜底释放静态写锁，防止测试间泄漏
-        BackupRestoreServiceImpl.releaseLock();
+        BackupLockUtil.releaseLock();
         new RuoYiConfig().setProfile(originalProfile);
         new RuoYiConfig().setBackupPath(originalBackupPath);
     }
@@ -100,7 +100,7 @@ class BackupRestoreAgentTest
     @Test
     void importSqlShouldBeRejectedWhileBackupLockHeld() throws Exception
     {
-        assertTrue(BackupRestoreServiceImpl.tryAcquireBackupLock(), "应成功持有写锁");
+        assertTrue(BackupLockUtil.tryAcquireBackupLock(), "应成功持有写锁");
         try
         {
             // agent 导入命令（dwtable.importSql）首行 BackupLockUtil 检查被拒，
@@ -118,7 +118,7 @@ class BackupRestoreAgentTest
         }
         finally
         {
-            BackupRestoreServiceImpl.releaseLock();
+            BackupLockUtil.releaseLock();
         }
 
         // 锁释放后 agent 备份命令放行（消息含统计与引导）

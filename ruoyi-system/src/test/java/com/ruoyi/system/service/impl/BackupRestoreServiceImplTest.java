@@ -54,6 +54,7 @@ import com.ruoyi.common.core.domain.model.LoginUser;
 import com.ruoyi.common.exception.ServiceException;
 import com.ruoyi.system.domain.dto.ParsedInsert;
 import com.ruoyi.system.domain.dto.RestoreResult;
+import com.ruoyi.system.service.BackupLockUtil;
 import com.ruoyi.system.service.ISysConfigService;
 import com.ruoyi.system.service.ISysDictTypeService;
 import com.ruoyi.system.service.RestoreSchedulerHook;
@@ -132,9 +133,10 @@ class BackupRestoreServiceImplTest
     void tearDown()
     {
         // 兜底释放静态写锁，防止测试间泄漏
-        BackupRestoreServiceImpl.releaseLock();
-        // 复位三目录不可用标志与安全上下文，防止 U2 测试间泄漏
+        BackupLockUtil.releaseLock();
+        // 复位三目录不可用标志、还原不一致标志与安全上下文，防止测试间泄漏
         BackupRestoreServiceImpl.resetFileDirsUnavailable();
+        BackupRestoreServiceImpl.resetRestoreInconsistent();
         SecurityContextHolder.clearContext();
         new RuoYiConfig().setProfile(originalProfile);
         new RuoYiConfig().setBackupPath(originalBackupPath);
@@ -346,13 +348,13 @@ class BackupRestoreServiceImplTest
     {
         createSchema(rawDataSource);
 
-        assertTrue(BackupRestoreServiceImpl.tryAcquireBackupLock());
+        assertTrue(BackupLockUtil.tryAcquireBackupLock());
         ServiceException ex = assertThrows(ServiceException.class, () -> service.backup());
         assertEquals("系统备份/还原进行中，请稍后", ex.getMessage());
         assertFalse(Files.exists(backupDir.resolve("backup.zip")), "被拒的备份不应产出文件");
 
         // 锁释放后放行
-        BackupRestoreServiceImpl.releaseLock();
+        BackupLockUtil.releaseLock();
         File zip = service.backup();
         assertTrue(zip.exists());
     }
@@ -363,7 +365,7 @@ class BackupRestoreServiceImplTest
     void consumerChecks_lockedRejected_unlockedPassThrough() throws Exception
     {
         createSchema(rawDataSource);
-        assertTrue(BackupRestoreServiceImpl.tryAcquireBackupLock());
+        assertTrue(BackupLockUtil.tryAcquireBackupLock());
         try
         {
             // SQL 导入（UI/agent 双入口）
@@ -393,10 +395,25 @@ class BackupRestoreServiceImplTest
             ServiceException removeAllEx = assertThrows(ServiceException.class,
                     () -> noteService.removeAll());
             assertEquals("系统备份/还原进行中，请稍后", removeAllEx.getMessage());
+
+            // 笔记恢复（回收站还原入口；锁检查在方法首行，不触依赖字段）
+            ServiceException recoverEx = assertThrows(ServiceException.class,
+                    () -> noteService.recoverNoteNoteByIds(new String[] {"101"}));
+            assertEquals("系统备份/还原进行中，请稍后", recoverEx.getMessage());
+
+            // 记录排序 / 列排序入口（锁检查在方法首行，不触依赖字段）
+            NoteRecordServiceImpl recordService = new NoteRecordServiceImpl();
+            ServiceException recordSortEx = assertThrows(ServiceException.class,
+                    () -> recordService.updateSort(null, new ArrayList<>()));
+            assertEquals("系统备份/还原进行中，请稍后", recordSortEx.getMessage());
+            NoteColumnServiceImpl columnService = new NoteColumnServiceImpl();
+            ServiceException columnSortEx = assertThrows(ServiceException.class,
+                    () -> columnService.updateSort(new ArrayList<>()));
+            assertEquals("系统备份/还原进行中，请稍后", columnSortEx.getMessage());
         }
         finally
         {
-            BackupRestoreServiceImpl.releaseLock();
+            BackupLockUtil.releaseLock();
         }
 
         // 锁释放后放行：越过锁检查进入各方法自身的参数校验/鉴权逻辑
@@ -410,6 +427,14 @@ class BackupRestoreServiceImplTest
                 () -> noteService.removeAllData());
         assertNotEquals("系统备份/还原进行中，请稍后", removeAllPass.getMessage(),
                 "锁释放后应越过锁检查（无登录上下文时走到管理员校验抛获取用户异常）");
+
+        // 新植入的排序入口在锁释放后放行：空排序列表零依赖直达返回值，不再抛锁拒绝
+        NoteRecordServiceImpl recordService = new NoteRecordServiceImpl();
+        assertEquals(1, recordService.updateSort(null, new ArrayList<>()),
+                "锁释放后记录排序应放行");
+        NoteColumnServiceImpl columnService = new NoteColumnServiceImpl();
+        assertEquals(1, columnService.updateSort(new ArrayList<>()),
+                "锁释放后列排序应放行");
     }
 
     // ==================== U2 场景 1：正常还原（Covers AE1） ====================
@@ -507,7 +532,7 @@ class BackupRestoreServiceImplTest
         Mockito.verify(lastHook).pause();
         Mockito.verify(lastHook, Mockito.never()).reload();
         Mockito.verify(lastHook).resume();
-        assertFalse(BackupRestoreServiceImpl.isWriteLocked());
+        assertFalse(BackupLockUtil.isWriteLocked());
         assertTmpDirCleaned();
     }
 
@@ -565,6 +590,9 @@ class BackupRestoreServiceImplTest
             "INSERT INTO `SYS_USER`(`USER_ID`) VALUES('a'); --hidden",
             // 表不在 manifest 清单（QRTZ 前缀表被 U1 排除）
             "DROP TABLE `QRTZ_JOB_DETAILS`",
+            // P15 fail-closed 纵深：CREATE 表选项段的 REFERENCES / DATA DIRECTORY 伪装
+            "CREATE TABLE `SYS_USER` (`USER_ID` BIGINT) REFERENCES `OTHER_DB`.`T`",
+            "CREATE TABLE `SYS_USER` (`USER_ID` BIGINT) DATA DIRECTORY '/tmp/evil'",
         };
         for (String sql : malicious)
         {
@@ -780,7 +808,7 @@ class BackupRestoreServiceImplTest
         assertThrows(ServiceException.class, () -> failing.restore(toUpload(packageBytes), true));
         Mockito.verify(lastHook).pause();
         Mockito.verify(lastHook).resume();
-        assertFalse(BackupRestoreServiceImpl.isWriteLocked());
+        assertFalse(BackupLockUtil.isWriteLocked());
 
         // 启动清理：>24h 的解压临时目录删除、新鲜目录保留
         Path tmpRoot = Files.createDirectories(backupDir.resolve("tmp"));
@@ -820,7 +848,7 @@ class BackupRestoreServiceImplTest
         assertFalse(Files.exists(backupDir.resolve("snapshot.zip")));
         assertTrue(Files.exists(profileDir.resolve("upload/old-a.txt")), "文件不得被触碰");
         Mockito.verify(lastHook).resume();
-        assertFalse(BackupRestoreServiceImpl.isWriteLocked());
+        assertFalse(BackupLockUtil.isWriteLocked());
         assertTmpDirCleaned();
     }
 
@@ -841,7 +869,7 @@ class BackupRestoreServiceImplTest
                 () -> failing.restore(toUpload(packageBytes), true));
         assertTrue(ex.getMessage().contains("系统处于不一致状态"),
                 "回放失败必须终止并报不一致（不静默不递归）: " + ex.getMessage());
-        assertFalse(BackupRestoreServiceImpl.isWriteLocked());
+        assertFalse(BackupLockUtil.isWriteLocked());
         Mockito.verify(lastHook).resume();
     }
 
@@ -986,6 +1014,265 @@ class BackupRestoreServiceImplTest
         assertEquals("new-file", new String(Files.readAllBytes(profileDir.resolve("upload/new-file.txt"))),
                 "还原前旧目录应回到原位");
         assertFalse(Files.exists(profileDir.resolve("upload/old-a.txt")), "包内新目录被旧目录替换");
+    }
+
+    // ==================== 批次A修复补充场景 ====================
+
+    /**
+     * P1 自洽性：小值浮点导出无科学计数法（0.00048828125=2^-11 精确双进位，
+     * Double.toString 会产出 4.8828125E-4）→ RestoreSqlSanitizer 放行 → 重渲染可执行
+     * 的全链路文本断言（不经 H2 直执行）。
+     */
+    @Test
+    void backup_smallFloat_plainNotation_sanitizerRoundTrip() throws Exception
+    {
+        try (Connection conn = rawDataSource.getConnection(); Statement st = conn.createStatement())
+        {
+            st.execute("CREATE TABLE float_t (id BIGINT PRIMARY KEY, ratio DOUBLE)");
+            st.execute("INSERT INTO float_t VALUES (1, 0.00048828125)");
+            st.execute("INSERT INTO float_t VALUES (2, 5.0E-4)");
+        }
+        Map<String, byte[]> entries = readZip(service.backup());
+        String dataSql = new String(entries.get("data/FLOAT_T.sql"), StandardCharsets.UTF_8);
+
+        // formatValue 消除科学计数法：2^-11 为精确二进小数，toPlainString 应输出确定形态
+        assertTrue(dataSql.contains("0.00048828125"), "应输出普通小数记法: " + dataSql);
+        assertFalse(dataSql.contains("E-"), "小值浮点不得输出科学计数法: " + dataSql);
+        assertFalse(dataSql.contains("e-"), "小值浮点不得输出科学计数法: " + dataSql);
+
+        // 白名单放行 + 重渲染可执行（全链路文本断言）
+        List<RestoreSqlSanitizer.ParsedStatement> statements = new ArrayList<>();
+        RestoreSqlSanitizer.parseAndConsume("float_t.sql", new StringReader(dataSql),
+                java.util.Collections.singleton("float_t"), statements::add);
+        assertEquals(2, statements.size());
+        for (RestoreSqlSanitizer.ParsedStatement statement : statements)
+        {
+            assertEquals("FLOAT_T", statement.getTable());
+            String rendered = statement.render();
+            assertTrue(rendered.startsWith("INSERT INTO `FLOAT_T`(`ID`,`RATIO`) VALUES("),
+                    "重渲染应保持可执行形态: " + rendered);
+            assertFalse(rendered.contains("E-"), "重渲染不得引入科学计数法: " + rendered);
+        }
+        assertTrue(statements.get(0).render().contains("0.00048828125"),
+                "第一行应保留确定小数形态: " + statements.get(0).render());
+    }
+
+    /** P1：manifest 表清单与现库不一致（追加不存在表）拒绝且零写入 */
+    @Test
+    void restore_manifestGhostTable_rejectedZeroWrite() throws Exception
+    {
+        createRestoreSchema(rawDataSource);
+        insertRestoreData(rawDataSource);
+        byte[] packageBytes = backupToBytes();
+        Map<String, List<List<String>>> before = dumpAll(rawDataSource);
+
+        Map<String, byte[]> entries = zipEntries(packageBytes);
+        JSONObject manifest = JSONObject.parseObject(new String(entries.get("manifest.json"), StandardCharsets.UTF_8));
+        JSONObject ghost = new JSONObject();
+        ghost.put("name", "GHOST_TABLE");
+        ghost.put("rows", 0);
+        manifest.getJSONArray("tables").add(ghost);
+        entries.put("manifest.json", manifest.toJSONString().getBytes(StandardCharsets.UTF_8));
+
+        ServiceException ex = assertThrows(ServiceException.class,
+                () -> service.restore(toUpload(buildZip(entries)), true));
+        assertTrue(ex.getMessage().contains("表清单与现库不一致"), ex.getMessage());
+        assertEquals(before, dumpAll(rawDataSource), "拒绝路径零写入");
+        assertFalse(Files.exists(backupDir.resolve("snapshot.zip")), "拒绝路径不得生成快照");
+    }
+
+    /** P1：manifest 表清单含 QRTZ_ 保留前缀表拒绝且零写入（fail-closed） */
+    @Test
+    void restore_manifestQrtzTable_rejectedZeroWrite() throws Exception
+    {
+        createRestoreSchema(rawDataSource);
+        insertRestoreData(rawDataSource);
+        byte[] packageBytes = backupToBytes();
+        Map<String, List<List<String>>> before = dumpAll(rawDataSource);
+
+        Map<String, byte[]> entries = zipEntries(packageBytes);
+        JSONObject manifest = JSONObject.parseObject(new String(entries.get("manifest.json"), StandardCharsets.UTF_8));
+        JSONObject qrtz = new JSONObject();
+        qrtz.put("name", "qrtz_fired_triggers");
+        qrtz.put("rows", 0);
+        manifest.getJSONArray("tables").add(qrtz);
+        entries.put("manifest.json", manifest.toJSONString().getBytes(StandardCharsets.UTF_8));
+
+        ServiceException ex = assertThrows(ServiceException.class,
+                () -> service.restore(toUpload(buildZip(entries)), true));
+        assertTrue(ex.getMessage().contains("保留前缀表"), ex.getMessage());
+        assertEquals(before, dumpAll(rawDataSource), "拒绝路径零写入");
+        assertFalse(Files.exists(backupDir.resolve("snapshot.zip")), "拒绝路径不得生成快照");
+    }
+
+    /** P1/AE1：空库还原——非 QRTZ 表为零时跳过指纹校验，全量重建放行 */
+    @Test
+    void restore_emptyDatabase_skipsFingerprintAndRestores() throws Exception
+    {
+        createRestoreSchema(rawDataSource);
+        insertRestoreData(rawDataSource);
+        writeProfileFile("upload/x.txt", "x");
+        byte[] packageBytes = backupToBytes();
+        Map<String, List<List<String>>> backupPoint = dumpAll(rawDataSource);
+
+        // 空目标库（非 QRTZ 表为零）：免指纹校验放行全量重建
+        JdbcDataSource emptyDs = newH2DataSource();
+        BackupRestoreServiceImpl emptyService = buildRestoreService(new H2ShowCreateDataSource(emptyDs));
+        RestoreResult result = emptyService.restore(toUpload(packageBytes), true);
+
+        assertTrue(result.isExecuted(), "空库还原应放行");
+        assertEquals(3, result.getTableCount());
+        assertEquals(6, result.getRecordCount());
+        // 空库被重建为包内容；源库（备份来源）不受影响
+        try (Connection conn = emptyDs.getConnection(); Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM sys_user"))
+        {
+            assertTrue(rs.next());
+            assertEquals(2, rs.getInt(1), "空库应被重建为包内容");
+        }
+        assertEquals(backupPoint, dumpAll(rawDataSource), "源库不得受影响");
+    }
+
+    /** P1：reload 失败→回放成功→best-effort 重对齐（缓存重建 + reload 再次调用） */
+    @Test
+    void restore_reloadFailure_replaysThenResyncsCachesAndScheduler() throws Exception
+    {
+        createRestoreSchema(rawDataSource);
+        insertRestoreData(rawDataSource);
+        byte[] packageBytes = backupToBytes();
+        tamperCurrentData(rawDataSource);
+        Map<String, List<List<String>>> preRestore = dumpAll(rawDataSource);
+
+        BackupRestoreServiceImpl restoreService = buildRestoreService(new H2ShowCreateDataSource(rawDataSource));
+        // 首次 reload 抛（无效 cron 注入），重对齐的第二次 reload 放行
+        Mockito.doThrow(new RuntimeException("无效cron")).doNothing().when(lastHook).reload();
+        ServiceException ex = assertThrows(ServiceException.class,
+                () -> restoreService.restore(toUpload(packageBytes), true));
+        assertTrue(ex.getMessage().startsWith("还原失败：已回滚至还原前状态"), ex.getMessage());
+
+        // 回放成功 + 重对齐：缓存各重建两次、reload 被再次调用（共两次）
+        Mockito.verify(lastDictService, Mockito.times(2)).resetDictCache();
+        Mockito.verify(lastConfigService, Mockito.times(2)).resetConfigCache();
+        Mockito.verify(lastHook, Mockito.times(2)).reload();
+        Mockito.verify(lastHook).pause();
+        Mockito.verify(lastHook).resume();
+        assertFalse(BackupLockUtil.isWriteLocked());
+        assertEquals(preRestore, dumpAll(rawDataSource), "库应回放到还原前状态");
+        assertFalse(BackupRestoreServiceImpl.isRestoreInconsistent(), "回放成功不应置不一致标志");
+    }
+
+    /** P1：回放失败→标志置位→backup 被拒→snapshot 包走免指纹通道自愈→标志清除 */
+    @Test
+    void restore_replayFailure_snapshotSelfHealClearsFlag() throws Exception
+    {
+        createRestoreSchema(rawDataSource);
+        insertRestoreData(rawDataSource);
+        byte[] packageBytes = backupToBytes();
+        tamperCurrentData(rawDataSource);
+        Map<String, List<List<String>>> preRestore = dumpAll(rawDataSource);
+
+        // 恒挂失败：执行失败→回放也失败 → RESTORE_INCONSISTENT 置位
+        BackupRestoreServiceImpl failing = buildRestoreService(
+                new FailingDataSource(rawDataSource, "SYS_USER", false));
+        ServiceException ex = assertThrows(ServiceException.class,
+                () -> failing.restore(toUpload(packageBytes), true));
+        assertTrue(ex.getMessage().contains("系统处于不一致状态"), ex.getMessage());
+        assertTrue(BackupRestoreServiceImpl.isRestoreInconsistent(), "回放失败应置不一致标志");
+
+        // 置位后 backup 拒绝（文案引导用还原前快照自愈）
+        ServiceException backupEx = assertThrows(ServiceException.class, () -> service.backup());
+        assertTrue(backupEx.getMessage().contains("系统处于不一致状态"), backupEx.getMessage());
+        assertTrue(backupEx.getMessage().contains("snapshot.zip"), backupEx.getMessage());
+
+        // 模拟半还原现场的结构漂移（指纹必不匹配）——验证快照包走免指纹通道放行
+        try (Connection conn = rawDataSource.getConnection(); Statement st = conn.createStatement())
+        {
+            st.execute("ALTER TABLE sys_user ADD COLUMN extra_col VARCHAR(50)");
+        }
+        byte[] snapshotBytes = Files.readAllBytes(backupDir.resolve(BackupRestoreServiceImpl.SNAPSHOT_SLOT));
+        BackupRestoreServiceImpl healing = buildRestoreService(new H2ShowCreateDataSource(rawDataSource));
+        RestoreResult healed = healing.restore(toUpload(snapshotBytes), true);
+
+        assertTrue(healed.isExecuted(), "快照包应经免指纹通道自愈成功");
+        assertFalse(BackupRestoreServiceImpl.isRestoreInconsistent(), "自愈成功应清除不一致标志");
+        assertFalse(Files.exists(backupDir.resolve("restore-in-progress.marker")), "自愈成功应删除 marker");
+        assertEquals(preRestore, dumpAll(rawDataSource), "库应回到还原前（快照）状态");
+    }
+
+    /** P1 崩溃重启自愈：marker + snapshot 双存在 → 启动自动回放回退并删 marker */
+    @Test
+    void startupCleanup_interruptedRestore_autoReplaysAndRemovesMarker() throws Exception
+    {
+        createRestoreSchema(rawDataSource);
+        insertRestoreData(rawDataSource);
+        byte[] packageBytes = backupToBytes();
+        Map<String, List<List<String>>> backupPoint = dumpAll(rawDataSource);
+
+        // 模拟崩溃现场：marker 残留 + 还原前快照在位 + 库被半还原（以篡改近似）
+        Files.write(backupDir.resolve("restore-in-progress.marker"),
+                "crashed".getBytes(StandardCharsets.UTF_8));
+        Files.write(backupDir.resolve(BackupRestoreServiceImpl.SNAPSHOT_SLOT), packageBytes);
+        tamperCurrentData(rawDataSource);
+        assertNotEquals(backupPoint, dumpAll(rawDataSource));
+
+        service.startupCleanup();
+
+        assertEquals(backupPoint, dumpAll(rawDataSource), "启动自愈应把库回放到快照时点");
+        assertFalse(Files.exists(backupDir.resolve("restore-in-progress.marker")), "回退成功应删除 marker");
+        assertFalse(BackupRestoreServiceImpl.isRestoreInconsistent(), "回退成功应清除不一致标志");
+    }
+
+    /** P2：预览不持锁——备份持锁期间 restore(confirmed=false) 正常返回预览；确认执行仍互斥 */
+    @Test
+    void restore_previewWithoutLock_confirmedStillMutuallyExclusive() throws Exception
+    {
+        createRestoreSchema(rawDataSource);
+        insertRestoreData(rawDataSource);
+        byte[] packageBytes = backupToBytes();
+
+        // 备份持锁期间：预览（confirmed=false）不被拒——预览无锁提前返回
+        assertTrue(BackupLockUtil.tryAcquireBackupLock());
+        try
+        {
+            RestoreResult preview = service.restore(toUpload(packageBytes), false);
+            assertFalse(preview.isExecuted());
+            assertEquals(3, preview.getTableCount());
+            assertEquals(6, preview.getRecordCount());
+            assertTrue(BackupLockUtil.isWriteLocked(), "预览不得动锁");
+        }
+        finally
+        {
+            BackupLockUtil.releaseLock();
+        }
+
+        // 确认执行仍与持锁方互斥：锁持有期间 confirmed=true 被拒
+        assertTrue(BackupLockUtil.tryAcquireBackupLock());
+        try
+        {
+            ServiceException ex = assertThrows(ServiceException.class,
+                    () -> service.restore(toUpload(packageBytes), true));
+            assertEquals(BackupLockUtil.LOCKED_MESSAGE, ex.getMessage());
+        }
+        finally
+        {
+            BackupLockUtil.releaseLock();
+        }
+    }
+
+    /** P2 指纹精度维度：仅改列精度（COLUMN_SIZE 100→200）指纹即变 */
+    @Test
+    void backup_fingerprint_changesOnColumnSizeOnly() throws Exception
+    {
+        createSchema(rawDataSource);
+        insertUserData(rawDataSource);
+        String fingerprint1 = readFingerprint(service.backup());
+
+        try (Connection conn = rawDataSource.getConnection(); Statement st = conn.createStatement())
+        {
+            st.execute("ALTER TABLE sys_user ALTER COLUMN user_name VARCHAR(200)");
+        }
+        String fingerprint2 = readFingerprint(service.backup());
+        assertNotEquals(fingerprint1, fingerprint2, "仅列精度变化（VARCHAR(100)→VARCHAR(200)）指纹应变化");
     }
 
     // ==================== 测试辅助 ====================
@@ -1594,6 +1881,17 @@ class BackupRestoreServiceImplTest
                                 && ((String) args[0]).startsWith("SHOW CREATE TABLE"))
                         {
                             return translateShowCreate(real, (String) args[0]);
+                        }
+                        // P2 一致性快照事务语句：H2 不支持该 MySQL 专有语法——吞掉（翻译代理模式扩展）
+                        if ("execute".equals(method.getName()) && args != null && args.length == 1
+                                && args[0] instanceof String)
+                        {
+                            String sql = (String) args[0];
+                            if (sql.startsWith("SET SESSION TRANSACTION ISOLATION LEVEL")
+                                    || sql.startsWith("START TRANSACTION"))
+                            {
+                                return Boolean.TRUE;
+                            }
                         }
                         return method.invoke(real, args);
                     });

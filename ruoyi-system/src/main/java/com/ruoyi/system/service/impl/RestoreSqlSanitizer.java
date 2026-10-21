@@ -247,20 +247,23 @@ public final class RestoreSqlSanitizer
         }
     }
 
-    /** INSERT 值允许的数字字面量形态：整数/小数/hex（U1 导出物的确定形态） */
+    /** INSERT 值允许的数字字面量形态：整数/小数/hex（U1 导出物的确定形态；P1 指数段放宽允许带符号） */
     private static final Pattern NUMERIC_WORD = Pattern
-            .compile("0[xX][0-9a-fA-F]+|[0-9]+(\\.[0-9]+)?([eE][0-9]+)?|\\.[0-9]+");
+            .compile("0[xX][0-9a-fA-F]+|[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?|\\.[0-9]+");
 
     /**
      * CREATE 语句括号体/表选项内禁止出现的裸词（大写比较）：纯结构定义不会合法出现这些
      * "数据流/控制流"词——命中即视为 CREATE...SELECT 等形态伪装，整体拒绝。字符串字面量
      * （COMMENT '...'）与反引号标识符（列名/索引名）不受影响。
+     * P15 fail-closed 纵深：追加 REFERENCES/DATA/DIRECTORY/CONNECTION（外部表引用、
+     * 数据目录、连接串等伪装形态）。
      */
     private static final Set<String> DANGEROUS_WORDS = new HashSet<>(Arrays.asList(
             "SELECT", "FROM", "INTO", "OUTFILE", "DUMPFILE", "UNION", "JOIN", "WHERE",
             "GRANT", "REVOKE", "TRUNCATE", "ALTER", "RENAME", "SLEEP", "BENCHMARK",
             "LOAD_FILE", "KILL", "SHUTDOWN", "PREPARE", "EXECUTE", "CALL", "HANDLER",
-            "DO", "LOCK", "UNLOCK", "INSTALL", "UNINSTALL"));
+            "DO", "LOCK", "UNLOCK", "INSTALL", "UNINSTALL",
+            "REFERENCES", "DATA", "DIRECTORY", "CONNECTION"));
 
     /**
      * 词法级解析并逐语句回调消费（流式）：单引号串含 '' 与 \x 转义、反引号标识符、双引号串、
@@ -274,7 +277,7 @@ public final class RestoreSqlSanitizer
     public static void parseAndConsume(String fileDesc, Reader reader, Set<String> allowedTables,
             Consumer<ParsedStatement> consumer)
     {
-        Tokenizer tokenizer = new Tokenizer(new CharSource(reader), fileDesc);
+        Tokenizer tokenizer = new Tokenizer(new CharSource(reader));
         List<Token> statement = new ArrayList<>();
         int index = 0;
         while (true)
@@ -685,7 +688,7 @@ public final class RestoreSqlSanitizer
 
         private int pendingIndex = 0;
 
-        Tokenizer(CharSource source, String fileDesc)
+        Tokenizer(CharSource source)
         {
             this.source = source;
         }
@@ -808,7 +811,7 @@ public final class RestoreSqlSanitizer
                 throw new RejectException("可执行注释内容含注释边界");
             }
             Tokenizer innerTokenizer = new Tokenizer(
-                    new CharSource(new StringReader(inner.toString())), null);
+                    new CharSource(new StringReader(inner.toString())));
             Token t;
             while ((t = innerTokenizer.next()) != null)
             {
@@ -921,44 +924,55 @@ public final class RestoreSqlSanitizer
         return "`" + identifier.replace("`", "``") + "`";
     }
 
-    /** 字符串逻辑值重渲染：统一 MySQL 转义（对齐 U1 导出格式），\0 \n \r \Z 单引号 反斜杠 */
+    /** 字符串逻辑值重渲染：与导出侧转义同源（P2 转义同源），\0 \n \r \Z 单引号 反斜杠 */
     private static String renderValue(Token value)
     {
         if (value.type == TokenType.STRING)
         {
-            StringBuilder sb = new StringBuilder(value.text.length() + 2);
-            sb.append('\'');
-            for (int i = 0; i < value.text.length(); i++)
-            {
-                char c = value.text.charAt(i);
-                switch (c)
-                {
-                    case '\0':
-                        sb.append("\\0");
-                        break;
-                    case '\n':
-                        sb.append("\\n");
-                        break;
-                    case '\r':
-                        sb.append("\\r");
-                        break;
-                    case 0x1a:
-                        sb.append("\\Z");
-                        break;
-                    case '\'':
-                        sb.append("''");
-                        break;
-                    case '\\':
-                        sb.append("\\\\");
-                        break;
-                    default:
-                        sb.append(c);
-                }
-            }
-            sb.append('\'');
-            return sb.toString();
+            return renderMySqlString(value.text);
         }
         return value.text;
+    }
+
+    /**
+     * 共享静态方法（P2 转义同源）：MySQL 语义字符串转义（等价 mysql_real_escape_string
+     * 的导出子集）——单引号→''、反斜杠与控制字符→反斜杠序列，包裹为 '...' 字面量。
+     * BackupRestoreServiceImpl.formatValue 的字符串分支与本类 renderValue 共用本实现，
+     * 导出物与重渲染产物保证同一转义形态。
+     */
+    public static String renderMySqlString(String value)
+    {
+        StringBuilder sb = new StringBuilder(value.length() + 2);
+        sb.append('\'');
+        for (int i = 0; i < value.length(); i++)
+        {
+            char c = value.charAt(i);
+            switch (c)
+            {
+                case '\0':
+                    sb.append("\\0");
+                    break;
+                case '\n':
+                    sb.append("\\n");
+                    break;
+                case '\r':
+                    sb.append("\\r");
+                    break;
+                case 0x1a:
+                    sb.append("\\Z");
+                    break;
+                case '\'':
+                    sb.append("''");
+                    break;
+                case '\\':
+                    sb.append("\\\\");
+                    break;
+                default:
+                    sb.append(c);
+            }
+        }
+        sb.append('\'');
+        return sb.toString();
     }
 
     /** 结构 token 序列渲染：token 间单空格（标识符/字符串按转义规则重建） */

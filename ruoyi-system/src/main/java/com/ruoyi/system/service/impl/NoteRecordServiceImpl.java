@@ -773,6 +773,8 @@ public class NoteRecordServiceImpl implements INoteRecordService
      */
     @Override
     public int updateSort(NoteRecord noteRecord,List<Map<String, Object>> sorts){
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
 
         int result = 1;
         //对sorts做处理

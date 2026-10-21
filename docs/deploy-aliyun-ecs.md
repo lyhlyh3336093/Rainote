@@ -227,6 +227,18 @@ server {
         proxy_read_timeout 1800s;    # 还原执行含还原前快照生成，可达分钟级
     }
 
+    # 整机备份下载（dataBak，GET）：大包生成（全库 dump+打包）可达分钟级，须置于
+    # /api/ 之前避开通用 300s 超时；GET 下载且后端 @PreAuthorize 管理员限定，无匿名
+    # 大请求体放大面，不挂 limit_req（restore_limit zone 仍由 restore 路由独享，共存无冲突）
+    location /api/system/note/dataBak {
+        proxy_pass http://127.0.0.1:8090/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 1800s;    # 备份生成大包，可达分钟级
+    }
+
     location /api/ {
         proxy_pass http://127.0.0.1:8090/;
         proxy_set_header Host $host;

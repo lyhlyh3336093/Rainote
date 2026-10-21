@@ -22,6 +22,7 @@ import com.ruoyi.common.utils.StringUtils;
 import com.ruoyi.common.utils.file.FileUploadUtils;
 import com.ruoyi.common.utils.file.MimeTypeUtils;
 import com.ruoyi.framework.web.service.TokenService;
+import com.ruoyi.system.service.BackupLockUtil;
 import com.ruoyi.system.service.ISysUserService;
 
 /**
@@ -125,6 +126,8 @@ public class SysProfileController extends BaseController
     @PostMapping("/avatar")
     public AjaxResult avatar(@RequestParam("avatarfile") MultipartFile file) throws Exception
     {
+        // 备份/还原写锁检查：进行中则拒绝写入 profile 头像目录（KTD3）
+        BackupLockUtil.checkNotLocked();
         if (!file.isEmpty())
         {
             LoginUser loginUser = getLoginUser();

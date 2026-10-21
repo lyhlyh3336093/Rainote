@@ -9,6 +9,7 @@ import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.io.Reader;
 import java.io.Writer;
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -24,6 +25,10 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -90,10 +95,6 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
 {
     private static final Logger log = LoggerFactory.getLogger(BackupRestoreServiceImpl.class);
 
-    /** 触发级写锁标志（KTD3）：备份/还原共用，消费者经 {@link BackupLockUtil} 检查同一标志 */
-    private static final java.util.concurrent.atomic.AtomicBoolean WRITE_LOCK =
-            new java.util.concurrent.atomic.AtomicBoolean(false);
-
     /** 备份包格式版本 */
     public static final int PACKAGE_VERSION = 1;
 
@@ -150,6 +151,34 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
             new java.util.concurrent.atomic.AtomicBoolean(false);
 
     /**
+     * 还原回放失败终态标志（P1）：replaySnapshot 失败（含回放路径任何失败）置位——
+     * backup() 入口拒绝（引导用还原前快照自愈）、restore() 指纹校验前豁免
+     * （还原前快照包免指纹通道自愈）；还原成功或回放成功后清除。
+     */
+    private static final java.util.concurrent.atomic.AtomicBoolean RESTORE_INCONSISTENT =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    /** 不一致状态统一引导文案：用还原前快照执行还原以恢复（不再承诺"重启自愈"） */
+    private static final String INCONSISTENT_GUIDE_MESSAGE =
+            "系统处于不一致状态，请在界面使用还原前快照（backupPath/snapshot.zip）执行还原以恢复";
+
+    /** 崩溃重启自愈 marker 文件名（backupPath 下：restore 执行阶段写入，还原成功或回放成功后删除） */
+    private static final String RESTORE_MARKER_FILENAME = "restore-in-progress.marker";
+
+    /** 十六进制大写查表：hexLiteral 与指纹/哈希 toHex 共用（P15 去 String.format） */
+    private static final char[] HEX_CHARS = "0123456789ABCDEF".toCharArray();
+
+    /** P3：LocalDateTime 显式格式化 → yyyy-MM-dd HH:mm:ss（空格分隔，消除 toString 的 'T' 依赖） */
+    private static final DateTimeFormatter DATETIME_FORMAT =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+    /** P3：LocalDate → yyyy-MM-dd */
+    private static final DateTimeFormatter DATE_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd");
+
+    /** P3：LocalTime → HH:mm:ss */
+    private static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("HH:mm:ss");
+
+    /**
      * 还原流程的调度器回调（KTD6 接口反转）：接口在 ruoyi-system、实现在 ruoyi-quartz；
      * quartz 模块未装配（单测直接实例化）时为 null，还原照常运行、仅跳过调度器联动
      */
@@ -177,32 +206,6 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
     private DataSource dataSource;
 
     /**
-     * 尝试获取触发级写锁（KTD3）：备份/还原共用，任一持有时其他触发被拒绝。
-     *
-     * @return true=获取成功（调用方 finally 释放）；false=已有备份/还原进行中
-     */
-    public static boolean tryAcquireBackupLock()
-    {
-        return WRITE_LOCK.compareAndSet(false, true);
-    }
-
-    /**
-     * 释放触发级写锁
-     */
-    public static void releaseLock()
-    {
-        WRITE_LOCK.set(false);
-    }
-
-    /**
-     * 写锁是否被持有（消费者检查与测试用）
-     */
-    public static boolean isWriteLocked()
-    {
-        return WRITE_LOCK.get();
-    }
-
-    /**
      * 触发整机备份（KTD3 入口薄壳）：加写锁 → exportInternal 导出落盘备份槽位 → finally 解锁。
      *
      * @return 备份包文件（backupPath/backup.zip）
@@ -210,7 +213,12 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
     @Override
     public File backup()
     {
-        if (!tryAcquireBackupLock())
+        // P1 回放失败终态：不一致标志置位即拒绝备份，引导用还原前快照执行还原自愈
+        if (RESTORE_INCONSISTENT.get())
+        {
+            throw new ServiceException(INCONSISTENT_GUIDE_MESSAGE);
+        }
+        if (!BackupLockUtil.tryAcquireBackupLock())
         {
             throw new ServiceException(BackupLockUtil.LOCKED_MESSAGE);
         }
@@ -220,7 +228,7 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
         }
         finally
         {
-            releaseLock();
+            BackupLockUtil.releaseLock();
         }
     }
 
@@ -347,35 +355,67 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
             try (Connection conn = dataSource.getConnection();
                  ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(tmpFile)))
             {
-                String catalog = conn.getCatalog();
-                // KTD1：catalog 限定连接库 + 类型 TABLE + QRTZ_ 前缀排除
-                List<String> tables = listTables(conn, catalog);
-
-                // 逐表导出结构+数据，同时收集指纹素材与行数
-                List<String> fingerprintLines = new ArrayList<>();
-                List<JSONObject> tableStats = new ArrayList<>();
-                for (String table : tables)
+                // P2 一致性快照（mysqldump --single-transaction 同款）：REPEATABLE READ +
+                // START TRANSACTION WITH CONSISTENT SNAPSHOT，导出期间单一读视图；
+                // 完成后 rollback 并恢复 autocommit
+                boolean previousAutoCommit = conn.getAutoCommit();
+                conn.setAutoCommit(false);
+                try (Statement txStmt = conn.createStatement())
                 {
-                    List<String[]> columns = tableColumns(conn, catalog, table);
-                    for (String[] col : columns)
-                    {
-                        fingerprintLines.add(table + "\t" + col[0] + "\t" + col[1]);
-                    }
-                    exportSchema(conn, zos, table);
-                    long rows = exportData(conn, zos, table, columns);
-                    JSONObject stat = new JSONObject();
-                    stat.put("name", table);
-                    stat.put("rows", rows);
-                    tableStats.add(stat);
+                    txStmt.execute("SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+                    txStmt.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT");
                 }
+                try
+                {
+                    String catalog = conn.getCatalog();
+                    // KTD1：catalog 限定连接库 + 类型 TABLE + QRTZ_ 前缀排除
+                    List<String> tables = listTables(conn, catalog);
 
-                // 用户文件三目录流式入包（download 不入包）
-                long[] fileStats = copyFileDirs(zos);
+                    // 逐表导出结构+数据，同时收集指纹素材与行数
+                    List<String> fingerprintLines = new ArrayList<>();
+                    List<JSONObject> tableStats = new ArrayList<>();
+                    for (String table : tables)
+                    {
+                        List<String[]> columns = tableColumns(conn, catalog, table);
+                        for (String[] col : columns)
+                        {
+                            fingerprintLines.add(fingerprintLine(table, col));
+                        }
+                        exportSchema(conn, zos, table);
+                        long rows = exportData(conn, zos, table, columns);
+                        JSONObject stat = new JSONObject();
+                        stat.put("name", table);
+                        stat.put("rows", rows);
+                        tableStats.add(stat);
+                    }
 
-                // manifest 最后写入（借鉴 NoteDwtableExportPackager 的 entry 组织）
-                writeManifest(zos, computeFingerprint(fingerprintLines), tableStats, fileStats);
-                tableCount = tableStats.size();
-                fileCount = fileStats[0];
+                    // 用户文件三目录流式入包（download 不入包）
+                    long[] fileStats = copyFileDirs(zos);
+
+                    // manifest 最后写入（借鉴 NoteDwtableExportPackager 的 entry 组织）
+                    writeManifest(zos, computeFingerprint(fingerprintLines), tableStats, fileStats);
+                    tableCount = tableStats.size();
+                    fileCount = fileStats[0];
+                }
+                finally
+                {
+                    try
+                    {
+                        conn.rollback();
+                    }
+                    catch (SQLException e)
+                    {
+                        log.warn("[BACKUP] 一致性快照事务回滚失败（best-effort）", e);
+                    }
+                    try
+                    {
+                        conn.setAutoCommit(previousAutoCommit);
+                    }
+                    catch (SQLException e)
+                    {
+                        log.warn("[BACKUP] 恢复连接 autocommit 失败（best-effort）", e);
+                    }
+                }
             }
             // try-with-resources 已关闭 zip 流，此时原子替换槽位文件：
             // 分槽位保留最近 1 份，且不会以半损坏包顶替旧恢复点
@@ -428,7 +468,9 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
     }
 
     /**
-     * 取表列清单（保持 ordinal 顺序）：每项为 [列名, 列类型名]，供 INSERT 列段与指纹使用。
+     * 取表列清单（保持 ordinal 顺序）：每项为 [列名, 列类型名, 列大小, 小数位]
+     * （P2 指纹精度维度：COLUMN_SIZE/DECIMAL_DIGITS 入指纹素材，null 由素材行归一），
+     * 供 INSERT 列段与指纹使用。
      */
     private List<String[]> tableColumns(Connection conn, String catalog, String table) throws SQLException
     {
@@ -437,10 +479,22 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
         {
             while (rs.next())
             {
-                columns.add(new String[] {rs.getString("COLUMN_NAME"), rs.getString("TYPE_NAME")});
+                columns.add(new String[] {rs.getString("COLUMN_NAME"), rs.getString("TYPE_NAME"),
+                        rs.getString("COLUMN_SIZE"), rs.getString("DECIMAL_DIGITS")});
             }
         }
         return columns;
+    }
+
+    /**
+     * 指纹素材行（P2 精度维度扩展）：table\tcol\ttype\tsize\tdigits（size/digits null 归一为
+     * 空串）——导出侧与 computeCurrentFingerprint 共用同一方法，两侧格式自动同步。
+     */
+    private static String fingerprintLine(String table, String[] column)
+    {
+        String size = column[2] == null ? "" : column[2];
+        String digits = column[3] == null ? "" : column[3];
+        return table + "\t" + column[0] + "\t" + column[1] + "\t" + size + "\t" + digits;
     }
 
     /**
@@ -548,6 +602,12 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
         {
             return ((Boolean) value) ? "TRUE" : "FALSE";
         }
+        if (value instanceof Float || value instanceof Double)
+        {
+            // P1 自洽性：浮点走 BigDecimal.toPlainString 消除科学计数法（如 5.0E-4），
+            // 保证导出物必过白名单 NUMERIC_WORD 且重渲染可执行（Double.toString 会产出 5.0E-4）
+            return new BigDecimal(((Number) value).doubleValue()).toPlainString();
+        }
         if (value instanceof Number)
         {
             return value.toString();
@@ -564,66 +624,51 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
         {
             return "'" + value.toString() + "'";
         }
+        if (value instanceof LocalDateTime)
+        {
+            // P3：java.time 显式格式化（空格分隔，消除 toString 的 'T' 依赖）
+            return "'" + DATETIME_FORMAT.format((LocalDateTime) value) + "'";
+        }
+        if (value instanceof LocalDate)
+        {
+            return "'" + DATE_FORMAT.format((LocalDate) value) + "'";
+        }
+        if (value instanceof LocalTime)
+        {
+            return "'" + TIME_FORMAT.format((LocalTime) value) + "'";
+        }
         if (value instanceof java.util.Date)
         {
             // 驱动返回裸 java.util.Date 的兜底：按 Timestamp 语义格式化
             return "'" + new Timestamp(((java.util.Date) value).getTime()).toString() + "'";
         }
-        // 字符串与其余类型（含 JSON 列）：字符串转义（罕见类型的回退路径）
-        return escapeString(value.toString());
+        // 字符串与其余类型（含 JSON 列）：字符串转义（P2 转义同源——与重渲染共用同一实现）
+        return RestoreSqlSanitizer.renderMySqlString(value.toString());
     }
 
     /**
-     * MySQL 语义字符串转义（等价 mysql_real_escape_string 的导出子集）：
-     * 单引号→''、反斜杠与控制字符→反斜杠序列，包裹为 '...' 字面量。
-     */
-    private static String escapeString(String value)
-    {
-        StringBuilder sb = new StringBuilder(value.length() + 2);
-        sb.append('\'');
-        for (int i = 0; i < value.length(); i++)
-        {
-            char c = value.charAt(i);
-            switch (c)
-            {
-                case '\0':
-                    sb.append("\\0");
-                    break;
-                case '\n':
-                    sb.append("\\n");
-                    break;
-                case '\r':
-                    sb.append("\\r");
-                    break;
-                case 0x1a:
-                    sb.append("\\Z");
-                    break;
-                case '\'':
-                    sb.append("''");
-                    break;
-                case '\\':
-                    sb.append("\\\\");
-                    break;
-                default:
-                    sb.append(c);
-            }
-        }
-        sb.append('\'');
-        return sb.toString();
-    }
-
-    /**
-     * 二进制列编码为 MySQL hex 字面量（0x...）
+     * 二进制列编码为 MySQL hex 字面量（0x...）。P1：空字节数组返回 ''——MySQL 二进制
+     * 空串等价（裸 0x 为非法字面量）；P15：HEX 查表实现（去 String.format）。
      */
     private static String hexLiteral(byte[] bytes)
     {
-        StringBuilder sb = new StringBuilder(bytes.length * 2 + 2);
-        sb.append("0x");
+        if (bytes.length == 0)
+        {
+            return "''";
+        }
+        return "0x" + toHex(bytes);
+    }
+
+    /** 字节数组 → 十六进制大写串（P15 查表；hexLiteral 与指纹/哈希共用） */
+    private static String toHex(byte[] bytes)
+    {
+        StringBuilder hex = new StringBuilder(bytes.length * 2);
         for (byte b : bytes)
         {
-            sb.append(String.format("%02X", b));
+            int v = b & 0xFF;
+            hex.append(HEX_CHARS[v >>> 4]).append(HEX_CHARS[v & 0x0F]);
         }
-        return sb.toString();
+        return hex.toString();
     }
 
     /**
@@ -672,8 +717,8 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
     }
 
     /**
-     * 表结构指纹（KTD2）：全部（表名,列名,列类型）元组排序后逐行 SHA-256——
-     * 排序保证同一库指纹稳定（与列定义顺序无关），增删列/改类型即变化。
+     * 表结构指纹（KTD2）：全部（表名,列名,列类型,精度）素材行排序后逐行 SHA-256——
+     * 排序保证同一库指纹稳定（与列定义顺序无关），增删列/改类型/改列精度即变化。
      */
     private String computeFingerprint(List<String> fingerprintLines)
     {
@@ -686,12 +731,8 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
                 digest.update(line.getBytes(StandardCharsets.UTF_8));
                 digest.update((byte) '\n');
             }
-            StringBuilder hex = new StringBuilder(64);
-            for (byte b : digest.digest())
-            {
-                hex.append(String.format("%02x", b));
-            }
-            return hex.toString();
+            // P15：与 hexLiteral 共用 toHex 查表实现，素材行两侧自动同步
+            return toHex(digest.digest());
         }
         catch (NoSuchAlgorithmException e)
         {
@@ -759,10 +800,44 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
                 }
             }
             rollbackStaging();
+            // P1 崩溃重启自愈：检测未完成还原的 marker 残留（上次进程在还原执行阶段退出）
+            recoverInterruptedRestore();
         }
         catch (Throwable e)
         {
             log.warn("[RESTORE] 启动清理失败（不影响启动）", e);
+        }
+    }
+
+    /**
+     * P1 崩溃重启自愈：marker 存在且还原前快照在位 → 自动回放快照把库拉回还原前状态
+     * （免指纹受限路径）；成功删 marker 并 log.warn 告知"已自动回退"，失败置不一致
+     * 标志 + log.error（不阻止启动）。快照缺失时仅记 error（无法自愈，请人工处理）。
+     */
+    private void recoverInterruptedRestore()
+    {
+        Path marker = Paths.get(RuoYiConfig.getBackupPath()).resolve(RESTORE_MARKER_FILENAME);
+        if (!Files.isRegularFile(marker))
+        {
+            return;
+        }
+        Path snapshot = Paths.get(RuoYiConfig.getBackupPath()).resolve(SNAPSHOT_SLOT);
+        if (!Files.isRegularFile(snapshot))
+        {
+            log.error("[RESTORE] 检测到未完成还原的 marker 但还原前快照缺失，无法自动回退，请人工处理");
+            return;
+        }
+        try
+        {
+            replaySnapshot();
+            Files.deleteIfExists(marker);
+            log.warn("[RESTORE] 检测到未完成还原已自动回退");
+        }
+        catch (Throwable t)
+        {
+            // replaySnapshot 内部已置不一致标志，此处兜底再保证置位（不阻止启动）
+            RESTORE_INCONSISTENT.set(true);
+            log.error("[RESTORE] 启动自动回退失败，系统处于不一致状态（不阻止启动）", t);
         }
     }
 
@@ -789,15 +864,23 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
     }
 
     /**
-     * 还原执行（U2，F2 时序）。confirmed=false 等价校验预览（不写库）；confirmed=true
-     * 对本次上传文件重跑全部校验（不信任跨请求预览）后按 快照→执行→两段式文件替换
-     * 推进，任一步失败回放快照+staging 回移（KTD6 两段失败区分），成功后重建缓存与
-     * 调度器并做会话判定。try-finally 保证锁释放与调度器恢复。
+     * 还原执行（U2，F2 时序）。confirmed=false 直接走预览（P2 预览不持锁——校验不写库，
+     * 无需与备份/还原互斥）；confirmed=true 对本次上传文件重跑全部校验（不信任跨请求
+     * 预览）后按 快照→执行→两段式文件替换 推进，任一步失败回放快照+staging 回移
+     * （KTD6 两段失败区分），成功后重建缓存与调度器并做会话判定。try-finally 保证
+     * 调度器恢复与锁释放（P2 顺序：resume→releaseLock→临时目录清理，防清理异常卡死
+     * 锁/调度器；locked 标志条件释放，防误清并发持有者）。
      */
     @Override
     public RestoreResult restore(MultipartFile file, boolean confirmed)
     {
-        if (!tryAcquireBackupLock())
+        // P2 预览不持锁：未确认直接走校验预览（无锁提前返回）
+        if (!confirmed)
+        {
+            return previewRestore(file);
+        }
+        boolean locked = BackupLockUtil.tryAcquireBackupLock();
+        if (!locked)
         {
             throw new ServiceException(BackupLockUtil.LOCKED_MESSAGE);
         }
@@ -807,10 +890,6 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
         {
             // confirmed 请求重跑全部校验（R5：不跨请求信任预览结果）
             pkg = validatePackage(file, true);
-            if (!confirmed)
-            {
-                return buildResult(pkg, false);
-            }
             // KTD6：先暂停调度器再动库（防调度任务在库重建窗口写半还原数据）
             if (schedulerHook != null)
             {
@@ -820,6 +899,9 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
             // 还原前快照（复用 exportInternal 不撞自身写锁；快照生成阶段失败→直接失败
             // 返回，库未动、无需回放）
             exportInternal(SNAPSHOT_SLOT);
+            // P1 崩溃自愈 marker：执行阶段开始（快照已生成、SQL 执行前）写入，
+            // 还原成功或回放成功后删除
+            writeRestoreMarker();
             try
             {
                 executePackageSqls(pkg);
@@ -842,19 +924,33 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
             catch (Throwable t)
             {
                 recoverFromFailure(t);
+                // P1 reload 失败重对齐：回放成功后 best-effort 重同步缓存与调度器
+                // （回放后 sys_job 为还原前数据，重载必成；仍失败仅记 error 不再升级）
+                try
+                {
+                    rebuildCaches();
+                    if (schedulerHook != null)
+                    {
+                        schedulerHook.reload();
+                    }
+                }
+                catch (Throwable resyncEx)
+                {
+                    log.error("[RESTORE] 回放后缓存/调度器重对齐失败", resyncEx);
+                }
                 throw new ServiceException("还原失败：已回滚至还原前状态，原因：" + t.getMessage());
             }
             cleanupStagingOnSuccess();
+            // P1：还原成功——清除不一致标志（自愈完成，若有）与崩溃自愈 marker
+            RESTORE_INCONSISTENT.set(false);
+            deleteRestoreMarker();
             log.info("[RESTORE] 还原完成 tables={} records={} files={}", pkg.tables.size(),
                     pkg.recordCount, pkg.fileCount);
             return buildResult(pkg, true);
         }
         finally
         {
-            if (pkg != null)
-            {
-                deleteTree(pkg.extractDir);
-            }
+            // P2 顺序：先恢复调度器与写锁，最后清理临时目录（best-effort 永不外抛）
             if (schedulerPaused && schedulerHook != null)
             {
                 try
@@ -866,14 +962,22 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
                     log.error("[RESTORE] 调度器恢复失败", e);
                 }
             }
-            releaseLock();
+            if (locked)
+            {
+                BackupLockUtil.releaseLock();
+            }
+            if (pkg != null)
+            {
+                deleteTree(pkg.extractDir);
+            }
         }
     }
 
     /**
      * 执行阶段失败恢复（KTD6）：回放还原前快照（受限内部路径）+ staging 回移。
-     * 回放自身失败不递归——立即终止并抛"系统处于不一致状态，请人工介入或重启自愈"
-     * （不静默吞掉）；文件回移尽力执行，失败置三目录不可用标志并告警。
+     * 回放自身失败不递归——replaySnapshot 已置位不一致标志，立即终止并抛统一引导
+     * 文案（用还原前快照执行还原以恢复，不再承诺"重启自愈"，不静默吞掉）；
+     * 文件回移尽力执行，失败置三目录不可用标志并告警。
      */
     private void recoverFromFailure(Throwable cause)
     {
@@ -885,8 +989,8 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
         }
         catch (Throwable replayEx)
         {
-            log.error("[RESTORE] 快照回放失败，系统处于不一致状态，需人工介入", replayEx);
-            inconsistent = new ServiceException("还原失败且回滚未完成：系统处于不一致状态，请人工介入或重启自愈");
+            log.error("[RESTORE] 快照回放失败，系统处于不一致状态", replayEx);
+            inconsistent = new ServiceException("还原失败且回滚未完成：" + INCONSISTENT_GUIDE_MESSAGE);
         }
         rollbackStaging();
         if (inconsistent != null)
@@ -900,13 +1004,33 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
      * 免指纹校验（现库已知半还原、指纹必不匹配）、免快照生成（不得用半损坏库顶替
      * 唯一恢复点）、免 confirmed；保留解压防护与 SQL 白名单（快照自产可信、过白名单
      * 零成本）；失败不递归——向上抛出由调用方终止。包内可见供测试与应急调用。
+     * <p>
+     * P1 终态语义：回放成功→清除不一致标志并删除崩溃自愈 marker（库回到还原前一致
+     * 状态）；回放路径任何失败（含清单校验/读取/执行）→置位不一致标志后原样重抛
+     * （backup 拒绝、restore 免指纹通道自愈）。
      */
     void replaySnapshot()
+    {
+        try
+        {
+            replaySnapshotInternal();
+        }
+        catch (Throwable t)
+        {
+            // 回放路径任何失败置位：系统处于不一致状态（backup 拒绝、快照包免指纹自愈）
+            RESTORE_INCONSISTENT.set(true);
+            log.error("[RESTORE] 快照回放失败，系统处于不一致状态，请用还原前快照执行还原以恢复", t);
+            throw t;
+        }
+    }
+
+    /** 回放内部实现（P1：异常统一由 {@link #replaySnapshot()} 包装置位后重抛） */
+    private void replaySnapshotInternal()
     {
         Path snapshot = Paths.get(RuoYiConfig.getBackupPath()).resolve(SNAPSHOT_SLOT);
         if (!Files.isRegularFile(snapshot))
         {
-            throw new ServiceException("系统处于不一致状态：还原前快照缺失，请人工介入或重启自愈");
+            throw new ServiceException("还原前快照缺失，" + INCONSISTENT_GUIDE_MESSAGE);
         }
         Path extractDir = null;
         try (InputStream in = new BufferedInputStream(Files.newInputStream(snapshot), COPY_BUFFER_SIZE))
@@ -920,7 +1044,7 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
         }
         catch (IOException e)
         {
-            throw new ServiceException("系统处于不一致状态：快照包读取失败，请人工介入或重启自愈");
+            throw new ServiceException("还原前快照包读取失败，" + INCONSISTENT_GUIDE_MESSAGE);
         }
         finally
         {
@@ -929,6 +1053,9 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
                 deleteTree(extractDir);
             }
         }
+        // P1：回放成功——库回到还原前一致状态，清除不一致标志与崩溃自愈 marker
+        RESTORE_INCONSISTENT.set(false);
+        deleteRestoreMarker();
         log.info("[RESTORE] 还原前快照回放完成");
     }
 
@@ -973,12 +1100,44 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
                 String packageFingerprint = manifest.getString("schemaFingerprint");
                 try (Connection conn = dataSource.getConnection())
                 {
-                    // KTD2：指纹两侧同算法（表名+列名+列类型排序哈希），不一致拒绝
-                    if (!computeCurrentFingerprint(conn).equals(packageFingerprint))
+                    String catalog = conn.getCatalog();
+                    // P1 不一致标志置位（回放失败残留）：与空库同款豁免——跳过表集
+                    // 核对与指纹比对，放行还原前快照包自愈通道（sys_user 可能已被
+                    // 半还原 DROP，现库差异收集一并跳过）
+                    boolean fingerprintExempt = RESTORE_INCONSISTENT.get();
+                    // P1/AE1：指纹比对前取现库非 QRTZ 表清单
+                    List<String> currentTables = listTables(conn, catalog);
+                    if (!fingerprintExempt && currentTables.isEmpty())
                     {
-                        throw new ServiceException("备份包与当前库结构不一致（schema 指纹校验失败），已拒绝还原");
+                        // 空库无数据可丢，全量重建安全——跳过指纹不匹配拒绝
+                        log.info("[RESTORE] 目标库为空，跳过指纹校验");
+                        fingerprintExempt = true;
                     }
-                    collectUserDifference(conn, pkg);
+                    if (!fingerprintExempt)
+                    {
+                        // P1：manifest 表清单与现库（非 QRTZ）双向集合比对（大小写归一），
+                        // 不等即拒绝（防包清单与现库结构漂移）
+                        Set<String> manifestTables = new HashSet<>();
+                        for (String table : pkg.tables)
+                        {
+                            manifestTables.add(table.toLowerCase(Locale.ROOT));
+                        }
+                        Set<String> currentTableSet = new HashSet<>();
+                        for (String table : currentTables)
+                        {
+                            currentTableSet.add(table.toLowerCase(Locale.ROOT));
+                        }
+                        if (!manifestTables.equals(currentTableSet))
+                        {
+                            throw new ServiceException("备份包表清单与现库不一致，已拒绝还原");
+                        }
+                        // KTD2：指纹两侧同算法（表名+列名+列类型+精度排序哈希），不一致拒绝
+                        if (!computeCurrentFingerprint(conn).equals(packageFingerprint))
+                        {
+                            throw new ServiceException("备份包与当前库结构不一致（schema 指纹校验失败），已拒绝还原");
+                        }
+                        collectUserDifference(conn, pkg);
+                    }
                 }
                 catch (SQLException e)
                 {
@@ -1070,20 +1229,19 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
                             continue;
                         }
                         Files.createDirectories(target.getParent());
-                        long fileBytes = 0L;
                         try (OutputStream out = Files.newOutputStream(target))
                         {
                             int n;
                             while ((n = zis.read(buffer)) >= 0)
                             {
                                 out.write(buffer, 0, n);
-                                fileBytes += n;
+                                totalBytes += n;
+                                // P2 内联熔断：单条目写中途超限立即拒绝（不等条目写完）
+                                if (totalBytes > maxExtractBytes)
+                                {
+                                    throw new ServiceException("备份包解压总量超限，已拒绝还原");
+                                }
                             }
-                        }
-                        totalBytes += fileBytes;
-                        if (totalBytes > maxExtractBytes)
-                        {
-                            throw new ServiceException("备份包解压总量超限，已拒绝还原");
                         }
                     }
                 }
@@ -1127,7 +1285,8 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
     }
 
     /**
-     * 读 manifest 表清单（还原目标白名单基准；空清单拒绝）
+     * 读 manifest 表清单（还原目标白名单基准；空清单拒绝；P1 fail-closed：含 QRTZ_
+     * 保留前缀表直接拒绝还原）
      */
     private List<String> readTableList(JSONObject manifest)
     {
@@ -1143,6 +1302,10 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
             if (name == null || name.trim().isEmpty())
             {
                 throw new ServiceException("备份包表清单项缺失表名，已拒绝还原");
+            }
+            if (name.toUpperCase(Locale.ROOT).startsWith(QRTZ_PREFIX))
+            {
+                throw new ServiceException("备份包表清单含保留前缀表，已拒绝还原");
             }
             tables.add(name);
         }
@@ -1220,21 +1383,38 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
 
     /**
      * 单 Connection 顺序执行净化后 SQL（KTD6）：会话级 FOREIGN_KEY_CHECKS=0 →
-     * 逐表 DROP→CREATE→INSERT（重渲染串，DDL 隐式提交、一致性由快照回放保证，
-     * 不依赖 DB 事务）。INSERT 每 1000 条一批发送。
+     * 逐表 DROP→CREATE→INSERT（重渲染串，一致性由快照回放兜底，不依赖 DB 事务）。
+     * P2 autocommit 优化：整包执行关 autocommit，每表（schema+data 执行完）commit 一次，
+     * finally 兜底 rollback 未提交部分（已提交表由快照回放兜底）。INSERT 每 1000 条一批发送。
      */
     private void executePackageSqls(ValidatedPackage pkg)
     {
         try (Connection conn = dataSource.getConnection())
         {
-            Set<String> allowed = pkg.allowedTableSet();
-            try (Statement stmt = conn.createStatement())
+            conn.setAutoCommit(false);
+            try
             {
-                stmt.execute("SET FOREIGN_KEY_CHECKS=0");
-                for (String table : pkg.tables)
+                Set<String> allowed = pkg.allowedTableSet();
+                try (Statement stmt = conn.createStatement())
                 {
-                    executeSqlFile(pkg.extractDir, "schema/" + table + ".sql", allowed, stmt, false);
-                    executeSqlFile(pkg.extractDir, "data/" + table + ".sql", allowed, stmt, true);
+                    stmt.execute("SET FOREIGN_KEY_CHECKS=0");
+                    for (String table : pkg.tables)
+                    {
+                        executeSqlFile(pkg.extractDir, "schema/" + table + ".sql", allowed, stmt, false);
+                        executeSqlFile(pkg.extractDir, "data/" + table + ".sql", allowed, stmt, true);
+                        conn.commit();
+                    }
+                }
+            }
+            finally
+            {
+                try
+                {
+                    conn.rollback();
+                }
+                catch (SQLException e)
+                {
+                    log.warn("[RESTORE] 还原执行事务兜底回滚失败（best-effort）", e);
                 }
             }
         }
@@ -1378,6 +1558,7 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
                 }
                 Path target = profile.resolve(dir);
                 boolean moved = false;
+                IOException lastFailure = null;
                 for (int attempt = 1; attempt <= ROLLBACK_ATTEMPTS && !moved; attempt++)
                 {
                     if (attempt > 1)
@@ -1403,13 +1584,14 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
                     }
                     catch (IOException e)
                     {
-                        log.warn("[RESTORE] staging 目录回移失败（第{}次尝试）: {}", attempt, source);
+                        lastFailure = e;
+                        log.warn("[RESTORE] staging 目录回移失败（第{}次尝试）: {}", attempt, source, e);
                     }
                 }
                 if (!moved)
                 {
                     log.error("[RESTORE] 告警：staging 目录 {} 回移重试耗尽仍失败，用户文件三目录已标记不可用"
-                            + "（拒绝后续还原文件替换），请人工处理", source);
+                            + "（拒绝后续还原文件替换），请人工处理", source, lastFailure);
                     FILE_DIRS_UNAVAILABLE.set(true);
                     allMoved = false;
                 }
@@ -1466,29 +1648,32 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
         }
     }
 
-    /** 递归删除目录树（尽力删除，失败仅记日志） */
+    /** 递归删除目录树（尽力删除，失败仅记日志；P2 整体熔断——IOException|RuntimeException 均不外抛） */
     private static void deleteTree(Path path)
     {
-        if (!Files.exists(path))
+        try
         {
-            return;
+            if (!Files.exists(path))
+            {
+                return;
+            }
+            try (Stream<Path> walk = Files.walk(path))
+            {
+                walk.sorted(Comparator.reverseOrder()).forEach(p -> {
+                    try
+                    {
+                        Files.deleteIfExists(p);
+                    }
+                    catch (IOException e)
+                    {
+                        log.warn("[RESTORE] 临时文件删除失败 {}", p);
+                    }
+                });
+            }
         }
-        try (Stream<Path> walk = Files.walk(path))
+        catch (IOException | RuntimeException e)
         {
-            walk.sorted(Comparator.reverseOrder()).forEach(p -> {
-                try
-                {
-                    Files.deleteIfExists(p);
-                }
-                catch (IOException e)
-                {
-                    log.warn("[RESTORE] 临时文件删除失败 {}", p);
-                }
-            });
-        }
-        catch (IOException e)
-        {
-            log.warn("[RESTORE] 目录删除失败 {}", path);
+            log.warn("[RESTORE] 目录删除失败（best-effort） {}", path, e);
         }
     }
 
@@ -1513,6 +1698,48 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
     static void resetFileDirsUnavailable()
     {
         FILE_DIRS_UNAVAILABLE.set(false);
+    }
+
+    /** 还原不一致标志是否置位（测试断言与运维观测用） */
+    public static boolean isRestoreInconsistent()
+    {
+        return RESTORE_INCONSISTENT.get();
+    }
+
+    /** 复位还原不一致标志（测试隔离用） */
+    static void resetRestoreInconsistent()
+    {
+        RESTORE_INCONSISTENT.set(false);
+    }
+
+    /**
+     * P1：写崩溃自愈 marker（restore 执行阶段开始——快照生成成功后、SQL 执行前）。
+     * 写失败仅告警不阻断还原（进程内失败恢复不依赖 marker）。
+     */
+    private void writeRestoreMarker()
+    {
+        try
+        {
+            Files.write(Paths.get(RuoYiConfig.getBackupPath()).resolve(RESTORE_MARKER_FILENAME),
+                    Instant.now().toString().getBytes(StandardCharsets.UTF_8));
+        }
+        catch (IOException e)
+        {
+            log.warn("[RESTORE] 崩溃自愈 marker 写入失败（best-effort）", e);
+        }
+    }
+
+    /** P1：删除崩溃自愈 marker（还原成功或回放成功后调用；best-effort） */
+    private void deleteRestoreMarker()
+    {
+        try
+        {
+            Files.deleteIfExists(Paths.get(RuoYiConfig.getBackupPath()).resolve(RESTORE_MARKER_FILENAME));
+        }
+        catch (IOException e)
+        {
+            log.warn("[RESTORE] 崩溃自愈 marker 删除失败（best-effort）", e);
+        }
     }
 
     /**
@@ -1542,7 +1769,7 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
     }
 
     /**
-     * 现库表结构指纹（KTD2 两侧同算法，与 U1 导出侧 computeFingerprint 共用素材格式）
+     * 现库表结构指纹（KTD2 两侧同算法，与 U1 导出侧共用 {@link #fingerprintLine} 素材格式）
      */
     private String computeCurrentFingerprint(Connection conn) throws SQLException
     {
@@ -1552,7 +1779,7 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
         {
             for (String[] column : tableColumns(conn, catalog, table))
             {
-                fingerprintLines.add(table + "\t" + column[0] + "\t" + column[1]);
+                fingerprintLines.add(fingerprintLine(table, column));
             }
         }
         return computeFingerprint(fingerprintLines);
@@ -1599,18 +1826,13 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
         pkg.packageUserHashes.put(userId, password == null ? null : sha256Hex(password));
     }
 
-    /** SHA-256 哈希（十六进制小写），password 差异比对用（哈希值不进任何输出） */
+    /** SHA-256 哈希（十六进制），password 差异比对用（哈希值不进任何输出；P15 共用 toHex） */
     private static String sha256Hex(String value)
     {
         try
         {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            StringBuilder hex = new StringBuilder(64);
-            for (byte b : digest.digest(value.getBytes(StandardCharsets.UTF_8)))
-            {
-                hex.append(String.format("%02x", b));
-            }
-            return hex.toString();
+            return toHex(digest.digest(value.getBytes(StandardCharsets.UTF_8)));
         }
         catch (NoSuchAlgorithmException e)
         {
