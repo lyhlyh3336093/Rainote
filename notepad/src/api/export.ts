@@ -90,22 +90,24 @@ export async function exportDwtable(
 }
 
 /**
- * 从 Content-Disposition 解析文件名，失败兜底 'multitable-export.zip'。
+ * 从 Content-Disposition 解析文件名，失败兜底 fallback（默认 'multitable-export.zip'）。
  * 后端固定返回 attachment; filename="multitable-export.zip"，无需 URL decode。
+ * 导出供 backup.ts 复用（U3 备份下载，fallback='backup.zip'）。
  */
-function parseFilename(contentDisposition: string | null): string {
+export function parseFilename(contentDisposition: string | null, fallback: string = 'multitable-export.zip'): string {
     if (contentDisposition) {
         const m = contentDisposition.match(/filename="?([^";]+)"?/i);
         if (m && m[1]) return m[1];
     }
-    return 'multitable-export.zip';
+    return fallback;
 }
 
 /**
  * 触发浏览器下载 blob（无 file-saver 依赖，手动实现）。
  * Firefox 必须将 <a> 挂载到 DOM 才能 click()，下一帧释放 blobUrl 避免内存泄漏。
+ * 导出供 backup.ts 复用（U3 备份下载）。
  */
-function triggerDownload(blob: Blob, filename: string): void {
+export function triggerDownload(blob: Blob, filename: string): void {
     const blobUrl = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = blobUrl;

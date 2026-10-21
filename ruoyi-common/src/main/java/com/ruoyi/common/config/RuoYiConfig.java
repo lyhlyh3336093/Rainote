@@ -27,6 +27,9 @@ public class RuoYiConfig
     /** 上传路径 */
     private static String profile;
 
+    /** 备份落盘路径（整机备份包与还原快照专有目录，独立于 profile，不经 /profile/** 静态映射） */
+    private static String backupPath;
+
     /** 获取地址开关 */
     private static boolean addressEnabled;
 
@@ -81,6 +84,16 @@ public class RuoYiConfig
     public void setProfile(String profile)
     {
         RuoYiConfig.profile = profile;
+    }
+
+    public static String getBackupPath()
+    {
+        return backupPath;
+    }
+
+    public void setBackupPath(String backupPath)
+    {
+        RuoYiConfig.backupPath = backupPath;
     }
 
     public static boolean isAddressEnabled()

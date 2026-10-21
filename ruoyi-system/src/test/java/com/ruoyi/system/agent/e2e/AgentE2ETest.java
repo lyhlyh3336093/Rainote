@@ -339,10 +339,10 @@ class AgentE2ETest
 
         assertTrue(events.contains("planCompleted"), "计划应完成");
 
-        // 审计完整性校验
+        // 审计完整性校验（success 更新携带执行结果摘要第 4 参数）
         verify(auditService, times(1)).createAuditLog(eq(1L), eq("sess-ae5"), anyString(), anyString());
         verify(auditService, times(2)).insertStepLog(eq(1L), anyInt(), anyString(), anyString(), any(), any());
-        verify(auditService, times(2)).updateStepStatus(anyLong(), eq("success"), any());
+        verify(auditService, times(2)).updateStepStatus(anyLong(), eq("success"), any(), any());
         verify(auditService, times(1)).completeAuditLog(1L, "completed");
     }
 
@@ -584,7 +584,8 @@ class AgentE2ETest
 
         assertTrue(events.contains("started:s1"), "重试应重新执行 s1");
         assertTrue(events.contains("completed:s1:SUCCESS"), "重试应成功");
-        verify(auditService).updateStepStatus(anyLong(), eq("success"), any());
+        // success 更新携带执行结果摘要第 4 参数
+        verify(auditService).updateStepStatus(anyLong(), eq("success"), any(), any());
     }
 
     // ==================== 取消计划 ====================

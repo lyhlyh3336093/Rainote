@@ -7,6 +7,8 @@
 ruoyi:
     # 上传根目录（Linux 路径，与本地开发 D:/ruoyi/uploadPath 区分）
     profile: /home/ruoyi/uploadPath
+    # 备份落盘路径（整机备份包与还原快照；与本地开发 D:/ruoyi/backup 同 basename 区分）
+    backupPath: /home/ruoyi/backup
 
 spring:
     datasource:

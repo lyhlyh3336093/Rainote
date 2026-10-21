@@ -11,6 +11,8 @@ import org.springframework.context.annotation.Configuration;
 import com.ruoyi.common.filter.RepeatableFilter;
 import com.ruoyi.common.filter.XssFilter;
 import com.ruoyi.common.utils.StringUtils;
+import com.ruoyi.framework.config.filter.BackupAuthFilter;
+import com.ruoyi.framework.web.service.TokenService;
 
 /**
  * Filter配置
@@ -52,6 +54,26 @@ public class FilterConfig
         registration.addUrlPatterns("/*");
         registration.setName("repeatableFilter");
         registration.setOrder(FilterRegistrationBean.LOWEST_PRECEDENCE);
+        return registration;
+    }
+
+    /**
+     * 备份还原上传通道前置防线（U3）：/system/* 下匿名 POST 且请求体超 1MB 直接 413 拒绝。
+     * Spring MVC 在处理器调用前已完成 multipart 落盘，@PreAuthorize/@RateLimiter 均晚于
+     * 512MB 请求体到达，本 Filter 是唯一的 pre-body 防线。
+     */
+    @SuppressWarnings({ "rawtypes", "unchecked" })
+    @Bean
+    public FilterRegistrationBean backupAuthFilterRegistration(TokenService tokenService)
+    {
+        FilterRegistrationBean registration = new FilterRegistrationBean();
+        registration.setDispatcherTypes(DispatcherType.REQUEST);
+        registration.setFilter(new BackupAuthFilter(tokenService));
+        registration.addUrlPatterns("/system/*");
+        registration.setName("backupAuthFilter");
+        // 紧随 xssFilter（HIGHEST_PRECEDENCE）之后、repeatableFilter（LOWEST）之前，
+        // 保证在任何请求体读取前完成拦截
+        registration.setOrder(FilterRegistrationBean.HIGHEST_PRECEDENCE + 1);
         return registration;
     }
 

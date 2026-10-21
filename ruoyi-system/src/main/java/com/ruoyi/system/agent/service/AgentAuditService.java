@@ -316,6 +316,24 @@ public class AgentAuditService
      */
     public void updateStepStatus(Long stepLogId, String status, String errorMessage)
     {
+        updateStepStatus(stepLogId, status, errorMessage, null);
+    }
+
+    /**
+     * 更新步骤状态与执行结果摘要（步骤执行完成后调用）。
+     * <p>
+     * 对 errorMessage 与 result 应用 PII 纯文本脱敏，防止执行结果（如统计消息中的
+     * 文件名/记录内容）残留用户输入的 PII。result 仅在 success 时由执行器填充
+     * （{@link com.ruoyi.system.agent.executor.StepExecutionResult#summarizeResult}
+     * 已截断 2000 字符），其余状态传 null 表示不更新该列。
+     *
+     * @param stepLogId    步骤日志ID
+     * @param status       最终状态：success / failed / skipped / blocked
+     * @param errorMessage 错误信息（failed 时填充，将自动 PII 脱敏）
+     * @param result       执行结果摘要（success 时填充，将自动 PII 脱敏；null 不更新）
+     */
+    public void updateStepStatus(Long stepLogId, String status, String errorMessage, String result)
+    {
         if (stepLogId == null) return;
         try
         {
@@ -323,6 +341,7 @@ public class AgentAuditService
             update.setId(stepLogId);
             update.setStatus(status);
             update.setErrorMessage(piiRedactor.redact(errorMessage));
+            update.setResult(piiRedactor.redact(result));
             requiresNewTx.execute(s ->
             {
                 agentAuditMapper.updateStepLogStatus(update);

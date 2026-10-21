@@ -1,11 +1,13 @@
 package com.ruoyi.web.controller.system;
 
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.List;
 import javax.servlet.http.HttpServletResponse;
 
 import com.ruoyi.common.core.domain.entity.SysUser;
+import org.springframework.http.MediaType;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.validation.annotation.Validated;
@@ -16,13 +18,20 @@ import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
 import com.ruoyi.common.annotation.Log;
+import com.ruoyi.common.annotation.RateLimiter;
 import com.ruoyi.common.core.controller.BaseController;
 import com.ruoyi.common.core.domain.AjaxResult;
 import com.ruoyi.common.enums.BusinessType;
+import com.ruoyi.common.enums.LimitType;
+import com.ruoyi.common.exception.ServiceException;
+import com.ruoyi.common.utils.file.FileUtils;
 import com.ruoyi.system.domain.NoteNote;
 import com.ruoyi.system.domain.vo.NoteNoteVo;
+import com.ruoyi.system.service.IBackupRestoreService;
 import com.ruoyi.system.service.INoteNoteService;
 import com.ruoyi.common.utils.poi.ExcelUtil;
 import com.ruoyi.common.core.page.TableDataInfo;
@@ -40,6 +49,9 @@ public class NoteNoteController extends BaseController
 {
     @Autowired
     private INoteNoteService noteNoteService;
+
+    @Autowired
+    private IBackupRestoreService backupRestoreService;
 
     /**
      * 查询所有笔记列表
@@ -323,6 +335,54 @@ public class NoteNoteController extends BaseController
         }
 
 
+    }
+
+    /**
+     * 整机数据备份下载（U3）
+     * <p>
+     * 挂接界面"数据备份"按钮（原 404 空壳）：流式返回 backupPath 落盘的整机备份包 zip
+     * （全库结构+数据+用户文件目录，KTD1/KTD4）。响应头对齐 CommonController 下载模式，
+     * 并追加 Cache-Control: no-store——备份包含密码哈希与 PII，不允许任何中间缓存（KTD5）。
+     */
+    @PreAuthorize("@ss.hasPermi('note:note:delete')")
+    @Log(title = "数据备份", businessType = BusinessType.EXPORT, isSaveRequestData = false)
+    @GetMapping("/dataBak")
+    public void dataBak(HttpServletResponse response) throws Exception
+    {
+        // 管理员兜底判定（@PreAuthorize 权限注解之外的第二层鉴权，U3）
+        if (getUserId() != 1)
+        {
+            throw new ServiceException("只有管理员才可执行此操作");
+        }
+        File backup = backupRestoreService.backup();
+        response.setContentType(MediaType.APPLICATION_OCTET_STREAM_VALUE);
+        response.setHeader("Cache-Control", "no-store");
+        FileUtils.setAttachmentResponseHeader(response, backup.getName());
+        FileUtils.writeBytes(backup.getAbsolutePath(), response.getOutputStream());
+    }
+
+    /**
+     * 整机数据还原两步协议（U3）：上传备份包 → 预览摘要 → 确认执行
+     * <p>
+     * confirmed 缺省 false=校验预览步（不写库，返回表数/记录数/文件数/sys_user 告警摘要）；
+     * true=执行步（对本次上传文件重跑全部校验，不跨请求信任预览结果，U2 契约）。
+     * 限流按 IP 键（匿名场景 USER 键失效；XFF 可伪造由 nginx real_ip 收口，见部署手册）；
+     * 请求与响应均不进操作日志——multipart 文件不可序列化，响应含 sys_user 差异摘要。
+     */
+    @PreAuthorize("@ss.hasPermi('note:note:delete')")
+    @Log(title = "数据还原", businessType = BusinessType.IMPORT, isSaveRequestData = false, isSaveResponseData = false)
+    @RateLimiter(time = 60, count = 10, limitType = LimitType.IP)
+    @PostMapping("/restore")
+    public AjaxResult restore(@RequestParam("file") MultipartFile file,
+            @RequestParam(value = "confirmed", required = false, defaultValue = "false") boolean confirmed)
+    {
+        // 管理员兜底判定（匿名请求在 getUserId() 处即抛 401 ServiceException）
+        if (getUserId() != 1)
+        {
+            throw new ServiceException("只有管理员才可执行此操作");
+        }
+        // confirmed=false 仅校验预览（不写库），confirmed=true 执行还原（U2 契约）
+        return success(backupRestoreService.restore(file, confirmed));
     }
 
 

@@ -710,6 +710,13 @@ public class AgentController
             data.put("status", result.getStatus().name());
             data.put("success", result.isSuccess());
             data.put("errorMessage", result.getErrorMessage());
+            // 结果摘要通道：StepExecutionResult 内实现（String 直用/其他类型 fastjson
+            // 序列化后截断 2000 字符），为 null 时不携带字段（保持向后兼容）
+            String resultSummary = result.getResultSummary();
+            if (resultSummary != null)
+            {
+                data.put("resultSummary", resultSummary);
+            }
             sendOrBuffer("step_completed", data);
         }
 

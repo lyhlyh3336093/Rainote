@@ -42,6 +42,9 @@ public class AgentAuditStepLog extends BaseEntity
     /** 错误信息（status=failed 时填充） */
     private String errorMessage;
 
+    /** 执行结果摘要（status=success 时填充：String 直接使用、其他类型 JSON 序列化后截断 2000 字符，PII 脱敏后落库） */
+    private String result;
+
     /** 幂等键（create 操作防重复，路径 A 恢复判断是否已提交） */
     private String stepRequestId;
 
@@ -71,6 +74,9 @@ public class AgentAuditStepLog extends BaseEntity
 
     public String getErrorMessage() { return errorMessage; }
     public void setErrorMessage(String errorMessage) { this.errorMessage = errorMessage; }
+
+    public String getResult() { return result; }
+    public void setResult(String result) { this.result = result; }
 
     public String getStepRequestId() { return stepRequestId; }
     public void setStepRequestId(String stepRequestId) { this.stepRequestId = stepRequestId; }

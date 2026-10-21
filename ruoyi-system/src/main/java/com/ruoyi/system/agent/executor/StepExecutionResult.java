@@ -1,5 +1,7 @@
 package com.ruoyi.system.agent.executor;
 
+import com.alibaba.fastjson2.JSON;
+
 /**
  * 步骤执行结果。
  * <p>
@@ -9,6 +11,9 @@ package com.ruoyi.system.agent.executor;
  */
 public class StepExecutionResult
 {
+    /** 结果摘要最大长度（字符），防止大对象（如列表）撑爆 SSE 事件与审计存储 */
+    private static final int RESULT_SUMMARY_MAX_LENGTH = 2000;
+
     public enum Status
     {
         /** 执行成功 */
@@ -68,4 +73,39 @@ public class StepExecutionResult
     public boolean isSkipped() { return status == Status.SKIPPED; }
     public boolean isBlocked() { return status == Status.BLOCKED; }
     public boolean isPendingConfirmation() { return status == Status.PENDING_CONFIRMATION; }
+
+    /**
+     * 获取本步骤执行结果的摘要（SSE step_completed 事件 resultSummary 字段与审计 result 落库共用）。
+     */
+    public String getResultSummary()
+    {
+        return summarizeResult(result);
+    }
+
+    /**
+     * 将步骤执行结果转为摘要字符串：String 直接使用，其他类型 fastjson 序列化，
+     * 统一截断至 {@link #RESULT_SUMMARY_MAX_LENGTH} 字符兜底（防止列表等大对象撑爆
+     * SSE 事件与审计存储）；序列化失败（如循环引用）返回 null，结果缺失不阻塞业务。
+     *
+     * @param result 步骤执行结果（Service 方法返回值），可为 null
+     * @return 摘要字符串，result 为 null 或序列化失败时返回 null
+     */
+    public static String summarizeResult(Object result)
+    {
+        if (result == null)
+        {
+            return null;
+        }
+        String summary;
+        try
+        {
+            summary = result instanceof String ? (String) result : JSON.toJSONString(result);
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
+        return summary.length() > RESULT_SUMMARY_MAX_LENGTH
+                ? summary.substring(0, RESULT_SUMMARY_MAX_LENGTH) : summary;
+    }
 }

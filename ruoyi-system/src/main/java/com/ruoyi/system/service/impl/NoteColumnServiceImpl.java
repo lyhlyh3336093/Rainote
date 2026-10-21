@@ -29,6 +29,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import com.ruoyi.system.mapper.NoteColumnMapper;
 import com.ruoyi.system.domain.NoteColumn;
+import com.ruoyi.system.service.BackupLockUtil;
 import com.ruoyi.system.service.INoteColumnService;
 import com.ruoyi.system.service.INoteNotelinkService;
 import com.ruoyi.system.service.INoteRecordService;
@@ -116,6 +117,8 @@ public class NoteColumnServiceImpl implements INoteColumnService
     @Override
     public int insertNoteColumn(@AgentParam(value = "column", type = "object", objectType = "NoteColumnVo", allowedFields = {"name", "type", "dwtableId", "property", "isShow", "sort"}, description = "列配置") NoteColumnVo noteColumnvo)
     {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
 
         NoteColumn noteColumn = new NoteColumn();
 
@@ -229,6 +232,8 @@ public class NoteColumnServiceImpl implements INoteColumnService
     @Override
     public int updateNoteColumn(@AgentParam(value = "column", type = "object", objectType = "NoteColumnVo", allowedFields = {"id", "name", "type", "dwtableId", "property", "isShow", "sort"}, description = "列配置") NoteColumnVo noteColumnvo)
     {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
         // 归属校验：通过 columnId → dwtableId → noteId → note.auth 链校验
         agentOwnershipChecker.checkColumnOwnership(noteColumnvo.getId(), SecurityUtils.getUserId());
 
@@ -377,6 +382,8 @@ public class NoteColumnServiceImpl implements INoteColumnService
     @Override
     public int updateColumnDefault(Long columnId, String defaultValue, Long userId)
     {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
         // KTD6: 直更前归属校验不可绕过（admin 通行）
         agentOwnershipChecker.checkColumnOwnership(columnId, userId);
 
@@ -403,6 +410,8 @@ public class NoteColumnServiceImpl implements INoteColumnService
      */
     @Override
     public int updateSort(List<Map<String, Object>> sorts){
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
 
         int result = 1;
         // 收集受影响的 dwtableId（去重），用于排序后按表重算 name
@@ -438,6 +447,8 @@ public class NoteColumnServiceImpl implements INoteColumnService
     @Override
     public int deleteNoteColumnByIds(@AgentParam(value = "ids", type = "list", description = "列ID列表") String[] ids)
     {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
         // 归属校验：批量删除前逐个校验归属
         Long currentUserId = SecurityUtils.getUserId();
         for (String id : ids)
@@ -484,6 +495,8 @@ public class NoteColumnServiceImpl implements INoteColumnService
     @Override
     public int deleteNoteColumnById(@AgentParam(value = "id", type = "long", description = "列ID") Long id)
     {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
         // 归属校验：防止越权删除他人列
         agentOwnershipChecker.checkColumnOwnership(id, SecurityUtils.getUserId());
         //删除列信息的时候，同时去检查是否有item信息，找到并删除
@@ -505,6 +518,8 @@ public class NoteColumnServiceImpl implements INoteColumnService
     @Override
     public int deduplicate(Long columnId)
     {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
         NoteColumn column = noteColumnMapper.selectNoteColumnById(columnId);
         if (column == null || column.getType() != 26L || column.getProperty() == null)
         {

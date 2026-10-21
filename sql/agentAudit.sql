@@ -37,6 +37,7 @@ CREATE TABLE `agent_audit_step_log` (
     `params_json`     TEXT         DEFAULT NULL              COMMENT '参数JSON（PII 脱敏后）',
     `status`          VARCHAR(20)  NOT NULL DEFAULT 'executing' COMMENT '状态：executing/success/failed/skipped/blocked',
     `error_message`   TEXT         DEFAULT NULL              COMMENT '错误信息（status=failed 时填充）',
+    `result`          TEXT         DEFAULT NULL              COMMENT '执行结果摘要（status=success 时填充，截断 2000 字符，PII 脱敏后）',
     `step_request_id` VARCHAR(64)  DEFAULT NULL              COMMENT '幂等键（create 防重复，路径 A 恢复判断是否已提交）',
     `executed_at`     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '执行时间',
     PRIMARY KEY (`id`),

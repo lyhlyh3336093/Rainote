@@ -466,12 +466,15 @@ public class AgentPlanExecutor
             Object result = requiresNewTx.execute(status ->
                     invokeMethod(spec, args));
 
-            // 审计更新（success）
+            StepExecutionResult execResult = StepExecutionResult.success(result);
+
+            // 审计更新（success，携带执行结果摘要：String 直用/JSON 序列化后截断 2000 字符）
             if (stepLogId != null)
             {
-                auditService.updateStepStatus(stepLogId, STATUS_SUCCESS, null);
+                auditService.updateStepStatus(stepLogId, STATUS_SUCCESS, null,
+                        execResult.getResultSummary());
             }
-            return StepExecutionResult.success(result);
+            return execResult;
         }
         catch (Exception e)
         {

@@ -16,6 +16,7 @@ import com.ruoyi.system.domain.NoteMeta;
 import com.ruoyi.system.domain.vo.NoteNoteVo;
 import com.ruoyi.system.mapper.*;
 import com.ruoyi.system.service.INoteRoleMenuService;
+import com.ruoyi.system.service.BackupLockUtil;
 import org.apache.poi.ss.formula.functions.T;
 import org.apache.poi.ss.usermodel.*;
 import org.slf4j.Logger;
@@ -330,6 +331,8 @@ public class NoteNoteServiceImpl implements INoteNoteService
     @AgentOperation(name = "note.create", description = "创建笔记")
     public int insertNoteNote(@AgentParam(value = "note", type = "object", objectType = "NoteNote", allowedFields = {"title", "remark", "parentId", "content"}, description = "笔记内容") NoteNote noteNote)
     {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
         //初始化note
         if(noteNote.getDelFlag()==null){
             noteNote.setDelFlag(0L);
@@ -385,6 +388,8 @@ public class NoteNoteServiceImpl implements INoteNoteService
     @AgentOperation(name = "note.update", description = "更新笔记", permissionKey = "note:note:edit")
     public int updateNoteNote(@AgentParam(value = "note", type = "object", objectType = "NoteNote", allowedFields = {"id", "title", "remark", "parentId", "content"}, description = "笔记内容") NoteNote noteNote)
     {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
         // 归属校验：防止越权操作他人笔记
         ownershipChecker.checkNoteOwnership(noteNote.getId(), SecurityUtils.getUserId());
 
@@ -428,7 +433,8 @@ public class NoteNoteServiceImpl implements INoteNoteService
     @Override
     public int saveAsNewNote(NoteNote noteNote)
     {
-
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
 
         //获取用户信息
         SysUser user = sysUserMapper.selectUserById(noteNote.getAuth());
@@ -504,6 +510,8 @@ public class NoteNoteServiceImpl implements INoteNoteService
 
     @Override
     public int updateFirstLogin(Long userId) {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
         sysUserMapper.updateFirstLogin(userId);
         return 0;
     }
@@ -557,6 +565,8 @@ public class NoteNoteServiceImpl implements INoteNoteService
     @AgentOperation(name = "note.batchDelete", destructive = true, permissionKey = "note:note:delete", description = "批量删除笔记")
     public int deleteNoteNoteByIds(@AgentParam(value = "ids", type = "list", description = "笔记ID列表") String[] ids)
     {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
         // 归属校验：批量删除前逐个校验归属（团队安全约定：批量操作验证全部项后才处理）
         Long currentUserId = SecurityUtils.getUserId();
         for (String id : ids)
@@ -611,6 +621,8 @@ public class NoteNoteServiceImpl implements INoteNoteService
     @Override
     public int removeAll()
     {
+        // 备份/还原写锁检查：进行中则拒绝清空（KTD3）
+        BackupLockUtil.checkNotLocked();
         // 纵深防御：Service 层管理员校验（Controller 层已有 getUserId()==1 拦截，agent 直调 Service 会绕过）
         if (!SecurityUtils.isAdmin(SecurityUtils.getUserId()))
         {
@@ -639,6 +651,8 @@ public class NoteNoteServiceImpl implements INoteNoteService
     @Override
     public int removeAllData()
     {
+        // 备份/还原写锁检查：进行中则拒绝清空（KTD3）
+        BackupLockUtil.checkNotLocked();
         // 纵深防御：Service 层管理员校验
         if (!SecurityUtils.isAdmin(SecurityUtils.getUserId()))
         {
@@ -669,6 +683,8 @@ public class NoteNoteServiceImpl implements INoteNoteService
     @Override
     @Transactional(rollbackFor = Exception.class)
     public int deleteNoteFromGarbageByIds(String[] ids) {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
 
         List<String> allIds = new ArrayList<>(Arrays.asList(ids));
         for (String id:
@@ -732,6 +748,8 @@ public class NoteNoteServiceImpl implements INoteNoteService
      */
     @Override
     public int cancelCollectionByIds(String id) {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
         return noteNoteMapper.cancelCollectionById(id);
     }
 
@@ -743,6 +761,8 @@ public class NoteNoteServiceImpl implements INoteNoteService
      */
     @Override
     public int collectionNoteByIds(String id) {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
         return noteNoteMapper.collectionNoteById(id);
     }
 
@@ -755,6 +775,8 @@ public class NoteNoteServiceImpl implements INoteNoteService
      */
     @Override
     public int setTemplate(String id) {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
         return noteNoteMapper.setTemplate(id);
     }
 
@@ -766,6 +788,8 @@ public class NoteNoteServiceImpl implements INoteNoteService
      */
     @Override
     public int removeTemplate(String id) {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
         return noteNoteMapper.removeTemplate(id);
     }
 
@@ -778,6 +802,8 @@ public class NoteNoteServiceImpl implements INoteNoteService
     @Override
     @Transactional(rollbackFor = Exception.class)
     public int recoverNoteNoteByIds(String[] ids) {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
 
         List<String> allIds = new ArrayList<>(Arrays.asList(ids));
         for(String id: ids){
@@ -820,6 +846,8 @@ public class NoteNoteServiceImpl implements INoteNoteService
     @AgentOperation(name = "note.delete", destructive = true, permissionKey = "note:note:delete", description = "删除单个笔记")
     public int deleteNoteNoteById(@AgentParam(value = "id", type = "long", description = "笔记ID") Long id)
     {
+        // 备份/还原写锁检查：进行中则拒绝写入（KTD3）
+        BackupLockUtil.checkNotLocked();
         // 归属校验：防止越权删除他人笔记
         ownershipChecker.checkNoteOwnership(id, SecurityUtils.getUserId());
 

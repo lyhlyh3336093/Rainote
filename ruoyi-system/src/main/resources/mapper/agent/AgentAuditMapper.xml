@@ -27,6 +27,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="paramsJson"      column="params_json"      />
         <result property="status"          column="status"           />
         <result property="errorMessage"    column="error_message"    />
+        <result property="result"         column="result"           />
         <result property="stepRequestId"   column="step_request_id"  />
         <result property="executedAt"      column="executed_at"      />
     </resultMap>
@@ -37,7 +38,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     </sql>
 
     <sql id="stepLogColumns">
-        id, audit_log_id, step_index, step_id, operation_name, params_json, status, error_message, step_request_id, executed_at
+        id, audit_log_id, step_index, step_id, operation_name, params_json, status, error_message, result, step_request_id, executed_at
     </sql>
 
     <!-- ===== 主审计记录 ===== -->
@@ -99,6 +100,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <set>
             <if test="status != null">status = #{status},</if>
             <if test="errorMessage != null">error_message = #{errorMessage},</if>
+            <if test="result != null">result = #{result},</if>
         </set>
         where id = #{id}
     </update>

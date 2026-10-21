@@ -61,3 +61,4 @@ ruoyi-admin/src/main/resources/application-local.yml
 # Standalone sub-project (has its own .gitignore / node_modules)
 # notepad/ 已取消排除：notepad 目录有自己的 .gitignore 排除 node_modules/dist
 # notepad/
+deploy-tmp/

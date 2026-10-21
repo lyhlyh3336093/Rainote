@@ -11,6 +11,8 @@ ruoyi:
   # 文件路径 示例（ Windows配置D:/ruoyi/uploadPath，Linux配置 /home/ruoyi/uploadPath）
   profile: D:/ruoyi/uploadPath
 #  profile: /home/ruoyi/uploadPath
+  # 备份落盘路径（整机备份包与还原快照，独立于 profile，不经 /profile/** 静态映射）
+  backupPath: D:/ruoyi/backup
   # 获取ip地址开关
   addressEnabled: false
   # 验证码类型 math 数组计算 char 字符验证
@@ -62,10 +64,10 @@ spring:
   # 文件上传
   servlet:
      multipart:
-       # 单个文件大小
-       max-file-size:  10MB
+       # 单个文件大小（还原上传备份包需 512MB）
+       max-file-size:  512MB
        # 设置总上传的文件大小
-       max-request-size:  20MB
+       max-request-size:  512MB
   # 服务模块
   devtools:
     restart:
