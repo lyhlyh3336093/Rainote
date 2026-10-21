@@ -63,3 +63,14 @@ After a replace-style import rebuilds a table's records with new IDs, incoming l
 
 ### NoteDwtableItem
 A cell in the data table, identified by recordId + columnId. For type=21 columns, stores `value`, `linkRecordId`, and `linkColumnId`. For type=26 columns, these link fields are NULL — the data lives in the referenced double link column's item.
+
+## Backup & Restore
+
+### Backup Package (整机备份包)
+The zip artifact of a full-app backup: per-table `schema/<table>.sql` (DROP+SHOW CREATE TABLE) + `data/<table>.sql` (row-by-row INSERT) + `files/` (upload/avatar/import directories) + `manifest.json` (packageVersion, schema fingerprint, table list with row counts, file stats). The fingerprint hashes table name + column names + types + precision, and restore rejects on mismatch (version-mismatch guard), with an empty-current-database exemption (fresh-environment migration). `QRTZ_` tables are excluded on export and fail-closed on restore. Slots under the dedicated backupPath keep exactly one `backup.zip` and one `snapshot.zip` (separate slots so a backup cannot evict the recovery point).
+
+### Snapshot Replay (快照回放)
+The failure-recovery mechanism replacing DB-transaction rollback for full restores — MySQL DDL (DROP/CREATE) implicitly commits, so a single-transaction restore is mechanically impossible. Before execution, a restore-time snapshot is generated; on any execution failure the snapshot is replayed. Replay is a restricted internal path, NOT "run restore again": it is exempt from fingerprint check (a half-restored DB never matches), snapshot generation (must not overwrite the recovery point with a corrupted DB), and confirmed gating — while retaining zip-extraction guards and the SQL whitelist. Replay failure sets the RESTORE_INCONSISTENT flag (backup is refused; restore of the snapshot package goes through the fingerprint-exempt self-healing channel) and never recurses. A `restore-in-progress.marker` written between snapshot and SQL execution enables automatic replay on next startup after a crash.
+
+### Trigger-Level Write Lock (触发级写锁)
+The in-process mutual-exclusion mechanism (`BackupLockUtil`, a static AtomicBoolean) held during backup/restore execution. Consumer checks are explicitly embedded at the head of ~37 write entry points (imports, agent write operations, removeAllData, note recovery/sort/template, uploads, avatar) rather than via AOP — explicit calls are visible per-entry and immune to self-invocation bypassing the proxy. `backup()` is split into a lock-checking thin shell plus a lock-free `exportInternal()` so restore's internal snapshot generation does not deadlock against the lock it already holds. Single-instance assumption: the lock does not span processes.
