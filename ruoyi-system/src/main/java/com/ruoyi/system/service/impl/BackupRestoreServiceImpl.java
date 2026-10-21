@@ -1,6 +1,7 @@
 package com.ruoyi.system.service.impl;
 
 import java.io.BufferedInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
@@ -54,6 +55,7 @@ import com.alibaba.fastjson2.JSONObject;
 import com.ruoyi.common.config.RuoYiConfig;
 import com.ruoyi.common.exception.ServiceException;
 import com.ruoyi.common.utils.SecurityUtils;
+import com.ruoyi.system.agent.annotation.AgentOperation;
 import com.ruoyi.system.domain.dto.RestoreResult;
 import com.ruoyi.system.service.BackupLockUtil;
 import com.ruoyi.system.service.IBackupRestoreService;
@@ -109,6 +111,12 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
 
     /** manifest.json 固定文件名 */
     private static final String MANIFEST_FILENAME = "manifest.json";
+
+    /** 管理员用户 id（agent 备份的服务层兜底判定口径，与界面端点 getUserId()==1 一致，KTD7） */
+    private static final Long ADMIN_USER_ID = Long.valueOf(1L);
+
+    /** 非管理员拒绝文案（与界面 dataBak/restore 端点一致） */
+    private static final String ADMIN_ONLY_MESSAGE = "只有管理员才可执行此操作";
 
     /** 入包的用户文件目录（profile 下；download 目录不入包，R2/R3） */
     private static final String[] FILE_DIRS = {"upload", "avatar", "import"};
@@ -214,6 +222,105 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
         {
             releaseLock();
         }
+    }
+
+    /**
+     * Agent 操作入口（U4/KTD7）：触发整机备份并返回结构化成功消息。
+     * <p>
+     * 鉴权双层：{@code @AgentOperation} 声明<strong>非空 permissionKey</strong>
+     * （note:note:delete，与界面 dataBak/restore 端点的 @PreAuthorize 同键——agent
+     * 执行器 Layer 3 权限闸门按此校验；空键时闸门放行，任一登录用户即可触发全库导出），
+     * 本方法入口再做 userId==1 管理员兜底判定（服务层第二层）。与界面同一后端能力
+     * （直调 backup()），受同一触发级写锁约束；agent 无文件下载通道，结果只返回
+     * 统计摘要与界面下载引导。agent 不触发还原（预览+二次确认无法映射 agent 交互，
+     * 还原仅经界面 POST /system/note/restore）。
+     *
+     * @param userId 框架注入的当前用户 id（不暴露给 LLM）
+     * @return 备份完成消息（表数/记录数/文件数/包大小/文件名 + 界面下载引导）
+     */
+    @AgentOperation(name = "note.backup", permissionKey = "note:note:delete",
+            description = "触发整机数据备份：将全库表结构与数据及用户文件目录（upload/avatar/import）"
+                    + "打包为迁移备份包，仅管理员可执行。返回备份统计（表数/记录数/文件数/包大小/文件名）；"
+                    + "备份文件不随消息返回，完成后请在界面点击「数据备份」按钮下载。"
+                    + "数据还原（上传备份包恢复）不支持经 agent 触发，请在界面操作。")
+    public String backupForAgent(Long userId)
+    {
+        // KTD7 服务层管理员兜底：permissionKey 之外的第二层判定，非 userId==1（含 null）拒绝
+        if (!ADMIN_USER_ID.equals(userId))
+        {
+            throw new ServiceException(ADMIN_ONLY_MESSAGE);
+        }
+        File backup = backup();
+        return buildBackupMessage(backup);
+    }
+
+    /**
+     * 组装 agent 备份成功消息：从备份包 manifest 读统计（表数/记录数/文件数），
+     * 包大小取落盘文件长度；manifest 读取失败不影响备份完成事实，退化为
+     * 仅包大小/文件名+引导的降级消息。
+     */
+    private String buildBackupMessage(File backup)
+    {
+        StringBuilder message = new StringBuilder("备份完成：");
+        try (InputStream in = new BufferedInputStream(
+                Files.newInputStream(backup.toPath()), COPY_BUFFER_SIZE))
+        {
+            JSONObject manifest = findManifestInZip(in);
+            if (manifest != null)
+            {
+                long records = 0L;
+                JSONArray tables = manifest.getJSONArray("tables");
+                if (tables != null)
+                {
+                    for (int i = 0; i < tables.size(); i++)
+                    {
+                        records += tables.getJSONObject(i).getLongValue("rows");
+                    }
+                    message.append("共 ").append(tables.size()).append(" 张表、")
+                            .append(records).append(" 条记录、");
+                }
+                JSONObject fileStats = manifest.getJSONObject("fileStats");
+                if (fileStats != null)
+                {
+                    message.append(fileStats.getLongValue("totalFiles")).append(" 个文件、");
+                }
+            }
+        }
+        catch (IOException | RuntimeException e)
+        {
+            log.warn("[BACKUP] agent 消息读取 manifest 统计失败 {}", backup.getName(), e);
+        }
+        message.append(String.format("包大小 %.2f MB（%s）。", backup.length() / 1024.0 / 1024.0,
+                        backup.getName()))
+                .append("请在界面点击「数据备份」按钮下载备份文件。");
+        return message.toString();
+    }
+
+    /**
+     * 流式扫描 zip 定位 manifest.json 条目并解析（manifest 由本服务导出时最后写入，
+     * 常规备份包必然存在；找不到返回 null 走降级消息）。
+     */
+    private JSONObject findManifestInZip(InputStream in) throws IOException
+    {
+        try (ZipInputStream zis = new ZipInputStream(in))
+        {
+            ZipEntry entry;
+            while ((entry = zis.getNextEntry()) != null)
+            {
+                if (MANIFEST_FILENAME.equals(entry.getName()))
+                {
+                    ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                    byte[] buffer = new byte[COPY_BUFFER_SIZE];
+                    int n;
+                    while ((n = zis.read(buffer)) >= 0)
+                    {
+                        bos.write(buffer, 0, n);
+                    }
+                    return JSONObject.parseObject(new String(bos.toByteArray(), StandardCharsets.UTF_8));
+                }
+            }
+        }
+        return null;
     }
 
     /**
