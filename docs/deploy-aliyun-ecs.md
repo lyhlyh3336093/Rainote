@@ -343,6 +343,14 @@ chmod +x /etc/cron.daily/rainote-backup
 
 恢复：`gunzip < ry-vue-YYYY-MM-DD.sql.gz | mysql -uroot -p ry-vue`。
 
+### 8.1 已部署环境升级（agent 审计表加列）
+
+本仓库某版本起 agent 步骤审计新增 result 列——**已有数据的环境升级时执行**（全新初始化走 agentAudit.sql 无需）：
+
+```bash
+mysql -uroot -p -e "ALTER TABLE \`ry-vue\`.note_agent_audit_step_log ADD COLUMN result text COMMENT '步骤结果摘要(截断2000)';"
+```
+
 ---
 
 ## 9. 上线验证清单
