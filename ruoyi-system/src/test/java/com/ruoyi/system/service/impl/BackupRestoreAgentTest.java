@@ -90,8 +90,12 @@ class BackupRestoreAgentTest
         assertTrue(message.contains(String.format("%.2f MB", zip.length() / 1024.0 / 1024.0)),
                 "消息应含包大小统计: " + message);
         assertTrue(message.contains("backup.zip"), "消息应含备份文件名: " + message);
-        // 界面下载引导（agent 无文件下载通道）
+        // 界面下载引导语义澄清：按钮基于当前数据重新生成并下载（非直接下载本次文件）、
+        // 覆盖槽位旧备份仅保留最近 1 份（agent 无文件下载通道）
         assertTrue(message.contains("数据备份"), "消息应含界面下载引导: " + message);
+        assertTrue(message.contains("基于当前数据生成最新备份并下载"),
+                "消息应澄清按钮为重新生成而非下载本次文件: " + message);
+        assertTrue(message.contains("仅保留最近 1 份"), "消息应说明槽位覆盖保留策略: " + message);
         Mockito.verify(spy).backup();
     }
 
@@ -169,6 +173,9 @@ class BackupRestoreAgentTest
         assertTrue(op.description().contains("全库"));
         assertTrue(op.description().contains("upload/avatar/import"));
         assertTrue(op.description().contains("管理员"));
+        // 下载引导语义澄清：按钮重新生成并下载（非直接下载本次文件）、槽位仅保留最近 1 份
+        assertTrue(op.description().contains("基于当前数据生成最新备份并下载"));
+        assertTrue(op.description().contains("仅保留最近 1 份"));
     }
 
     // ===== 构造工具 =====

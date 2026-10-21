@@ -22,6 +22,10 @@
       <div v-if="stepLog?.errorMessage" class="step-error">
         <i class="bi bi-exclamation-triangle"></i> {{ stepLog.errorMessage }}
       </div>
+      <!-- 执行结果摘要（status=success 时后端填充，如备份统计/导入结果等操作返回消息） -->
+      <div v-if="stepLog?.result && status === 'success'" class="step-result">
+        <i class="bi bi-check2-circle"></i> {{ stepLog.result }}
+      </div>
     </div>
   </div>
 </template>
@@ -170,6 +174,14 @@ const displayParams = computed(() => {
       margin-top: 4px;
       font-size: 12px;
       color: #ff4d4f;
+    }
+
+    .step-result {
+      margin-top: 4px;
+      font-size: 12px;
+      color: #389e0d;
+      white-space: pre-wrap;
+      word-break: break-word;
     }
   }
 }

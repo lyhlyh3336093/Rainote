@@ -244,12 +244,14 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
      * 还原仅经界面 POST /system/note/restore）。
      *
      * @param userId 框架注入的当前用户 id（不暴露给 LLM）
-     * @return 备份完成消息（表数/记录数/文件数/包大小/文件名 + 界面下载引导）
+     * @return 备份完成消息（表数/记录数/文件数/包大小/文件名 + 界面下载引导：
+     *         「数据备份」按钮将基于当前数据重新生成并下载，非直接下载本次生成的文件）
      */
     @AgentOperation(name = "note.backup", permissionKey = "note:note:delete",
             description = "触发整机数据备份：将全库表结构与数据及用户文件目录（upload/avatar/import）"
                     + "打包为迁移备份包，仅管理员可执行。返回备份统计（表数/记录数/文件数/包大小/文件名）；"
-                    + "备份文件不随消息返回，完成后请在界面点击「数据备份」按钮下载。"
+                    + "备份文件不随消息返回，界面「数据备份」按钮将基于当前数据生成最新备份并下载"
+                    + "（非直接下载本次生成的文件）；生成后覆盖槽位内旧备份，仅保留最近 1 份。"
                     + "数据还原（上传备份包恢复）不支持经 agent 触发，请在界面操作。")
     public String backupForAgent(Long userId)
     {
@@ -300,7 +302,8 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
         }
         message.append(String.format("包大小 %.2f MB（%s）。", backup.length() / 1024.0 / 1024.0,
                         backup.getName()))
-                .append("请在界面点击「数据备份」按钮下载备份文件。");
+                .append("备份文件不随消息直接下载：界面「数据备份」按钮将基于当前数据生成最新备份并下载")
+                .append("（非直接下载本次生成的文件），生成后覆盖槽位内旧备份，仅保留最近 1 份。");
         return message.toString();
     }
 

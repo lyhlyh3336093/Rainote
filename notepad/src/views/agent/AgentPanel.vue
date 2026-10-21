@@ -130,6 +130,8 @@
                           {{ stepStatusLabel(step.status) }}
                         </span>
                         <div v-if="step.errorMessage" class="step-error">{{ step.errorMessage }}</div>
+                        <!-- 执行结果摘要（status=success 时后端填充，如备份统计/导入结果等操作返回消息） -->
+                        <div v-if="step.result && step.status === 'success'" class="step-result">{{ step.result }}</div>
                       </div>
                     </div>
                     <div v-else class="detail-empty">无步骤记录</div>
@@ -483,6 +485,15 @@ async function handleClickHistory(item: AgentAuditLog) {
             font-size: 11px;
             padding-left: 24px;
             margin-top: 2px;
+          }
+          .step-result {
+            width: 100%;
+            color: #389e0d;
+            font-size: 11px;
+            padding-left: 24px;
+            margin-top: 2px;
+            white-space: pre-wrap;
+            word-break: break-word;
           }
         }
         .detail-empty {

@@ -654,8 +654,20 @@ export const useAgentStore = defineStore('agent', {
             this.sseRetryCount = 0;
 
             switch (event.event) {
+                case 'step_completed': {
+                    // SSE 携带 stepId/status/errorMessage/resultSummary——先本地增量更新
+                    // 已有 stepLog（结果摘要即时呈现），再全量同步兜底（DB 为权威）
+                    const data = event.data || {};
+                    const log = this.stepLogs.find(l => l.stepId === data.stepId);
+                    if (log) {
+                        if (data.status) log.status = String(data.status).toLowerCase();
+                        if (data.errorMessage) log.errorMessage = data.errorMessage;
+                        if (data.resultSummary !== undefined) log.result = data.resultSummary;
+                    }
+                    this.syncStepLogs();
+                    break;
+                }
                 case 'step_started':
-                case 'step_completed':
                 case 'step_blocked':
                 case 'step_pending':
                     // 更新步骤状态（通过 audit/详情接口全量同步，或增量更新）

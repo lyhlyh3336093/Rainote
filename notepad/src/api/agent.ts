@@ -54,6 +54,8 @@ export interface AgentAuditStepLog {
     status: 'executing' | 'success' | 'failed' | 'skipped' | 'blocked' | 'pending_confirm';
     paramsJson?: string;
     errorMessage?: string;
+    /** 执行结果摘要（status=success 时后端填充：String 直用/JSON 序列化后截断 2000 字符） */
+    result?: string;
     stepRequestId?: string;
     executedAt?: string;
 }
