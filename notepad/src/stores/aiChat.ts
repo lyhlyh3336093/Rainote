@@ -2,6 +2,7 @@ import { defineStore } from 'pinia';
 import { message } from 'ant-design-vue';
 import { useCookie } from '../hooks';
 import { API_BASE } from '../config/api';
+import { handleVipCode } from '../api/vip';
 import {
     listSessions as fetchListSessions,
     createSession as fetchCreateSession,
@@ -196,6 +197,26 @@ export const useAiChatStore = defineStore('aiChat', {
 
                 if (!response.ok) {
                     throw new Error(`HTTP ${response.status}`);
+                }
+
+                // VIP 限额拒绝（U7/KTD5）：后端 602/603 以 HTTP 200 + JSON 返回，
+                // 解析 SSE 流之前先检测 Content-Type，命中则中止并弹对应提示
+                const contentType = response.headers.get('content-type') || '';
+                if (contentType.includes('application/json')) {
+                    const body = await response.json().catch(() => ({} as any));
+                    if (!assistantMsg.content) {
+                        this.messages = this.messages.filter(m => m !== assistantMsg);
+                    }
+                    if (body?.code === 602) {
+                        handleVipCode(602, body?.msg);
+                        return;
+                    }
+                    if (body?.code === 603) {
+                        message.error(body?.msg || 'AI 对话次数已达今日上限，请明日重试');
+                        return;
+                    }
+                    message.error(body?.msg || 'AI 服务暂时不可用，请稍后重试');
+                    return;
                 }
 
                 const reader = response.body!.getReader();

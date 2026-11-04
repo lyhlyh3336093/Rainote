@@ -8,6 +8,7 @@
  */
 import useCookie from '../hooks/useCookie';
 import { API_BASE } from '../config/api';
+import { handleVipCode } from './vip';
 
 const cookie = useCookie;
 
@@ -130,6 +131,8 @@ export function setAgentSessionId(id: string | null) {
 /**
  * 统一请求函数（原生 fetch）。
  * 返回完整 {code, msg, data}，由调用方按 code 分支处理。
+ * VIP 限额错误码（U7/KTD5）：602 弹升级引导跳 /vip、603 纯提示，
+ * 在此统一处理后仍原样返回结果，由 store 层展示对应错误条目。
  */
 async function request<T = any>(method: string, path: string, body?: any): Promise<ApiResult<T>> {
     const token = cookie.get('token');
@@ -145,7 +148,9 @@ async function request<T = any>(method: string, path: string, body?: any): Promi
         headers,
         body: body !== undefined ? JSON.stringify(body) : undefined,
     });
-    return response.json();
+    const result = await response.json();
+    handleVipCode(result?.code, result?.msg);
+    return result;
 }
 
 /** POST /agent/chat — 意图解析与计划生成 */

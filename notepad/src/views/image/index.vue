@@ -53,6 +53,7 @@ import { message, UploadChangeParam } from "ant-design-vue";
 import { useStore } from "../../stores/editor";
 import { useCookie } from "../../hooks";
 import { API_BASE } from "../../config/api";
+import { handleVipCode } from "../../api/vip";
 import { directive } from "v-viewer";
 import "viewerjs/dist/viewer.css";
 import { storeToRefs } from "pinia";
@@ -125,7 +126,10 @@ export default defineComponent({
           fileList.value = [fileInfo];
           cache.value = [fileInfo];
         } else {
-          message.error(response.msg);
+          // VIP 限额错误码（U7/KTD5）：602 弹升级引导跳 /vip；603 纯提示（不引导升级）
+          if (!handleVipCode(response.code, response.msg)) {
+            message.error(response.msg);
+          }
         }
       } else if (status === "error") {
         message.error(`${info.file.name} 上传失败`);

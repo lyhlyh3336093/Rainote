@@ -89,6 +89,14 @@ const routes = [{
                     title: '共享空间',
                 },
                 component: () => import('@/views/shared/index.vue'),
+            },
+            {
+                name: 'vip',
+                path: '/vip',
+                meta: {
+                    title: 'VIP会员',
+                },
+                component: () => import('@/views/vip/index.vue'),
             }
         ],
     },
