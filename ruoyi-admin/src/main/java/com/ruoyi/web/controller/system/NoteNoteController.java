@@ -33,6 +33,7 @@ import com.ruoyi.system.domain.NoteNote;
 import com.ruoyi.system.domain.vo.NoteNoteVo;
 import com.ruoyi.system.service.IBackupRestoreService;
 import com.ruoyi.system.service.INoteNoteService;
+import com.ruoyi.system.service.IPersonalExportService;
 import com.ruoyi.system.service.VipService;
 import com.ruoyi.common.utils.poi.ExcelUtil;
 import com.ruoyi.common.core.page.TableDataInfo;
@@ -56,6 +57,9 @@ public class NoteNoteController extends BaseController
 
     @Autowired
     private VipService vipService;
+
+    @Autowired
+    private IPersonalExportService personalExportService;
 
     /**
      * 查询所有笔记列表
@@ -270,6 +274,25 @@ public class NoteNoteController extends BaseController
     {
         vipService.assertNoteQuota(getUserId());
         return success(noteNoteService.saveAsNewNote(noteNote));
+    }
+
+    /**
+     * VIP 个人数据导出（U9/R14 调整后：VIP 备份权益，仅打包当前用户本人的笔记/表格/附件）。
+     * <p>
+     * 与 /dataBak 整机备份是隔离的信任边界——整机含全站数据与密码哈希，维持仅管理员；
+     * 个人导出数据筛选一律以 auth=userId 为界（AE-P3：A 的导出包不含 B 的任何数据）。
+     */
+    @Log(title = "VIP个人数据导出", businessType = BusinessType.EXPORT)
+    @GetMapping("/myExport")
+    public void myExport(HttpServletResponse response) throws Exception
+    {
+        Long userId = getUserId();
+        // VIP 断言（admin 豁免；普通用户 602 引导升级）
+        vipService.assertPersonalExport(userId);
+        String fileName = "personal-export-" + userId + "-" + System.currentTimeMillis() + ".zip";
+        response.setContentType("application/zip");
+        response.setHeader("Content-Disposition", "attachment; filename=" + fileName);
+        personalExportService.writeZipTo(userId, response.getOutputStream());
     }
 
 
