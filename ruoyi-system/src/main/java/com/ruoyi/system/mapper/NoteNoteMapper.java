@@ -152,6 +152,15 @@ public interface NoteNoteMapper
     public List<NoteNote> selectNoteListByAuthId(Long authId);
 
     /**
+     * 统计用户活跃笔记数（VIP笔记配额口径，U2）
+     * 排除：垃圾（delFlag=1）、文件夹（noteType=1）、模板（templateFlag=1）
+     *
+     * @param userId 用户ID（note_note.auth）
+     * @return 活跃笔记数
+     */
+    public int countUserActiveNotes(Long userId);
+
+    /**
      * 新增笔记
      * 
      * @param noteNote 笔记

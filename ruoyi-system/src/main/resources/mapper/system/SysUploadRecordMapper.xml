@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ruoyi.system.mapper.SysUploadRecordMapper">
+
+    <resultMap type="SysUploadRecord" id="SysUploadRecordResult">
+        <result property="id"         column="id"          />
+        <result property="userId"     column="user_id"     />
+        <result property="fileName"   column="file_name"   />
+        <result property="filePath"   column="file_path"   />
+        <result property="fileSize"   column="file_size"   />
+        <result property="bizType"    column="biz_type"    />
+        <result property="createTime" column="create_time" />
+    </resultMap>
+
+    <insert id="insertSysUploadRecord" parameterType="SysUploadRecord" useGeneratedKeys="true" keyProperty="id">
+        insert into sys_upload_record (user_id, file_name, file_path, file_size, biz_type, create_time)
+        values (#{userId}, #{fileName}, #{filePath}, #{fileSize}, #{bizType}, sysdate())
+    </insert>
+
+    <select id="sumFileSizeByUserId" parameterType="Long" resultType="Long">
+        select coalesce(sum(file_size), 0) from sys_upload_record where user_id = #{userId}
+    </select>
+
+    <select id="selectSysUploadRecordByUserId" parameterType="Long" resultMap="SysUploadRecordResult">
+        select id, user_id, file_name, file_path, file_size, biz_type, create_time
+        from sys_upload_record
+        where user_id = #{userId}
+        order by create_time desc
+    </select>
+
+    <delete id="deleteSysUploadRecordByFilePaths">
+        delete from sys_upload_record where file_path in
+        <foreach collection="filePaths" item="filePath" open="(" separator="," close=")">
+            #{filePath}
+        </foreach>
+    </delete>
+
+</mapper>

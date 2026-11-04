@@ -171,6 +171,14 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         order by parentId
     </select>
 
+    <!-- VIP笔记配额统计（U2）：排除垃圾/文件夹(noteType=1)/模板 -->
+    <select id="countUserActiveNotes" parameterType="Long" resultType="int">
+        select count(*) from note_note
+        where auth = #{userId} and delFlag = 0
+          and (noteType is null or noteType != 1)
+          and (templateFlag is null or templateFlag != 1)
+    </select>
+
         
     <insert id="insertNoteNote" useGeneratedKeys="true" keyColumn="id" keyProperty="id" parameterType="NoteNote">
         insert into note_note

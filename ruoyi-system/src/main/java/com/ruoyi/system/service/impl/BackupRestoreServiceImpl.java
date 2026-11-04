@@ -123,8 +123,8 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
     /** 非管理员拒绝文案（与界面 dataBak/restore 端点一致） */
     private static final String ADMIN_ONLY_MESSAGE = "只有管理员才可执行此操作";
 
-    /** 入包的用户文件目录（profile 下；download 目录不入包，R2/R3） */
-    private static final String[] FILE_DIRS = {"upload", "avatar", "import"};
+    /** 入包的用户文件目录（profile 下；download 目录不入包，R2/R3；vip 为收款码图片，KTD8） */
+    private static final String[] FILE_DIRS = {"upload", "avatar", "import", "vip"};
 
     /** 文件流式拷贝缓冲区大小 */
     private static final int COPY_BUFFER_SIZE = 8192;

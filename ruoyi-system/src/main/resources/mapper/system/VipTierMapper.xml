@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ruoyi.system.mapper.VipTierMapper">
+
+    <resultMap type="VipTier" id="VipTierResult">
+        <result property="id"     column="id"     />
+        <result property="name"   column="name"   />
+        <result property="days"   column="days"   />
+        <result property="price"  column="price"  />
+        <result property="sort"   column="sort"   />
+        <result property="status" column="status" />
+    </resultMap>
+
+    <sql id="selectVipTierVo">
+        select id, name, days, price, sort, status from vip_tier
+    </sql>
+
+    <select id="selectVipTierById" parameterType="Long" resultMap="VipTierResult">
+        <include refid="selectVipTierVo"/>
+        where id = #{id}
+    </select>
+
+    <select id="selectVipTierList" parameterType="VipTier" resultMap="VipTierResult">
+        <include refid="selectVipTierVo"/>
+        <where>
+            <if test="name != null and name != ''"> and name like concat('%', #{name}, '%')</if>
+            <if test="status != null and status != ''"> and status = #{status}</if>
+        </where>
+        order by sort, id
+    </select>
+
+    <insert id="insertVipTier" parameterType="VipTier" useGeneratedKeys="true" keyProperty="id">
+        insert into vip_tier (name, days, price, sort, status)
+        values (#{name}, #{days}, #{price}, #{sort}, #{status})
+    </insert>
+
+    <update id="updateVipTier" parameterType="VipTier">
+        update vip_tier
+        <set>
+            <if test="name != null and name != ''">name = #{name},</if>
+            <if test="days != null">days = #{days},</if>
+            <if test="price != null">price = #{price},</if>
+            <if test="sort != null">sort = #{sort},</if>
+            <if test="status != null and status != ''">status = #{status},</if>
+        </set>
+        where id = #{id}
+    </update>
+
+    <delete id="deleteVipTierById" parameterType="Long">
+        delete from vip_tier where id = #{id}
+    </delete>
+
+</mapper>
