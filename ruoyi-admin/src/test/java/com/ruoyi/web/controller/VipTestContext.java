@@ -38,6 +38,7 @@ public final class VipTestContext
     {
         SysUser user = new SysUser();
         user.setUserId(userId);
+        user.setUserName("user" + userId);
         LoginUser loginUser = new LoginUser(userId, 100L, user, new HashSet<>(Collections.singletonList("*:*:*")));
         UsernamePasswordAuthenticationToken authentication =
                 new UsernamePasswordAuthenticationToken(loginUser, null);

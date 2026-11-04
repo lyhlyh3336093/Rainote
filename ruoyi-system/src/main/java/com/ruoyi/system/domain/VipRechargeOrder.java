@@ -79,6 +79,9 @@ public class VipRechargeOrder extends BaseEntity implements Serializable
     /** 查询过滤：结束时间 */
     private Date endTime;
 
+    /** 审核决定（U6 审核请求参数，非表列：true=通过 false=驳回） */
+    private Boolean approve;
+
     public void setId(Long id)
     {
         this.id = id;
@@ -247,6 +250,16 @@ public class VipRechargeOrder extends BaseEntity implements Serializable
     public Date getEndTime()
     {
         return endTime;
+    }
+
+    public void setApprove(Boolean approve)
+    {
+        this.approve = approve;
+    }
+
+    public Boolean getApprove()
+    {
+        return approve;
     }
 
     @Override
