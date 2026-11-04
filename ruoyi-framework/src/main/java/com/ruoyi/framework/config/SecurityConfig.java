@@ -115,6 +115,8 @@ public class SecurityConfig extends WebSecurityConfigurerAdapter
                 .sessionManagement().sessionCreationPolicy(SessionCreationPolicy.STATELESS).and()
                 // 过滤请求
                 .authorizeRequests()
+                // VIP 用户端接口前置鉴权（U5：/system/** 整体 permitAll 下，VIP 凭证/订单通道必须显式 authenticated）
+                .antMatchers("/system/vip/**").authenticated()
                 // 对于登录login 注册register 验证码captchaImage 允许匿名访问
 //                .antMatchers("/login", "/register", "/captchaImage").permitAll()
                 .antMatchers("/login", "/register", "/captchaImage","/test","/system/**").permitAll()
