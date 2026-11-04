@@ -64,6 +64,14 @@ After a replace-style import rebuilds a table's records with new IDs, incoming l
 ### NoteDwtableItem
 A cell in the data table, identified by recordId + columnId. For type=21 columns, stores `value`, `linkRecordId`, and `linkColumnId`. For type=26 columns, these link fields are NULL — the data lives in the referenced double link column's item.
 
+## VIP System
+
+### 充值申请 (Recharge Request)
+The unit of the VIP payment loop: a user picks a duration tier, pays via the admin-uploaded static WeChat/Alipay QR code, and submits a payment-proof screenshot (with optional note). The request carries status (pending / approved / rejected with admin message); approval opens VIP for the tier's duration, rejection leaves a visible message and allows resubmission. Exists because static personal QR codes have no payment callback — manual admin confirmation IS the closure mechanism.
+
+### 存量保留，只限新增 (Grandfathering, limit-new-only)
+The VIP expiry policy: content created while VIP (over-quota notes, attachments, advanced columns) remains fully accessible and editable after expiry; only *creating new* over-quota content is blocked. VIP gating narrows creation (e.g., advanced column types 21/24/25/26 are VIP-only to *create*, but viewable/editable by everyone), never locks existing data.
+
 ## Backup & Restore
 
 ### Backup Package (整机备份包)
