@@ -2,6 +2,7 @@ package com.ruoyi.system.domain;
 
 import java.io.Serializable;
 import java.util.Date;
+import com.fasterxml.jackson.annotation.JsonFormat;
 import org.apache.commons.lang3.builder.ToStringBuilder;
 import org.apache.commons.lang3.builder.ToStringStyle;
 
@@ -28,12 +29,14 @@ public class VipMembership implements Serializable
     private String nickName;
 
     /** VIP到期时间 */
+    @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
     private Date expireTime;
 
     /** 更新者 */
     private String updateBy;
 
     /** 更新时间 */
+    @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
     private Date updateTime;
 
     public void setUserId(Long userId)

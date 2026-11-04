@@ -2,6 +2,7 @@ package com.ruoyi.system.domain.dto;
 
 import java.io.Serializable;
 import java.util.Date;
+import com.fasterxml.jackson.annotation.JsonFormat;
 
 /**
  * VIP 状态与配额信息（VipService.getStatus 返回值）
@@ -22,6 +23,7 @@ public class VipStatusDto implements Serializable
     private boolean vip;
 
     /** VIP 到期时间（非会员为 null） */
+    @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
     private Date expireTime;
 
     /** 笔记数上限（-1=不限） */
