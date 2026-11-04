@@ -77,8 +77,19 @@ public class NoteNote extends BaseEntity
     @Excel(name = "模板标识")
     private Long templateFlag;
 
+    /** 移入回收站时间（保留期清理依据，U4/R13） */
+    private java.util.Date deleteTime;
+
     public Long getTemplateFlag() {
         return templateFlag;
+    }
+
+    public void setDeleteTime(java.util.Date deleteTime) {
+        this.deleteTime = deleteTime;
+    }
+
+    public java.util.Date getDeleteTime() {
+        return deleteTime;
     }
 
     public void setTemplateFlag(Long templateFlag) {

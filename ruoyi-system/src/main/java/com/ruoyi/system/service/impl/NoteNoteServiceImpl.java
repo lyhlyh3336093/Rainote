@@ -84,6 +84,10 @@ public class NoteNoteServiceImpl implements INoteNoteService
     @Autowired
     private AgentOwnershipChecker ownershipChecker;
 
+    /** 上传容量记录（U4/KTD3：物理删除笔记时释放容量） */
+    @Autowired
+    private SysUploadRecordMapper sysUploadRecordMapper;
+
     /**
      * 查询笔记
      *
@@ -737,7 +741,46 @@ public class NoteNoteServiceImpl implements INoteNoteService
                 }
             }
         }
+        // U4/KTD3 容量释放：物理删除前从被删笔记正文提取 /profile 上传路径，释放对应容量记录
+        // （仅删 sys_upload_record 行不动磁盘文件——同一文件可能被复制引用到其他笔记，误删风险大于磁盘收益）
+        releaseUploadRecordsForNotes(allIds);
         return noteNoteMapper.deleteNoteFromGarbageByIds(allIds.toArray(new String[0]));
+    }
+
+    /** /profile 上传路径提取正则（编辑器图片/文件块 URL 内嵌于 content JSON） */
+    private static final java.util.regex.Pattern PROFILE_PATH_PATTERN =
+            java.util.regex.Pattern.compile("/profile/[\\w/]+/\\d{4}/\\d{2}/\\d{2}/[\\w.%-]+");
+
+    /**
+     * 释放笔记正文引用的上传容量记录（U4/KTD3 best-effort：行删除失败不阻断笔记物理删除）
+     */
+    private void releaseUploadRecordsForNotes(List<String> noteIds)
+    {
+        try
+        {
+            List<String> filePaths = new ArrayList<>();
+            for (String id : noteIds)
+            {
+                NoteNote note = noteNoteMapper.selectNoteNoteById(Long.parseLong(id));
+                if (note == null || note.getContent() == null)
+                {
+                    continue;
+                }
+                java.util.regex.Matcher matcher = PROFILE_PATH_PATTERN.matcher(note.getContent());
+                while (matcher.find())
+                {
+                    filePaths.add(matcher.group());
+                }
+            }
+            if (!filePaths.isEmpty())
+            {
+                sysUploadRecordMapper.deleteSysUploadRecordByFilePaths(filePaths);
+            }
+        }
+        catch (Exception e)
+        {
+            log.warn("物理删除笔记时释放容量记录失败（不阻断删除）", e);
+        }
     }
 
     /**

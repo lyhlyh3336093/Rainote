@@ -17,10 +17,11 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="content"    column="content"    />
         <result property="perms"    column="perms"    />
         <result property="templateFlag"    column="templateFlag"    />
+        <result property="deleteTime"    column="delete_time"    />
     </resultMap>
 
     <sql id="selectNoteNoteVo">
-        select id, title, remark, revisionId, parentId, noteType,delFlag,collectionFlag,auth,content,perms,templateFlag from note_note
+        select id, title, remark, revisionId, parentId, noteType,delFlag,collectionFlag,auth,content,perms,templateFlag,delete_time from note_note
     </sql>
 
     <select id="selectNoteNoteList" parameterType="NoteNote" resultMap="NoteNoteResult">
@@ -179,6 +180,13 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
           and (templateFlag is null or templateFlag != 1)
     </select>
 
+    <!-- VIP 回收站保留期清理（U4/R13）：全部垃圾笔记（含属主与删除时间） -->
+    <select id="selectGarbageWithOwner" resultMap="NoteNoteResult">
+        select id, title, parentId, noteType, delFlag, auth, delete_time
+        from note_note
+        where delFlag = 1 and delete_time is not null
+    </select>
+
         
     <insert id="insertNoteNote" useGeneratedKeys="true" keyColumn="id" keyProperty="id" parameterType="NoteNote">
         insert into note_note
@@ -243,18 +251,18 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 
 
     <delete id="deleteNoteNoteById" parameterType="Long">
-        update note_note set delFlag = 1 where id = #{id}
+        update note_note set delFlag = 1, delete_time = sysdate() where id = #{id}
     </delete>
 
     <update id="recoverNoteNoteByIds" parameterType="String">
-        update note_note set delFlag = 0 where id in
+        update note_note set delFlag = 0, delete_time = null where id in
         <foreach item="id" collection="array" open="(" separator="," close=")">
             #{id}
         </foreach>
     </update>
 
     <update id="deleteNoteNoteByIds" parameterType="String">
-        update note_note set delFlag = 1 where id in
+        update note_note set delFlag = 1, delete_time = sysdate() where id in
         <foreach item="id" collection="array" open="(" separator="," close=")">
             #{id}
         </foreach>

@@ -161,6 +161,13 @@ public interface NoteNoteMapper
     public int countUserActiveNotes(Long userId);
 
     /**
+     * 查询全部垃圾笔记（含属主与删除时间，VIP 回收站保留期清理任务用，U4/R13）
+     *
+     * @return 垃圾笔记列表（delFlag=1 且 delete_time 非空）
+     */
+    public List<NoteNote> selectGarbageWithOwner();
+
+    /**
      * 新增笔记
      * 
      * @param noteNote 笔记
