@@ -17,6 +17,7 @@ import com.ruoyi.common.core.domain.AjaxResult;
 import com.ruoyi.common.enums.BusinessType;
 import com.ruoyi.system.domain.NoteUserRole;
 import com.ruoyi.system.service.INoteUserRoleService;
+import com.ruoyi.system.service.VipService;
 import com.ruoyi.common.utils.poi.ExcelUtil;
 import com.ruoyi.common.core.page.TableDataInfo;
 
@@ -32,6 +33,9 @@ public class NoteUserRoleController extends BaseController
 {
     @Autowired
     private INoteUserRoleService noteUserRoleService;
+
+    @Autowired
+    private VipService vipService;
 
     /**
      * 查询用户和笔记系统角色关联列表
@@ -69,13 +73,14 @@ public class NoteUserRoleController extends BaseController
     }
 
     /**
-     * 新增用户和笔记系统角色关联
+     * 新增用户和笔记系统角色关联 —— 共享创建 VIP 断言（U3/R14：创建共享仅 VIP；admin 豁免）
      */
 //    @PreAuthorize("@ss.hasPermi('system:role:add')")
     @Log(title = "用户和笔记系统角色关联", businessType = BusinessType.INSERT)
     @PostMapping
     public AjaxResult add(@RequestBody NoteUserRole noteUserRole)
     {
+        vipService.assertShare(getUserId());
         return toAjax(noteUserRoleService.insertNoteUserRole(noteUserRole));
     }
 

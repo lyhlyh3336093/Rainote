@@ -71,7 +71,7 @@ public interface VipService
     /**
      * 高级列创建断言：type ∈ {21,24,25,26} 且非 VIP 时抛 VipRequiredException；admin 豁免
      */
-    void assertAdvancedColumn(Long userId, Integer type);
+    void assertAdvancedColumn(Long userId, Long type);
 
     /**
      * Agent 使用断言：非 VIP 抛 VipRequiredException；admin 豁免

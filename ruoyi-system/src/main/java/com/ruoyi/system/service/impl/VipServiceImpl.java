@@ -299,7 +299,7 @@ public class VipServiceImpl implements VipService
     }
 
     @Override
-    public void assertAdvancedColumn(Long userId, Integer type)
+    public void assertAdvancedColumn(Long userId, Long type)
     {
         if (type == null || !isAdvancedColumn(type) || SecurityUtils.isAdmin(userId))
         {
@@ -341,11 +341,11 @@ public class VipServiceImpl implements VipService
         }
     }
 
-    private boolean isAdvancedColumn(int type)
+    private boolean isAdvancedColumn(Long type)
     {
         for (int t : ADVANCED_COLUMN_TYPES)
         {
-            if (t == type)
+            if (type != null && type == t)
             {
                 return true;
             }

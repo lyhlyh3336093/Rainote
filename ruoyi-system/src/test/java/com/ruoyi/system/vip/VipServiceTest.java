@@ -337,12 +337,12 @@ class VipServiceTest
     void test_advancedColumn_nonVipRejected_vipAndBasicTypePass()
     {
         mockCache(USER, 0L);
-        assertThrows(VipRequiredException.class, () -> vipService.assertAdvancedColumn(USER, 26));
+        assertThrows(VipRequiredException.class, () -> vipService.assertAdvancedColumn(USER, 26L));
         mockCache(USER, System.currentTimeMillis() + 86_400_000L);
-        assertDoesNotThrow(() -> vipService.assertAdvancedColumn(USER, 21));
+        assertDoesNotThrow(() -> vipService.assertAdvancedColumn(USER, 21L));
         // 非高级类型不受限
         mockCache(USER, 0L);
-        assertDoesNotThrow(() -> vipService.assertAdvancedColumn(USER, 1));
+        assertDoesNotThrow(() -> vipService.assertAdvancedColumn(USER, 1L));
     }
 
     @Test

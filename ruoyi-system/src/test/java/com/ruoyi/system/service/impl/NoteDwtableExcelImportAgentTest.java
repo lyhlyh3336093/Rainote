@@ -48,6 +48,7 @@ import com.ruoyi.system.mapper.NoteNoteMapper;
 import com.ruoyi.system.mapper.NoteRecordMapper;
 import com.ruoyi.system.mapper.NoteViewMapper;
 import com.ruoyi.system.service.INoteRecordService;
+import com.ruoyi.system.service.VipService;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -121,6 +122,10 @@ class NoteDwtableExcelImportAgentTest
     /** 共享名称解析组件（U2）：真实实例经 @Spy 注入（21 列名称回退用） */
     @Spy
     private LinkNameResolver linkNameResolver = new LinkNameResolver();
+
+    /** VIP 高级列断言（U3）：放行态 mock（导入新建 21 列不因 VIP 门槛拦截测试用例） */
+    @Mock
+    private VipService vipService;
 
     @InjectMocks
     private NoteDwtableExcelImportServiceImpl service;

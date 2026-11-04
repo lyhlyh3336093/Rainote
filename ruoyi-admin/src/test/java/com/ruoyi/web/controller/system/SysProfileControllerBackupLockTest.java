@@ -22,6 +22,7 @@ import com.ruoyi.common.exception.ServiceException;
 import com.ruoyi.framework.web.service.TokenService;
 import com.ruoyi.system.service.BackupLockUtil;
 import com.ruoyi.system.service.ISysUserService;
+import com.ruoyi.web.controller.VipTestContext;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -63,6 +64,8 @@ class SysProfileControllerBackupLockTest
         userService = Mockito.mock(ISysUserService.class);
         ReflectionTestUtils.setField(controller, "userService", userService);
         ReflectionTestUtils.setField(controller, "tokenService", Mockito.mock(TokenService.class));
+        // U3：头像上传入口带 VIP 限额断言（userId=1 为 admin 亦经 VipService 豁免，mock 放行即可）
+        ReflectionTestUtils.setField(controller, "vipService", VipTestContext.mockPermissiveVipService());
     }
 
     @AfterEach

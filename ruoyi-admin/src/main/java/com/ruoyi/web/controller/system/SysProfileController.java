@@ -11,6 +11,7 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 import com.ruoyi.common.annotation.Log;
 import com.ruoyi.common.config.RuoYiConfig;
+import com.ruoyi.common.constant.Constants;
 import com.ruoyi.common.constant.UserConstants;
 import com.ruoyi.common.core.controller.BaseController;
 import com.ruoyi.common.core.domain.AjaxResult;
@@ -20,10 +21,12 @@ import com.ruoyi.common.enums.BusinessType;
 import com.ruoyi.common.utils.SecurityUtils;
 import com.ruoyi.common.utils.StringUtils;
 import com.ruoyi.common.utils.file.FileUploadUtils;
+import com.ruoyi.common.utils.file.FileUtils;
 import com.ruoyi.common.utils.file.MimeTypeUtils;
 import com.ruoyi.framework.web.service.TokenService;
 import com.ruoyi.system.service.BackupLockUtil;
 import com.ruoyi.system.service.ISysUserService;
+import com.ruoyi.system.service.VipService;
 
 /**
  * 个人信息 业务处理
@@ -39,6 +42,9 @@ public class SysProfileController extends BaseController
 
     @Autowired
     private TokenService tokenService;
+
+    @Autowired
+    private VipService vipService;
 
     /**
      * 个人信息
@@ -120,7 +126,7 @@ public class SysProfileController extends BaseController
     }
 
     /**
-     * 头像上传
+     * 头像上传 —— VIP 限额闸门（U3/R9）：计入总容量，成功后写入容量记录（KTD3）
      */
     @Log(title = "用户头像", businessType = BusinessType.UPDATE)
     @PostMapping("/avatar")
@@ -131,9 +137,23 @@ public class SysProfileController extends BaseController
         if (!file.isEmpty())
         {
             LoginUser loginUser = getLoginUser();
-            String avatar = FileUploadUtils.upload(RuoYiConfig.getAvatarPath(), file, MimeTypeUtils.IMAGE_EXTENSION);
+            Long userId = getUserId();
+            // VIP 限额断言（admin 豁免）
+            vipService.assertUploadQuota(userId, file.getSize(), 0);
+            long fileMaxBytes = vipService.getStatus(userId).getFileMaxBytes();
+            String avatar = FileUploadUtils.upload(RuoYiConfig.getAvatarPath(), file, MimeTypeUtils.IMAGE_EXTENSION, fileMaxBytes);
             if (userService.updateUserAvatar(loginUser.getUsername(), avatar))
             {
+                // 写入容量记录（头像计入容量，KTD3；失败则删除已落盘文件防漏计）
+                try
+                {
+                    vipService.recordUpload(userId, file.getOriginalFilename(), avatar, file.getSize(), "avatar");
+                }
+                catch (Exception recordEx)
+                {
+                    FileUtils.deleteFile(RuoYiConfig.getProfile() + StringUtils.substringAfter(avatar, Constants.RESOURCE_PREFIX));
+                    throw recordEx;
+                }
                 AjaxResult ajax = AjaxResult.success();
                 ajax.put("imgUrl", avatar);
                 // 更新缓存用户头像

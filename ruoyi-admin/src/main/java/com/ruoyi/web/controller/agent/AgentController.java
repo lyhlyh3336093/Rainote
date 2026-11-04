@@ -18,6 +18,7 @@ import com.ruoyi.system.agent.registry.AgentExecutionContext;
 import com.ruoyi.system.agent.service.AgentAuditService;
 import com.ruoyi.system.agent.domain.AgentAuditLog;
 import com.ruoyi.system.agent.domain.AgentAuditStepLog;
+import com.ruoyi.system.service.VipService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -63,6 +64,8 @@ public class AgentController
     @Autowired private AgentRateLimiter rateLimiter;
     @Autowired private SseEmitterManager sseManager;
     @Autowired private PlanSessionManager sessionManager;
+    /** VIP 身份门槛（U3/R12：Agent 仅 VIP；admin 豁免），置于 tryAcquire 防滥用限流之前 */
+    @Autowired private VipService vipService;
 
     // ==================== 意图解析 ====================
 
@@ -76,6 +79,9 @@ public class AgentController
     public AjaxResult chat(@RequestBody JSONObject body)
     {
         Long userId = SecurityUtils.getUserId();
+
+        // VIP 身份门槛（U3/R12：Agent 仅 VIP；非 VIP 抛 602 引导升级，置于防滥用限流之前）
+        vipService.assertAgent(userId);
 
         // 速率限制
         if (!rateLimiter.tryAcquire(userId))

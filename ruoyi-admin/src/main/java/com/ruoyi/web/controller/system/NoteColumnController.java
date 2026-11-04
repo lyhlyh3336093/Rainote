@@ -29,6 +29,7 @@ import com.ruoyi.common.core.domain.AjaxResult;
 import com.ruoyi.common.enums.BusinessType;
 import com.ruoyi.system.domain.NoteColumn;
 import com.ruoyi.system.service.INoteColumnService;
+import com.ruoyi.system.service.VipService;
 import com.ruoyi.common.utils.poi.ExcelUtil;
 import com.ruoyi.common.core.page.TableDataInfo;
 
@@ -47,6 +48,9 @@ public class NoteColumnController extends BaseController
 
     @Autowired
     private AgentOwnershipChecker agentOwnershipChecker;
+
+    @Autowired
+    private VipService vipService;
 
     /**
      * 查询列信息列表
@@ -108,22 +112,15 @@ public class NoteColumnController extends BaseController
     }
 
     /**
-     * 新增列信息
+     * 新增列信息 —— 高级列 VIP 断言（U3/R11：type∈{21,24,25,26} 仅 VIP 可新建；admin 豁免；
+     * 已有高级列的查看/编辑不受此断言影响）
      */
 //    @PreAuthorize("@ss.hasPermi('system:column:add')")
     @Log(title = "列信息", businessType = BusinessType.INSERT)
     @PostMapping(value = "/add")
     public AjaxResult add(@Validated @RequestBody NoteColumnVo noteColumnvo)
     {
-//        NoteColumn noteColumn = new NoteColumn();
-//
-//        if(noteColumnvo.getIsShow()==null){
-//            noteColumn.setIsShow(0L);
-//        }
-//        noteColumn.setProperty(noteColumnvo.getProperty().toString());
-//        noteColumn.setName(noteColumnvo.getName());
-//        noteColumn.setType(noteColumnvo.getType());
-//        noteColumn.setDwtableId(noteColumnvo.getDwtableId());
+        vipService.assertAdvancedColumn(getUserId(), noteColumnvo.getType());
         return toAjax(noteColumnService.insertNoteColumn(noteColumnvo));
     }
 

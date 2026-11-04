@@ -33,6 +33,7 @@ import com.ruoyi.system.domain.NoteNote;
 import com.ruoyi.system.domain.vo.NoteNoteVo;
 import com.ruoyi.system.service.IBackupRestoreService;
 import com.ruoyi.system.service.INoteNoteService;
+import com.ruoyi.system.service.VipService;
 import com.ruoyi.common.utils.poi.ExcelUtil;
 import com.ruoyi.common.core.page.TableDataInfo;
 import com.ruoyi.common.utils.file.ExcelImportUtils;
@@ -52,6 +53,9 @@ public class NoteNoteController extends BaseController
 
     @Autowired
     private IBackupRestoreService backupRestoreService;
+
+    @Autowired
+    private VipService vipService;
 
     /**
      * 查询所有笔记列表
@@ -230,14 +234,16 @@ public class NoteNoteController extends BaseController
     }
 
     /**
-     * 新增笔记
+     * 新增笔记 —— VIP 笔记配额断言（U3/R10：普通用户上限 20 篇，排除文件夹/模板；VIP 不限；admin 豁免）
      */
 //    @PreAuthorize("@ss.hasPermi('note:note:add')")
     @Log(title = "笔记", businessType = BusinessType.INSERT)
     @PostMapping(value = "/add")
     public AjaxResult add(@Validated @RequestBody NoteNote noteNote)
     {
-        noteNote.setAuth(getUserId());
+        Long userId = getUserId();
+        vipService.assertNoteQuota(userId);
+        noteNote.setAuth(userId);
         return success(noteNoteService.insertNoteNote(noteNote));
     }
 
@@ -255,13 +261,14 @@ public class NoteNoteController extends BaseController
 
 
     /**
-     * 另存为笔记
+     * 另存为笔记 —— 同为笔记创建入口，套用笔记配额断言（U3/R10：防止经另存为绕过 /add 上限）
      */
     @PreAuthorize("@ss.hasPermi('note:note:edit')")
     @Log(title = "笔记", businessType = BusinessType.UPDATE)
     @RequestMapping(value = "/saveAsNewNote",method = org.springframework.web.bind.annotation.RequestMethod.POST)
     public AjaxResult saveAsNewNote(@Validated @RequestBody NoteNote noteNote)
     {
+        vipService.assertNoteQuota(getUserId());
         return success(noteNoteService.saveAsNewNote(noteNote));
     }
 
