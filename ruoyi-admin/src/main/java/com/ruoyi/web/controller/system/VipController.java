@@ -106,10 +106,10 @@ public class VipController extends BaseController
         {
             throw new ServiceException("凭证图片不能为空");
         }
+        // 图片白名单 + 10MB 上限（KTD10 参数化断言；先于每日计数——被拒的非法上传不占防滥用额度，评审修复）
+        FileUploadUtils.assertAllowed(file, MimeTypeUtils.IMAGE_EXTENSION, PROOF_MAX_SIZE);
         // 每用户每日次数限制（防滥用：免费图床/磁盘填充向量）
         vipService.proofDailyTryAcquire(userId);
-        // 图片白名单 + 10MB 上限（KTD10 参数化断言）
-        FileUploadUtils.assertAllowed(file, MimeTypeUtils.IMAGE_EXTENSION, PROOF_MAX_SIZE);
 
         // 落盘私有目录：{vipPrivatePath}/vip-proof/{userId}/{datePath}/{name}_{seq}.{ext}
         String relativePath = buildProofRelativePath(userId, file);
@@ -132,27 +132,52 @@ public class VipController extends BaseController
     public void proofDownload(@RequestParam("proofUrl") String proofUrl, HttpServletResponse response) throws Exception
     {
         Long userId = getUserId();
-        // 路径归属校验：只允许下载本人凭证目录内的文件（防路径穿越/越权取他人凭证）
-        String ownerPrefix = String.format(PROOF_URL_PREFIX_TEMPLATE, userId);
+        // 先 resolve+normalize 得到真实目标路径（../ 与绝对路径在规范化后再校验，防穿越绕过属主检查）
+        java.nio.file.Path target = resolveProofPath(proofUrl);
         boolean isAdmin = SecurityUtils.isAdmin(userId);
-        if (!isAdmin && (StringUtils.isEmpty(proofUrl) || !proofUrl.startsWith(ownerPrefix)))
+        // 属主校验（规范化后）：非 admin 仅限本人 vip-proof/{userId}/ 目录内
+        if (!isAdmin)
         {
-            throw new ServiceException("无权访问该凭证");
+            java.nio.file.Path ownerRoot = proofOwnerRoot(userId);
+            if (!target.startsWith(ownerRoot))
+            {
+                throw new ServiceException("无权访问该凭证");
+            }
         }
-        // admin 可经订单查看任意凭证；属主仅本人目录
-        File file = new File(RuoYiConfig.getVipPrivatePath(), proofUrl);
+        File file = target.toFile();
         if (!file.exists() || file.isDirectory())
         {
             throw new ServiceException("凭证不存在");
         }
-        // 防路径穿越：规范化后必须仍在私有目录内
-        if (!file.toPath().normalize().startsWith(new File(RuoYiConfig.getVipPrivatePath()).toPath().normalize()))
-        {
-            throw new ServiceException("非法路径");
-        }
         response.setContentType("application/octet-stream");
         response.setHeader("Content-Disposition", "attachment; filename=" + file.getName());
         FileUtils.writeBytes(file.getAbsolutePath(), response.getOutputStream());
+    }
+
+    /**
+     * 凭证路径解析（评审修复：规范化先于属主校验）——resolve+normalize 后必须仍在私有目录内，
+     * 拒绝 ../ 穿越、绝对路径与逃逸私有根的一切形式。
+     */
+    private java.nio.file.Path resolveProofPath(String proofUrl)
+    {
+        if (StringUtils.isEmpty(proofUrl))
+        {
+            throw new ServiceException("凭证路径不能为空");
+        }
+        java.nio.file.Path root = java.nio.file.Paths.get(RuoYiConfig.getVipPrivatePath()).normalize();
+        java.nio.file.Path target = root.resolve(proofUrl).normalize();
+        if (!target.startsWith(root))
+        {
+            throw new ServiceException("非法路径");
+        }
+        return target;
+    }
+
+    /** 属主凭证目录（规范化）：{vipPrivatePath}/vip-proof/{userId} */
+    private java.nio.file.Path proofOwnerRoot(Long userId)
+    {
+        return java.nio.file.Paths.get(RuoYiConfig.getVipPrivatePath())
+                .resolve("vip-proof").resolve(String.valueOf(userId)).normalize();
     }
 
     /**
@@ -173,9 +198,17 @@ public class VipController extends BaseController
         {
             throw new ServiceException("档位不存在或已停用");
         }
-        // 凭证路径属主前缀校验（防伪造/引用他人凭证）
-        String ownerPrefix = String.format(PROOF_URL_PREFIX_TEMPLATE, userId);
-        if (StringUtils.isEmpty(body.getProofUrl()) || !body.getProofUrl().startsWith(ownerPrefix))
+        // 凭证路径属主校验（评审修复：规范化后按属主目录校验，防伪造/穿越引用他人凭证）
+        java.nio.file.Path proofTarget;
+        try
+        {
+            proofTarget = resolveProofPath(body.getProofUrl());
+        }
+        catch (ServiceException e)
+        {
+            throw new ServiceException("请先上传支付凭证");
+        }
+        if (!proofTarget.startsWith(proofOwnerRoot(userId)) || !java.nio.file.Files.exists(proofTarget))
         {
             throw new ServiceException("请先上传支付凭证");
         }

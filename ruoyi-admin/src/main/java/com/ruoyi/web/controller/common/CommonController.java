@@ -127,6 +127,16 @@ public class CommonController
         // 备份/还原写锁检查：进行中则拒绝写入 profile 上传目录（KTD3）
         BackupLockUtil.checkNotLocked();
         Long userId = SecurityUtils.getUserId();
+        long fileMaxBytes = vipService.getStatus(userId).getFileMaxBytes();
+        // 单文件上限前置整批校验（评审修复：任一文件超限在落盘前拒绝，避免"传了一半"违反 AE-P2 原子口径）
+        for (MultipartFile file : files)
+        {
+            if (file.getSize() > fileMaxBytes)
+            {
+                // 复用单文件断言的身份分支语义（普通 602 引导升级 / VIP 603 纯提示）
+                vipService.assertUploadQuota(userId, file.getSize(), 0);
+            }
+        }
         // 整批容量断言：对全部文件求和（additionalBytes=除首个外之和，首文件作 incoming 参与断言）
         long totalBytes = 0;
         for (MultipartFile file : files)
@@ -137,7 +147,13 @@ public class CommonController
         {
             vipService.assertUploadQuota(userId, files.get(0).getSize(), totalBytes - files.get(0).getSize());
         }
-        long fileMaxBytes = vipService.getStatus(userId).getFileMaxBytes();
+        // 整批预校验（评审修复：扩展名/文件名长度在落盘前拒绝，配合容量断言实现全有或全无的 AE-P2 原子口径）
+        for (MultipartFile file : files)
+        {
+            FileUploadUtils.assertAllowed(file, MimeTypeUtils.DEFAULT_ALLOWED_EXTENSION, fileMaxBytes);
+        }
+        // 本批已落盘路径（任一后续失败时整批回滚删除）
+        List<String> landedFiles = new ArrayList<String>();
         try
         {
             // 上传文件路径
@@ -150,19 +166,20 @@ public class CommonController
             {
                 // 上传并返回新文件名称（KTD10 参数化上限）
                 String fileName = FileUploadUtils.upload(filePath, file, MimeTypeUtils.DEFAULT_ALLOWED_EXTENSION, fileMaxBytes);
+                landedFiles.add(fileName);
                 String url = serverConfig.getUrl() + fileName;
                 urls.add(url);
                 fileNames.add(fileName);
                 newFileNames.add(FileUtils.getName(fileName));
                 originalFilenames.add(file.getOriginalFilename());
-                // 写入容量记录（失败则删除已落盘文件防漏计）
+                // 写入容量记录（失败则整批回滚已落盘文件防漏计，评审修复：由单文件补偿升级为整批补偿）
                 try
                 {
                     vipService.recordUpload(userId, file.getOriginalFilename(), fileName, file.getSize(), "common");
                 }
                 catch (Exception recordEx)
                 {
-                    FileUtils.deleteFile(RuoYiConfig.getProfile() + StringUtils.substringAfter(fileName, Constants.RESOURCE_PREFIX));
+                    rollbackLandedFiles(landedFiles);
                     throw recordEx;
                 }
             }
@@ -175,7 +192,25 @@ public class CommonController
         }
         catch (Exception e)
         {
+            // 任一文件失败：整批回滚已落盘产物（AE-P2 不出现"传了一半"）
+            rollbackLandedFiles(landedFiles);
             return AjaxResult.error(e.getMessage());
+        }
+    }
+
+    /** 删除本批已落盘文件（best-effort，AE-P2 整批原子回滚） */
+    private void rollbackLandedFiles(List<String> landedFiles)
+    {
+        for (String fileName : landedFiles)
+        {
+            try
+            {
+                FileUtils.deleteFile(RuoYiConfig.getProfile() + StringUtils.substringAfter(fileName, Constants.RESOURCE_PREFIX));
+            }
+            catch (Exception ignore)
+            {
+                // 回滚尽力而为：残留文件可由管理员对账清理
+            }
         }
     }
 

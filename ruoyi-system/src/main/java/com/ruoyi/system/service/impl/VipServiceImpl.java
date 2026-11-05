@@ -8,6 +8,7 @@ import java.util.Date;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import javax.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -233,6 +234,15 @@ public class VipServiceImpl implements VipService
         }, DOUBLE_DELETE_DELAY_MS, TimeUnit.MILLISECONDS);
     }
 
+    /**
+     * 停机时释放延迟双删调度线程（队列内未执行的删除任务可安全丢弃：TTL 30min 有限化陈旧窗口）
+     */
+    @PreDestroy
+    public void shutdown()
+    {
+        doubleDeleteScheduler.shutdownNow();
+    }
+
     // =========================================
     // 断言族（admin 全部豁免）
     // =========================================
@@ -396,7 +406,8 @@ public class VipServiceImpl implements VipService
     }
 
     /**
-     * 每日计数自增：首日（返回 1）时设置 TTL 48h，跨日自然过期归零
+     * 每日计数自增：首日（返回 1）时设置 TTL 48h，跨日自然过期归零；
+     * 兼顾自愈——INCR 与 EXPIRE 非原子，历史遗留的无 TTL 计数键补设过期，避免用户被永久限次
      */
     private long dailyIncr(String keyTemplate, Long userId)
     {
@@ -405,6 +416,14 @@ public class VipServiceImpl implements VipService
         if (count != null && count == 1)
         {
             redisTemplate.expire(key, DAILY_COUNT_TTL_HOURS, TimeUnit.HOURS);
+        }
+        else
+        {
+            Long ttl = redisTemplate.getExpire(key, TimeUnit.SECONDS);
+            if (ttl != null && ttl == -1)
+            {
+                redisTemplate.expire(key, DAILY_COUNT_TTL_HOURS, TimeUnit.HOURS);
+            }
         }
         return count == null ? 0 : count;
     }

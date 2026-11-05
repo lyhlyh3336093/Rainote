@@ -1,4 +1,4 @@
-﻿package com.ruoyi.quartz.task;
+package com.ruoyi.quartz.task;
 
 import java.util.ArrayList;
 import java.util.Date;

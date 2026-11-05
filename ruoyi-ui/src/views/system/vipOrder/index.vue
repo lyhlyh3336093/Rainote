@@ -233,7 +233,11 @@ export default {
     getList() {
       this.loading = true;
       this.resetProofUrls();
-      listOrders(this.addDateRange(this.queryParams, this.dateRange)).then(response => {
+      // 结束日期补到当日 23:59:59，避免当天记录被 00:00:00 边界排除
+      const range = this.dateRange && this.dateRange.length === 2
+        ? [this.dateRange[0], this.dateRange[1] + " 23:59:59"]
+        : [];
+      listOrders(this.addDateRange(this.queryParams, range)).then(response => {
         this.orderList = response.rows;
         this.total = response.total;
         this.loading = false;

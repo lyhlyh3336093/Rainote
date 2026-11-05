@@ -747,12 +747,15 @@ public class NoteNoteServiceImpl implements INoteNoteService
         return noteNoteMapper.deleteNoteFromGarbageByIds(allIds.toArray(new String[0]));
     }
 
-    /** /profile 上传路径提取正则（编辑器图片/文件块 URL 内嵌于 content JSON） */
+    /** /profile 上传路径提取正则（编辑器图片/文件块 URL 内嵌于块 property JSON 与笔记 content） */
     private static final java.util.regex.Pattern PROFILE_PATH_PATTERN =
             java.util.regex.Pattern.compile("/profile/[\\w/]+/\\d{4}/\\d{2}/\\d{2}/[\\w.%-]+");
 
     /**
-     * 释放笔记正文引用的上传容量记录（U4/KTD3 best-effort：行删除失败不阻断笔记物理删除）
+     * 释放笔记引用的上传容量记录（U4/KTD3 best-effort：行删除失败不阻断笔记物理删除）。
+     * <p>
+     * 评审修复：编辑器附件 URL 主要存于 note_block.property（图片/文件块 data），
+     * note_note.content 仅有部分富文本——两处都需扫描，否则容量只进不出。
      */
     private void releaseUploadRecordsForNotes(List<String> noteIds)
     {
@@ -761,15 +764,26 @@ public class NoteNoteServiceImpl implements INoteNoteService
             List<String> filePaths = new ArrayList<>();
             for (String id : noteIds)
             {
-                NoteNote note = noteNoteMapper.selectNoteNoteById(Long.parseLong(id));
-                if (note == null || note.getContent() == null)
+                Long noteId = Long.parseLong(id);
+                // 笔记正文中的引用
+                NoteNote note = noteNoteMapper.selectNoteNoteById(noteId);
+                if (note != null && note.getContent() != null)
                 {
-                    continue;
+                    collectProfilePaths(note.getContent(), filePaths);
                 }
-                java.util.regex.Matcher matcher = PROFILE_PATH_PATTERN.matcher(note.getContent());
-                while (matcher.find())
+                // 块属性中的引用（编辑器图片/文件块的主存放位置）
+                NoteBlock blockQuery = new NoteBlock();
+                blockQuery.setParentId(noteId);
+                List<NoteBlock> blocks = noteBlockMapper.selectNoteBlockList(blockQuery);
+                if (blocks != null)
                 {
-                    filePaths.add(matcher.group());
+                    for (NoteBlock block : blocks)
+                    {
+                        if (block.getProperty() != null)
+                        {
+                            collectProfilePaths(block.getProperty(), filePaths);
+                        }
+                    }
                 }
             }
             if (!filePaths.isEmpty())
@@ -780,6 +794,16 @@ public class NoteNoteServiceImpl implements INoteNoteService
         catch (Exception e)
         {
             log.warn("物理删除笔记时释放容量记录失败（不阻断删除）", e);
+        }
+    }
+
+    /** 提取文本中全部 /profile 上传路径 */
+    private void collectProfilePaths(String text, List<String> sink)
+    {
+        java.util.regex.Matcher matcher = PROFILE_PATH_PATTERN.matcher(text);
+        while (matcher.find())
+        {
+            sink.add(matcher.group());
         }
     }
 

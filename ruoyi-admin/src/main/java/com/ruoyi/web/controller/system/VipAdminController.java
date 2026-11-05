@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Map;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -96,6 +97,7 @@ public class VipAdminController extends BaseController
      */
     @PreAuthorize("@ss.hasPermi('system:vip:order:audit')")
     @Log(title = "VIP充值审核", businessType = BusinessType.UPDATE)
+    @Transactional(rollbackFor = Exception.class)
     @PutMapping("/order/audit")
     public AjaxResult audit(@RequestBody VipRechargeOrder body)
     {
@@ -131,6 +133,13 @@ public class VipAdminController extends BaseController
         {
             // 开通：叠加续费 + 失效缓存（用户无需重登，Covers AE4/F1）
             VipTier tier = tierMapper.selectVipTierById(order.getTierId());
+            if (tier == null)
+            {
+                // 档位在待审期被删除：事务回滚使订单保持待审核（可驳回引导重新提交，或会员手动调整补开），
+                // 避免产生"已批准未开通"的不一致
+                logger.error("VIP审核通过但档位已删除: orderId={}, tierId={}，订单回滚为待审核", order.getId(), order.getTierId());
+                throw new ServiceException("档位已被删除，无法自动开通；订单保持待审核，可驳回后引导用户重新提交，或通过会员手动调整补开");
+            }
             vipService.openVip(order.getUserId(), tier.getDays(), getUsername());
         }
         // 凭证孤儿清理（KTD12）：订单终态后，若无其他待审订单引用该凭证则删除文件
@@ -139,7 +148,9 @@ public class VipAdminController extends BaseController
     }
 
     /**
-     * 删除已无待审订单引用的凭证文件（best-effort）
+     * 凭证孤儿清理（KTD12，评审修复口径）：仅删除**从未被任何状态订单行引用**的上传文件。
+     * <p>
+     * 之前仅排除其他待审订单，会把已审订单（含驳回申诉证据）的凭证文件删成死链。
      */
     private void cleanupOrphanProof(String proofUrl, Long excludeOrderId)
     {
@@ -149,13 +160,12 @@ public class VipAdminController extends BaseController
             {
                 return;
             }
-            List<VipRechargeOrder> pendingList = orderMapper.selectVipRechargeOrderList(new VipRechargeOrder());
+            // 全状态订单引用检查（终态订单的凭证作为审核证据必须保留）
+            List<VipRechargeOrder> allOrders = orderMapper.selectVipRechargeOrderList(new VipRechargeOrder());
             boolean stillReferenced = false;
-            for (VipRechargeOrder pending : pendingList)
+            for (VipRechargeOrder order : allOrders)
             {
-                if (VipRechargeOrder.STATUS_PENDING.equals(pending.getStatus())
-                        && proofUrl.equals(pending.getProofUrl())
-                        && !pending.getId().equals(excludeOrderId))
+                if (proofUrl.equals(order.getProofUrl()) && !order.getId().equals(excludeOrderId))
                 {
                     stillReferenced = true;
                     break;
@@ -257,6 +267,14 @@ public class VipAdminController extends BaseController
     @DeleteMapping("/tier/{tierId}")
     public AjaxResult tierRemove(@PathVariable("tierId") Long tierId)
     {
+        // 待审订单引用检查：档位被删后待审订单无法通过审核自动开通（RE1）
+        VipRechargeOrder query = new VipRechargeOrder();
+        query.setStatus(VipRechargeOrder.STATUS_PENDING);
+        List<VipRechargeOrder> pending = orderMapper.selectVipRechargeOrderList(query);
+        if (pending != null && pending.stream().anyMatch(o -> tierId.equals(o.getTierId())))
+        {
+            throw new ServiceException("该档位存在待审核的充值申请，请先完成审核后再删除");
+        }
         return toAjax(tierMapper.deleteVipTierById(tierId));
     }
 

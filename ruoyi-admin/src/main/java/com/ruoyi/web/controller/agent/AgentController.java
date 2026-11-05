@@ -136,6 +136,10 @@ public class AgentController
     public AjaxResult confirm(@RequestBody JSONObject body, HttpServletRequest request)
     {
         Long userId = SecurityUtils.getUserId();
+
+        // VIP 身份门槛（评审修复：confirm 执行客户端自构计划同为 Agent 付费能力，与 /chat 同门槛）
+        vipService.assertAgent(userId);
+
         String sessionId = resolveSessionId(request);
 
         // 执行锁校验

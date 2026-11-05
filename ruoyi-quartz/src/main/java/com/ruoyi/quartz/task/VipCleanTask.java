@@ -80,8 +80,18 @@ public class VipCleanTask
             {
                 continue;
             }
-            Integer retentionDays = retentionDaysByUser.computeIfAbsent(note.getAuth(),
-                    userId -> vipService.getRecycleRetentionDays(userId));
+            Integer retentionDays;
+            try
+            {
+                retentionDays = retentionDaysByUser.computeIfAbsent(note.getAuth(),
+                        userId -> vipService.getRecycleRetentionDays(userId));
+            }
+            catch (Exception e)
+            {
+                // 单用户保留期解析失败不阻断整轮清理（与删除阶段的单用户隔离语义一致）
+                log.warn("VIP回收站清理：解析用户保留期失败，跳过该用户的笔记 userId={}", note.getAuth(), e);
+                continue;
+            }
             long expireAt = note.getDeleteTime().getTime() + retentionDays * 86_400_000L;
             if (now.getTime() > expireAt)
             {

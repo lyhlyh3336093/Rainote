@@ -309,9 +309,11 @@ class VipServiceTest
     void test_aiDaily_crossDayCounterResets()
     {
         mockCache(USER, 0L);
-        // 第一日已用 10 次（key 含当日日期），次日 increment 返回 1 → 放行
+        // 评审修复：桩具区分度——今日 key 返回 1（新一天计数），其余 key（昨日）返回 11（已满），
+        // 验证跨日计数归零放行且实现使用的 key 含今日日期（原桩对任意 key 均命中同一值，测试空转）
         String todayKey = String.format(VipServiceImpl.AI_COUNT_KEY_TEMPLATE, USER, LocalDate.now().format(DateTimeFormatterStub.FMT));
         when(valueOperations.increment(todayKey)).thenReturn(1L);
+        when(valueOperations.increment(argThat(k -> k != null && !k.equals(todayKey)))).thenReturn(11L);
         assertDoesNotThrow(() -> vipService.aiDailyTryAcquire(USER));
     }
 

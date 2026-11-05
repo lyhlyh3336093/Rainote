@@ -102,14 +102,18 @@ class VipControllerTest
     // ===== order 提交 =====
 
     @Test
-    void order_valid_submissionBindsCurrentUserAndPriceSnapshot()
+    void order_valid_submissionBindsCurrentUserAndPriceSnapshot() throws Exception
     {
         when(tierMapper.selectVipTierById(10L)).thenReturn(enabledTier());
         when(orderMapper.selectPendingOrderByUserId(USER_A)).thenReturn(null);
+        // 先经 proof 通道真实落盘凭证（order 侧 Files.exists 属主校验依赖真实文件）
+        MockMultipartFile proofFile = new MockMultipartFile("file", "pay.png", "image/png",
+                new byte[1024]);
+        String proofUrl = (String) controller.proof(proofFile).get("proofUrl");
 
         VipRechargeOrder body = new VipRechargeOrder();
         body.setTierId(10L);
-        body.setProofUrl("vip-proof/2/2026/11/04/pay_001.png");
+        body.setProofUrl(proofUrl);
         body.setPayChannel("wechat");
         body.setUserRemark("尾号8888");
 
@@ -123,13 +127,16 @@ class VipControllerTest
     }
 
     @Test
-    void order_pendingExists_rejected()
+    void order_pendingExists_rejected() throws Exception
     {
         when(tierMapper.selectVipTierById(10L)).thenReturn(enabledTier());
+        MockMultipartFile proofFile = new MockMultipartFile("file", "pay.png", "image/png",
+                new byte[1024]);
+        String proofUrl = (String) controller.proof(proofFile).get("proofUrl");
         when(orderMapper.selectPendingOrderByUserId(USER_A)).thenReturn(new VipRechargeOrder());
         VipRechargeOrder body = new VipRechargeOrder();
         body.setTierId(10L);
-        body.setProofUrl("vip-proof/2/x.png");
+        body.setProofUrl(proofUrl);
         assertThrows(ServiceException.class, () -> controller.order(body));
         verify(orderMapper, never()).insertVipRechargeOrder(any(VipRechargeOrder.class));
     }
@@ -218,6 +225,29 @@ class VipControllerTest
     {
         // 用户 A 请求用户 B 的凭证路径 → 拒绝
         assertThrows(ServiceException.class, () -> invokeDownload("vip-proof/3/x.png"));
+    }
+
+    @Test
+    void proofDownload_traversalAttempt_rejected() throws Exception
+    {
+        // 评审 P0 修复回归：../ 穿越变体（原始字符串前缀合法但规范化后越出属主目录）→ 拒绝
+        assertThrows(ServiceException.class, () -> invokeDownload("vip-proof/2/../../3/x.png"));
+        // 绝对路径 / 逃逸私有根 → 拒绝
+        assertThrows(ServiceException.class, () -> invokeDownload("../../etc/passwd"));
+        assertThrows(ServiceException.class, () -> invokeDownload("/etc/passwd"));
+    }
+
+    @Test
+    void order_traversalProofUrl_rejected()
+    {
+        // 评审 P1 修复回归：提交穿越变体凭证路径 → 拒绝（防骗审与孤儿清理误删他人文件）
+        when(tierMapper.selectVipTierById(10L)).thenReturn(enabledTier());
+        when(orderMapper.selectPendingOrderByUserId(USER_A)).thenReturn(null);
+        VipRechargeOrder body = new VipRechargeOrder();
+        body.setTierId(10L);
+        body.setProofUrl("vip-proof/2/../../3/stolen_001.png");
+        assertThrows(ServiceException.class, () -> controller.order(body));
+        verify(orderMapper, never()).insertVipRechargeOrder(any(VipRechargeOrder.class));
     }
 
     @Test

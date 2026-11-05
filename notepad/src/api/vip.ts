@@ -141,6 +141,12 @@ export async function fetchProofImage(proofUrl: string): Promise<string> {
     if (!response.ok) {
         throw new Error(`凭证加载失败：HTTP ${response.status}`);
     }
+    // RuoYi 失败语义为 HTTP 200 + JSON 错误体（全局异常处理），需识别后转交 catch 降级展示
+    const contentType = response.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+        const body = await response.json().catch(() => ({} as any));
+        throw new Error(body?.msg || '凭证加载失败');
+    }
     const blob = await response.blob();
     return URL.createObjectURL(blob);
 }
