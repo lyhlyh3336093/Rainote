@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ruoyi.system.mapper.VipRechargeOrderMapper">
+
+    <resultMap type="VipRechargeOrder" id="VipRechargeOrderResult">
+        <result property="id"          column="id"          />
+        <result property="userId"      column="user_id"     />
+        <result property="userName"    column="user_name"   />
+        <result property="tierId"      column="tier_id"     />
+        <result property="tierName"    column="tier_name"   />
+        <result property="tierDays"    column="tier_days"   />
+        <result property="amount"      column="amount"      />
+        <result property="payChannel"  column="pay_channel" />
+        <result property="proofUrl"    column="proof_url"   />
+        <result property="userRemark"  column="user_remark" />
+        <result property="status"      column="status"      />
+        <result property="pending"     column="pending"     />
+        <result property="adminRemark" column="admin_remark"/>
+        <result property="auditedBy"   column="audited_by"  />
+        <result property="auditTime"   column="audit_time"  />
+        <result property="createTime"  column="create_time" />
+    </resultMap>
+
+    <sql id="selectVipRechargeOrderVo">
+        select o.id, o.user_id, u.user_name, o.tier_id, t.name as tier_name, t.days as tier_days,
+               o.amount, o.pay_channel, o.proof_url, o.user_remark, o.status, o.pending,
+               o.admin_remark, o.audited_by, o.audit_time, o.create_time
+        from vip_recharge_order o
+        left join sys_user u on u.user_id = o.user_id
+        left join vip_tier t on t.id = o.tier_id
+    </sql>
+
+    <insert id="insertVipRechargeOrder" parameterType="VipRechargeOrder" useGeneratedKeys="true" keyProperty="id">
+        insert into vip_recharge_order (user_id, tier_id, amount, pay_channel, proof_url, user_remark, status, pending, create_time)
+        values (#{userId}, #{tierId}, #{amount}, #{payChannel}, #{proofUrl}, #{userRemark}, '0', 1, sysdate())
+    </insert>
+
+    <select id="selectVipRechargeOrderById" parameterType="Long" resultMap="VipRechargeOrderResult">
+        <include refid="selectVipRechargeOrderVo"/>
+        where o.id = #{id}
+    </select>
+
+    <select id="selectVipRechargeOrderList" parameterType="VipRechargeOrder" resultMap="VipRechargeOrderResult">
+        <include refid="selectVipRechargeOrderVo"/>
+        <where>
+            <if test="userId != null"> and o.user_id = #{userId}</if>
+            <if test="status != null and status != ''"> and o.status = #{status}</if>
+            <if test="userName != null and userName != ''"> and u.user_name like concat('%', #{userName}, '%')</if>
+            <if test="params.beginTime != null and params.beginTime != ''"><!-- 开始时间检索 -->
+                and o.create_time &gt;= #{params.beginTime}
+            </if>
+            <if test="params.endTime != null and params.endTime != ''"><!-- 结束时间检索 -->
+                and o.create_time &lt;= #{params.endTime}
+            </if>
+        </where>
+        order by o.create_time desc
+    </select>
+
+    <select id="selectPendingOrderByUserId" parameterType="Long" resultMap="VipRechargeOrderResult">
+        <include refid="selectVipRechargeOrderVo"/>
+        where o.user_id = #{userId} and o.status = '0' and o.pending = 1
+    </select>
+
+    <!-- KTD11 审核条件更新：仅当仍为待审核时生效，返回受影响行数（1=成功，0=已被并发审核） -->
+    <update id="auditVipRechargeOrder" parameterType="VipRechargeOrder">
+        update vip_recharge_order
+        set status = #{status},
+            pending = null,
+            admin_remark = #{adminRemark},
+            audited_by = #{auditedBy},
+            audit_time = sysdate()
+        where id = #{id} and status = '0' and pending = 1
+    </update>
+
+</mapper>

@@ -41,6 +41,14 @@
     >
       数据备份
     </a-button>
+    <!-- VIP 个人数据导出（U7）：仅打包本人数据；非 VIP 点击后被 602 拦截走升级引导 -->
+    <a-button
+      class="ml-2"
+      :loading="exportState.loading"
+      @click="handleMyExport"
+    >
+      个人导出
+    </a-button>
     <!-- 数据还原入口（U3）：点击开两步还原弹窗（上传→预览摘要→确认执行） -->
     <a-button
       v-if="isAdmin"
@@ -64,7 +72,8 @@
 import { reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { useFetch } from '../../../hooks'
-import { downloadBackup } from '../../../api/backup'
+import { downloadBackup, exportMyData } from '../../../api/backup'
+import { handleVipCode } from '../../../api/vip'
 import RestoreModal from './RestoreModal.vue'
 defineProps<{
   isAdmin: boolean
@@ -96,6 +105,25 @@ const handleBackup = async () => {
     message.error(error?.message || '备份失败，请稍后重试')
   } finally {
     backupState.loading = false
+  }
+}
+
+// 个人数据导出状态（loading 期间防重复触发）
+const exportState = reactive({ loading: false })
+
+// VIP 个人数据导出（U7）：非 VIP 被 602 拦截时走升级引导（handleVipCode 已弹窗，跳过默认报错）
+const handleMyExport = async () => {
+  if (exportState.loading) return
+  exportState.loading = true
+  try {
+    await exportMyData()
+    message.success('个人数据导出已生成并开始下载')
+  } catch (error: any) {
+    if (!handleVipCode(error?.code, error?.message)) {
+      message.error(error?.message || '导出失败，请稍后重试')
+    }
+  } finally {
+    exportState.loading = false
   }
 }
 

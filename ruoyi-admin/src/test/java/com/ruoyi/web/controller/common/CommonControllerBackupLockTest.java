@@ -19,6 +19,7 @@ import com.ruoyi.common.core.domain.AjaxResult;
 import com.ruoyi.common.exception.ServiceException;
 import com.ruoyi.framework.config.ServerConfig;
 import com.ruoyi.system.service.BackupLockUtil;
+import com.ruoyi.web.controller.VipTestContext;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -33,6 +34,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * files/ 目录的冻结范围——锁持有时两个入口均被拒且零写入，锁释放后放行
  * （真实落盘 + mock ServerConfig 拼接 URL，与 BackupRestoreServiceImplTest
  * consumerChecks 同款模式：持锁拒绝、释放放行）。
+ * <p>
+ * U3 起上传入口带 VIP 限额断言（依赖登录上下文与 VipService）——测试注入
+ * 登录用户（userId=2）与放行态 VipService mock（{@link VipTestContext}）。
  *
  * @author ruoyi
  */
@@ -59,6 +63,9 @@ class CommonControllerBackupLockTest
         ServerConfig serverConfig = Mockito.mock(ServerConfig.class);
         Mockito.when(serverConfig.getUrl()).thenReturn("http://test");
         ReflectionTestUtils.setField(controller, "serverConfig", serverConfig);
+        // U3：登录上下文 + 放行态 VipService
+        VipTestContext.setLoginUser(2L);
+        ReflectionTestUtils.setField(controller, "vipService", VipTestContext.mockPermissiveVipService());
     }
 
     @AfterEach
@@ -68,6 +75,7 @@ class CommonControllerBackupLockTest
         BackupLockUtil.releaseLock();
         new RuoYiConfig().setProfile(originalProfile);
         new RuoYiConfig().setBackupPath(originalBackupPath);
+        VipTestContext.clear();
     }
 
     @Test

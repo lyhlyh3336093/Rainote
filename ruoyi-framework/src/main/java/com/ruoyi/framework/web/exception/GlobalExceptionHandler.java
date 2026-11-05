@@ -9,10 +9,13 @@ import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import com.ruoyi.common.constant.HttpStatus;
 import com.ruoyi.common.core.domain.AjaxResult;
 import com.ruoyi.common.exception.DemoModeException;
 import com.ruoyi.common.exception.ServiceException;
+import com.ruoyi.common.exception.VipLimitException;
+import com.ruoyi.common.exception.VipRequiredException;
 import com.ruoyi.common.utils.StringUtils;
 
 /**
@@ -57,6 +60,38 @@ public class GlobalExceptionHandler
         log.error(e.getMessage(), e);
         Integer code = e.getCode();
         return StringUtils.isNotNull(code) ? AjaxResult.error(code, e.getMessage()) : AjaxResult.error(e.getMessage());
+    }
+
+    /**
+     * VIP 身份门槛异常（602：前端弹升级引导跳转 /vip，KTD5）
+     */
+    @ExceptionHandler(VipRequiredException.class)
+    public AjaxResult handleVipRequiredException(VipRequiredException e, HttpServletRequest request)
+    {
+        log.info("请求地址'{}',VIP门槛拦截: {}", request.getRequestURI(), e.getMessage());
+        return AjaxResult.error(VipRequiredException.CODE, e.getMessage());
+    }
+
+    /**
+     * VIP 配额上限异常（603：已达当前身份上限，前端纯提示不引导升级，KTD5）
+     */
+    @ExceptionHandler(VipLimitException.class)
+    public AjaxResult handleVipLimitException(VipLimitException e, HttpServletRequest request)
+    {
+        log.info("请求地址'{}',VIP配额上限: {}", request.getRequestURI(), e.getMessage());
+        return AjaxResult.error(VipLimitException.CODE, e.getMessage());
+    }
+
+    /**
+     * 上传文件超出 servlet max-file-size / max-request-size 限制
+     * （超出 VIP/普通配额的 602/603 在 VipService 断言族抛出，此为容器层兜底）
+     */
+    @ExceptionHandler(MaxUploadSizeExceededException.class)
+    public AjaxResult handleMaxUploadSizeExceededException(MaxUploadSizeExceededException e, HttpServletRequest request)
+    {
+        String requestURI = request.getRequestURI();
+        log.error("请求地址'{}',上传文件大小超出服务器限制.'{}'", requestURI, e.getMessage());
+        return AjaxResult.error("上传文件总大小超出服务器限制，请减少单次上传的文件数量或大小");
     }
 
     /**

@@ -7,7 +7,9 @@
     <a-form-item :rules="[{ required: true, message: '请选择字段类型' }]" label="字段类型" name="type">
       <a-select allowClear v-model:value="formState.type" placeholder="请选择字段类型">
         <template v-for="(item, key) in fields" :key="item.field">
+          <!-- U7: 高级列类型（type 21/24/25/26）为 VIP 专属新建，选项加 VIP 标识（后端 602 强制） -->
           <a-select-option :value="Number(key)">{{ item.field }}
+            <span v-if="isVipFieldType(Number(key))" class="vip-type-flag">VIP</span>
           </a-select-option>
         </template>
       </a-select>
@@ -189,6 +191,10 @@ export default defineComponent({
   setup(props, ctx) {
     const edit = ref(props.edit);
     const options = ref<any[]>([]);
+
+    // U7: 高级列类型（type 21/24/25/26 对应 双向关联/集合运算/语义关联/lookUp）为 VIP 专属新建
+    const VIP_FIELD_TYPES = [21, 24, 25, 26];
+    const isVipFieldType = (type: number) => VIP_FIELD_TYPES.includes(type);
 
     const filteredDoubleLinkColumns = ref<any[]>([]);
     const sourceColumns = ref<any[]>([]);
@@ -432,6 +438,7 @@ export default defineComponent({
       filteredDoubleLinkColumns,
       sourceColumns,
       selectOptions,
+      isVipFieldType,
       cancel,
       fields,
       FieldEnum,
@@ -444,3 +451,17 @@ export default defineComponent({
   },
 });
 </script>
+
+<style scoped>
+/* U7: 高级列类型 VIP 标识（金色小角标，非 VIP 新建时被后端 602 拦截） */
+.vip-type-flag {
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: linear-gradient(135deg, #f7c948, #e8a33d);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+</style>

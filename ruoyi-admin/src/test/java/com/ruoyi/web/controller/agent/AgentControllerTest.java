@@ -16,6 +16,7 @@ import com.ruoyi.system.agent.model.AgentPlan;
 import com.ruoyi.system.agent.model.AgentStep;
 import com.ruoyi.system.agent.registry.AgentExecutionContext;
 import com.ruoyi.system.agent.service.AgentAuditService;
+import com.ruoyi.system.service.VipService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -73,6 +74,8 @@ class AgentControllerTest
     @Mock private AgentRateLimiter rateLimiter;
     @Mock private SseEmitterManager sseManager;
     @Mock private PlanSessionManager sessionManager;
+    /** U3：VIP 身份门槛断言（默认放行，个别测试覆盖为拒绝） */
+    @Mock private VipService vipService;
 
     /** 被测对象，依赖通过反射注入 */
     private AgentController controller;
@@ -88,11 +91,14 @@ class AgentControllerTest
         injectField("rateLimiter", rateLimiter);
         injectField("sseManager", sseManager);
         injectField("sessionManager", sessionManager);
+        injectField("vipService", vipService);
 
         // 速率限制默认放行，个别测试覆盖
         when(rateLimiter.tryAcquire(any())).thenReturn(true);
         when(rateLimiter.getRateLimitInfo(any()))
                 .thenReturn(mock(AgentRateLimiter.RateLimitInfo.class));
+        // VIP 门槛默认放行（U3），个别测试覆盖
+        doNothing().when(vipService).assertAgent(anyLong());
     }
 
     @AfterEach

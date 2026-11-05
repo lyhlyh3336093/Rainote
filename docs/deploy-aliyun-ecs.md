@@ -39,6 +39,8 @@ cd notepad; npm run build
 
 ### 1.3 导出全量数据（结构+数据）
 
+> 若源机已在运行 Rainote（含本机开发环境），可跳过 1.3/1.4：应用内"数据备份"一键产出整机包（全库 SQL + 上传目录文件），见第 9.4 节。以下手动流程适用于源机应用无法启动的场景。
+
 ```powershell
 mysqldump -uroot -p --single-transaction --set-gtid-purged=OFF --default-character-set=utf8mb4 -B ry-vue -r C:\temp\rainote-data.sql
 ```
@@ -123,6 +125,10 @@ mysql -uroot -p ry-vue --default-character-set=utf8mb4 < /root/sqlinit/ry_202208
 # 菜单脚本（在仓库 sql/ 目录，按需全量执行一次）
 for f in /root/sqlinit/*Menu.sql; do mysql -uroot -p ry-vue --default-character-set=utf8mb4 < "$f"; done
 mysql -uroot -p ry-vue --default-character-set=utf8mb4 < /root/sqlinit/note_schema.sql   # note_* 表结构
+mysql -uroot -p ry-vue --default-character-set=utf8mb4 < /root/sqlinit/quartz.sql       # QRTZ_ 调度表
+mysql -uroot -p ry-vue --default-character-set=utf8mb4 < /root/sqlinit/agentAudit.sql   # agent 审计表（含 result 列）
+mysql -uroot -p ry-vue --default-character-set=utf8mb4 < /root/sqlinit/legacySchema.sql # 历史功能表/视图（9 个对象，
+                                                                                          # 须在 note_schema 之后执行）
 mysql -uroot -p ry-vue --default-character-set=utf8mb4 < /root/rainote-data.sql          # 全量数据（含改好的 admin 密码）
 mysql -uroot -p -e "SELECT COUNT(*) FROM \`ry-vue\`.note_note;"   # 迁移验证：笔记数 > 0
 ```
@@ -216,10 +222,14 @@ server {
 
     gzip_static on;
 
-    # 数据还原上传通道（U3）：限速后转发，须置于 /api/ 之前（最长前缀优先匹配）
+    # 数据还原上传通道（U3）：限速后转发，须置于 /api/ 之前（最长前缀优先匹配）。
+    # proxy_pass 必须带完整后端路径——尾斜杠写法（.../8090/）会把整个 location 前缀
+    # 替换为 "/"，请求打到后端根路径返回欢迎语（HTTP 200 小响应体），还原静默失效
+    # 且后端零日志（2026-11-03 实测踩坑，详见 docs/solutions/integration-issues/
+    # nginx-proxy-pass-trailing-slash-silent-rewrite.md）
     location /api/system/note/restore {
         limit_req zone=restore_limit burst=5 nodelay;
-        proxy_pass http://127.0.0.1:8090/;
+        proxy_pass http://127.0.0.1:8090/system/note/restore;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -231,7 +241,7 @@ server {
     # /api/ 之前避开通用 300s 超时；GET 下载且后端 @PreAuthorize 管理员限定，无匿名
     # 大请求体放大面，不挂 limit_req（restore_limit zone 仍由 restore 路由独享，共存无冲突）
     location /api/system/note/dataBak {
-        proxy_pass http://127.0.0.1:8090/;
+        proxy_pass http://127.0.0.1:8090/system/note/dataBak;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -353,17 +363,53 @@ mysql -uroot -p -e "ALTER TABLE \`ry-vue\`.note_agent_audit_step_log ADD COLUMN 
 
 ---
 
-## 9. 上线验证清单
+## 9. 应用内备份与还原（整机迁移）
+
+> 与第 8 节 cron dump 的分工：cron 是**服务器层兜底**（仅数据库、gzip、保留 7 天、无人值守自动跑）；本节是**应用内整机备份**（全库 SQL + 上传目录文件打包 zip），由用户在界面按需触发，面向换机迁移与整机故障恢复场景。
+
+### 9.1 功能入口与备份包
+
+- **入口**：笔记界面操作按钮"数据备份"/"数据还原"（仅超管 admin 可见）；agent 命令 `note.backup` 亦可触发（生成包落 backupPath，结果摘要回传 agent 会话并审计落库）。
+- **备份包构成**：zip = 全库 SQL dump（note_* 业务表 + sys_* 系统表，QRTZ_ 调度表除外）+ 上传目录全部文件（附件等）。下载接口 `GET /api/system/note/dataBak`，nginx 已配 1800s 超时（第 5 节）。
+- **落盘槽位**：`ruoyi.backupPath`（生产 `/home/ruoyi/backup`，即第 4 节 700 收口目录）下两个槽位各保留最近 1 份、新包覆盖旧包——`backup.zip`（手动/agent 备份）与 `snapshot.zip`（还原前快照）。
+- **规模预期**（实测参考）：约 200MB 包 / 备份生成 ~15s / 还原执行 ~28s，随数据量线性增长；nginx `client_max_body_size` 与后端 multipart 上限均已按 512MB 配置。
+
+### 9.2 还原语义与失败自愈
+
+- **两步确认**：`POST /api/system/note/restore` 首次调用仅返回预览告警（影响范围、不可逆提示），界面二次确认后带 `confirmed=true` 才真正执行。
+- **全量替换**：还原 = DROP 重建全库表 + 覆盖上传目录文件，当前数据不保留；成功后界面提示完成，**无需重新登录**（登录态延续，账号口令变为备份包中的值——迁移前先改好口令再备份）。
+- **还原前快照**：执行还原前自动生成 `snapshot.zip` 作为恢复点；还原中途失败自动回放快照，进程崩溃则下次启动（systemd 自动拉起）检测 marker 自动回放；回放仍失败时应用进入不一致状态（拒绝一切写操作、界面提示），人工在界面用 snapshot.zip 再执行一次还原即可恢复。
+- **写锁互斥**：备份/还原进行中，全部写操作（笔记、多维表、附件上传等）被拒绝并提示，读不受影响；建议避开使用高峰执行。
+- **版本一致性**：还原前做 manifest 表集双向核对（备份包 vs 现库，QRTZ_ 除外，空库豁免）——**生成备份包的 jar 版本需与目标机一致**，跨版本迁移先在源机升级到同版本再备份。
+
+### 9.3 安全机制（部署侧须知）
+
+后端内置、无需额外配置：SQL 词法白名单 fail-closed（仅放行 DROP/CREATE/INSERT 纯字面量形态，解析产物重渲染执行，防恶意备份包注入）；匿名大请求体 413 防线（未登录 POST >1MB 或无 Content-Length 直接拒绝，还原必须走已登录会话）；manifest 指纹校验。部署侧配套均已在第 4/5 节就位：backupPath 700 权限（包内含全库数据与密码哈希，勿外传）、nginx restore 路由限速 1r/s+burst 5、`client_max_body_size 512m`。
+
+### 9.4 换机迁移实操（源机在运行时推荐）
+
+替代 1.3/1.4 手动 dump+打包的迁移路径：
+
+1. **源机**：界面"数据备份"下载 backup.zip（口令随包带走，先改好再备份）。
+2. **目标机**：完成第 2~4 节部署与第 3 节初始化，但**仅执行结构+基础表脚本**（ry_20220822.sql、菜单脚本、note_schema.sql；跳过 1.3 数据导入与 1.4 附件打包——登录依赖基础表，不可完全空库），jar 版本与源机一致。
+3. **目标机**：admin 登录 → "数据还原"上传 backup.zip → 按预览告警二次确认 → 等待完成提示（分钟级）。
+4. **验证**：笔记数与源机一致、附件可下载、当前登录态延续。
+
+---
+
+## 10. 上线验证清单
 
 - [ ] `https://www.rainote.cn` 打开登录页，验证码正常，admin 新密码登录成功
 - [ ] 既有笔记、多维表数据完整；双向链接跳转正常
 - [ ] Excel 导入导出（含链接列）往返正常
 - [ ] 附件/图片上传下载正常（URL 应为 `https://www.rainote.cn/profile/...`）
 - [ ] AI 聊天与 agent 正常（GLM key 生效）
+- [ ] "数据备份"可下载 zip（解压含 SQL 与 upload 文件），`/home/ruoyi/backup` 出现 backup.zip 且目录权限 700
+- [ ] "数据还原"上传备份包：预览告警 + 二次确认，完成后数据一致且无需重新登录
 - [ ] `curl -I http://www.rainote.cn` 返回 301 → https
 - [ ] 服务器重启后站点自动恢复（`systemctl reboot` 后等 1 分钟再验）
 
-## 10. 日常运维
+## 11. 日常运维
 
 | 操作 | 步骤 |
 |---|---|
@@ -372,3 +418,5 @@ mysql -uroot -p -e "ALTER TABLE \`ry-vue\`.note_agent_audit_step_log ADD COLUMN 
 | 证书 | acme.sh cron 自动续签；`acme.sh --list` 查看到期日 |
 | 后端日志 | `/home/ruoyi/logs/`（logback，60 天轮转）；`journalctl -u rainote -f` |
 | 服务状态 | `systemctl status rainote` / `nginx -t` / `systemctl status mysqld redis` |
+| 整机备份/还原 | 界面按钮或 agent `note.backup`；产物在 `/home/ruoyi/backup`（backup.zip/snapshot.zip 各留最近 1 份，新包覆盖旧包），用法见第 9 节 |
+| 还原失败处理 | 自动回放还原前快照自愈（崩溃场景由 systemd 拉起后触发）；仍失败则界面提示不一致，用 snapshot.zip 再执行一次还原 |

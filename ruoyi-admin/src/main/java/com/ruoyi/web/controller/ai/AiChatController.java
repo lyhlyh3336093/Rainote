@@ -19,6 +19,7 @@ import com.ruoyi.common.utils.SecurityUtils;
 import com.ruoyi.system.domain.AiChatMessage;
 import com.ruoyi.system.domain.AiChatSession;
 import com.ruoyi.system.service.IAiChatService;
+import com.ruoyi.system.service.VipService;
 
 /**
  * AI聊天Controller
@@ -32,16 +33,21 @@ public class AiChatController extends BaseController
     @Autowired
     private IAiChatService aiChatService;
 
+    @Autowired
+    private VipService vipService;
+
     /**
      * 流式对话
      * 接受 { sessionId, message }，返回SseEmitter流式响应
      * R13/Group R — 基础限流：每IP每分钟10次，防止GLM API配额耗尽
+     * U3/R12 — VIP 每日配额叠加其上：普通 10 次/日、VIP 100 次/日（admin 豁免；发起即扣次）
      */
     @RateLimiter(time = 60, count = 10, limitType = LimitType.IP)
     @PostMapping("/chat")
     public SseEmitter chat(@RequestBody ChatRequest request)
     {
         Long userId = SecurityUtils.getUserId();
+        vipService.aiDailyTryAcquire(userId);
         SseEmitter emitter = new SseEmitter(120000L);
 
         aiChatService.chat(

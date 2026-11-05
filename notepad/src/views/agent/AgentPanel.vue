@@ -53,6 +53,10 @@
           <div class="header-left">
             <i class="bi bi-robot"></i>
             <span class="panel-title">Agent</span>
+            <!-- 非 VIP 用户入口角标（U7）：点击跳 /vip 升级 -->
+            <a-tooltip v-if="showVipBadge" title="Agent 为 VIP 专属功能，点击了解升级">
+              <span class="vip-entry-badge" @click="goVip">VIP</span>
+            </a-tooltip>
             <a-tag v-if="store.minuteRemaining <= 3" color="orange" :bordered="false">
               剩余 {{ store.minuteRemaining }}/分钟
             </a-tag>
@@ -157,14 +161,36 @@
 </template>
 
 <script lang="ts" setup>
-import { ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
+import { useRouter } from 'vue-router';
 import { useAgentStore } from '../../stores/agent';
 import { auditDetail as fetchAuditDetail } from '../../api/agent';
 import type { AgentAuditLog, AgentAuditStepLog } from '../../api/agent';
+import { getVipInfo } from '../../api/vip';
 import ChatStream from './ChatStream.vue';
 
 const store = useAgentStore();
+const router = useRouter();
 const showHistory = ref(false);
+
+// VIP 身份按需拉取（U7）：非 VIP 且非管理员时在面板头部显示角标
+const vipStatus = ref<{ vip: boolean; admin: boolean } | null>(null);
+const showVipBadge = computed(() => !!vipStatus.value && !vipStatus.value.vip && !vipStatus.value.admin);
+
+const goVip = () => {
+  router.push('/vip');
+};
+
+onMounted(async () => {
+  try {
+    const info = await getVipInfo();
+    if (info.code === 200) {
+      vipStatus.value = info.status;
+    }
+  } catch {
+    // 拉取失败不显示角标，不阻塞面板
+  }
+});
 
 // 历史项展开状态
 const expandedHistoryId = ref<number | null>(null);
@@ -372,6 +398,19 @@ async function handleClickHistory(item: AgentAuditLog) {
         background: linear-gradient(135deg, #1677ff, #4096ff);
         color: #fff;
         font-size: 17px;
+      }
+
+      /* VIP 入口角标（U7）：金色小标签 */
+      .vip-entry-badge {
+        padding: 1px 8px;
+        border-radius: 6px;
+        background: linear-gradient(135deg, #f7c948, #e8a33d);
+        color: #fff;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 1px;
+        cursor: pointer;
+        box-shadow: 0 1px 4px rgba(232, 163, 61, 0.4);
       }
     }
     .header-right {

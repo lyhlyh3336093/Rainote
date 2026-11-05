@@ -14,6 +14,16 @@ import { parseFilename, triggerDownload } from './export';
 const cookie = useCookie;
 const baseUrl = API_BASE;
 
+/**
+ * 构造下载失败 Error 并透传后端 code（U7/KTD5）：
+ * 602（NEED_VIP）/ 603（VIP_LIMIT_REACHED）由调用方据此走 VIP 升级引导/纯提示分支。
+ */
+function buildDownloadError(body: any, prefix: string): Error {
+    const err: any = new Error(body?.msg || `${prefix}失败（code=${body?.code}）`);
+    err.code = body?.code;
+    return err;
+}
+
 /** 还原结果（对齐后端 com.ruoyi.system.domain.dto.RestoreResult，U2 契约） */
 export interface RestoreResult {
     /** 包内表数量 */
@@ -69,10 +79,10 @@ export async function downloadBackup(options?: { timeoutMs?: number }): Promise<
 
     const contentType = response.headers.get('content-type') || '';
 
-    // 失败：ServiceException / 限流 → HTTP 200 + application/json
+    // 失败：ServiceException / 限流 / VIP 限额（602/603）→ HTTP 200 + application/json
     if (contentType.includes('application/json')) {
         const body = await response.json().catch(() => ({} as any));
-        throw new Error(body?.msg || `备份失败（code=${body?.code}）`);
+        throw buildDownloadError(body, '备份');
     }
 
     // 成功：备份包 zip（Content-Disposition 由后端提供，解析失败兜底 backup.zip）
@@ -86,7 +96,7 @@ export async function downloadBackup(options?: { timeoutMs?: number }): Promise<
     const text = await response.text();
     try {
         const body = JSON.parse(text);
-        throw new Error(body?.msg || `备份失败（code=${body?.code}）`);
+        throw buildDownloadError(body, '备份');
     } catch (parseErr: any) {
         // JSON.parse 失败说明不是 JSON，当作 zip 二进制处理
         if (parseErr instanceof Error && parseErr.message && !parseErr.message.startsWith('Unexpected')) {
@@ -154,4 +164,71 @@ export async function restoreUpload(
         throw new Error(body?.msg || `还原失败（code=${body?.code}）`);
     }
     return body?.data as RestoreResult;
+}
+
+/**
+ * VIP 个人数据导出下载（U7/U9：仅打包当前用户本人的笔记/表格/附件，VIP 专属）。
+ * 非 VIP 调用时后端返回 HTTP 200 + {"code":602,"msg":"..."}，
+ * 错误经 buildDownloadError 透传 code，由调用方走升级引导分支。
+ * 模式照抄 downloadBackup（流式 zip + JSON 错误分支）。
+ *
+ * @param options.timeoutMs 可选，默认 600000（对齐 downloadBackup 大操作先例）
+ * @throws Error 失败时抛出，message 为后端中文 msg；error.code 携带后端错误码（602/603）
+ */
+export async function exportMyData(options?: { timeoutMs?: number }): Promise<void> {
+    const token = cookie.get('token');
+    const timeoutMs = options?.timeoutMs ?? 600000;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    let response: Response;
+    try {
+        response = await fetch(`${baseUrl}/system/note/myExport`, {
+            method: 'GET',
+            headers: {
+                'Accept': 'application/zip, application/json',
+                'Authorization': token,
+            },
+            credentials: 'include',
+            signal: controller.signal,
+        });
+    } catch (e: any) {
+        if (e?.name === 'AbortError') throw new Error('导出生成超时，请稍后重试');
+        throw new Error('网络异常，请稍后重试');
+    } finally {
+        clearTimeout(timer);
+    }
+
+    if (!response.ok) {
+        throw new Error(`导出失败：HTTP ${response.status}`);
+    }
+
+    const contentType = response.headers.get('content-type') || '';
+
+    // 失败：VIP 限额（602/603）/ ServiceException → HTTP 200 + application/json
+    if (contentType.includes('application/json')) {
+        const body = await response.json().catch(() => ({} as any));
+        throw buildDownloadError(body, '导出');
+    }
+
+    // 成功：个人数据 zip（Content-Disposition 由后端提供，解析失败兜底 personal-export.zip）
+    if (contentType.includes('application/zip') || contentType.includes('octet-stream')) {
+        const blob = await response.blob();
+        triggerDownload(blob, parseFilename(response.headers.get('content-disposition'), 'personal-export.zip'));
+        return;
+    }
+
+    // 兜底：未知 content-type，尝试 JSON 解析（错误），失败则当 zip 二进制
+    const text = await response.text();
+    try {
+        const body = JSON.parse(text);
+        throw buildDownloadError(body, '导出');
+    } catch (parseErr: any) {
+        // JSON.parse 失败说明不是 JSON，当作 zip 二进制处理
+        if (parseErr instanceof Error && parseErr.message && !parseErr.message.startsWith('Unexpected')) {
+            throw parseErr;
+        }
+        const blob = new Blob([text], { type: 'application/zip' });
+        triggerDownload(blob, parseFilename(response.headers.get('content-disposition'), 'personal-export.zip'));
+    }
 }

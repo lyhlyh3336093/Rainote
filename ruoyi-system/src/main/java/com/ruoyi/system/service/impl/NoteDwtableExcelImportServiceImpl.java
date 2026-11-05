@@ -75,6 +75,7 @@ import com.ruoyi.system.mapper.NoteViewMapper;
 import com.ruoyi.system.service.BackupLockUtil;
 import com.ruoyi.system.service.INoteDwtableExcelImportService;
 import com.ruoyi.system.service.INoteRecordService;
+import com.ruoyi.system.service.VipService;
 import com.ruoyi.system.service.impl.ExcelColumnMatcher.ColumnMapping;
 import com.ruoyi.system.service.impl.ExcelColumnMatcher.HeaderEntry;
 import com.ruoyi.system.service.impl.ExcelColumnMatcher.PendingLinkPair;
@@ -229,6 +230,10 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
     /** 共享名称解析组件（U2，R7：21 列名称回退的转义还原/整串优先/归一化/唯一前缀/歧义判定） */
     @Autowired
     private LinkNameResolver linkNameResolver;
+
+    /** VIP 高级列断言（U3/R11：导入新建 21 列需 VIP；admin/VIP 判定在 VipService 内） */
+    @Autowired
+    private VipService vipService;
 
     /**
      * 自注入代理引用：导入入口（非事务前置段）完成后经代理进入 {@code @Transactional}
@@ -1961,6 +1966,12 @@ public class NoteDwtableExcelImportServiceImpl implements INoteDwtableExcelImpor
         verifyFingerprint(file, params);
         // 非事务前置段：解析/匹配/漂移/补参校验不占事务（KTD5）
         ImportPlan plan = buildImportPlan(noteId, dwtableId, userId, dwtable, file, params);
+        // U3/R11 高级列 VIP 断言：导入将新建双向链接列（type=21）时需 VIP（防止经导入绕过
+        // /system/column/add 的高级列门槛；pendingColumns 仅纯文本列、24/25/26 只引用既有列，均不涉新建）
+        if (!plan.pendingLinkColumns.isEmpty())
+        {
+            vipService.assertAdvancedColumn(userId, 21L);
+        }
         // 经自注入代理进入 @Transactional 写入段（同类直接调用不经代理）
         return self.executeImport(plan);
     }

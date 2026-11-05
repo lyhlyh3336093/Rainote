@@ -90,6 +90,10 @@ import com.ruoyi.system.service.impl.RestoreSqlSanitizer.Type;
  *
  * @author ruoyi
  */
+// AgentOperationRegistry 在容器早期强制实例化本类；RuoYiConfig 的 backupPath 为 setter
+// 写入的静态字段，若无类型依赖，@PostConstruct 启动清理可能先于配置绑定执行（读到 null，
+// 短路 marker 自愈）。注入实例字段强制 Spring 先完成 RuoYiConfig 创建与绑定（按类型解析，
+// 不依赖 bean 名），字段本身不直接使用。
 @Service
 public class BackupRestoreServiceImpl implements IBackupRestoreService
 {
@@ -119,8 +123,8 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
     /** 非管理员拒绝文案（与界面 dataBak/restore 端点一致） */
     private static final String ADMIN_ONLY_MESSAGE = "只有管理员才可执行此操作";
 
-    /** 入包的用户文件目录（profile 下；download 目录不入包，R2/R3） */
-    private static final String[] FILE_DIRS = {"upload", "avatar", "import"};
+    /** 入包的用户文件目录（profile 下；download 目录不入包，R2/R3；vip 为收款码图片，KTD8） */
+    private static final String[] FILE_DIRS = {"upload", "avatar", "import", "vip"};
 
     /** 文件流式拷贝缓冲区大小 */
     private static final int COPY_BUFFER_SIZE = 8192;
@@ -184,6 +188,10 @@ public class BackupRestoreServiceImpl implements IBackupRestoreService
      */
     @Autowired(required = false)
     private RestoreSchedulerHook schedulerHook;
+
+    /** 仅用于声明初始化顺序依赖（见类顶注释），保证 backupPath 绑定先于启动清理 */
+    @Autowired(required = false)
+    private RuoYiConfig configOrderingAnchor;
 
     /** 还原成功后重建字典缓存（同模块直注入；测试环境可缺省跳过） */
     @Autowired(required = false)

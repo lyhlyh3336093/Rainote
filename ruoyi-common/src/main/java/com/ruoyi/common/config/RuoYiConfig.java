@@ -145,4 +145,14 @@ public class RuoYiConfig
     {
         return getProfile() + "/upload";
     }
+
+    /**
+     * 获取 VIP 私有文件目录（U5/KTD12：profile 同级目录，不经 /profile/** 静态映射，
+     * 支付凭证等半敏感文件存放处，访问必须走鉴权端点）
+     */
+    public static String getVipPrivatePath()
+    {
+        java.io.File profileDir = new java.io.File(getProfile());
+        return new java.io.File(profileDir.getParentFile(), "vip-private").getAbsolutePath();
+    }
 }

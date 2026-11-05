@@ -239,7 +239,8 @@ export default defineConfig(({
         },
         server: {
             cors: true,
-            port: 5173,
+            // 避开本机其他 vite 项目（知识库）默认占用的 5173，Rainote dev 固定 5175
+            port: 5175,
             open: true,
             proxy: {
                 [env.VITE_PROXY_URL]: {

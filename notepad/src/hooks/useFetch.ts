@@ -4,6 +4,7 @@ import { message } from 'ant-design-vue';
 import useCookie from "./useCookie";
 import { whiteList } from '../router/authenticate.js';
 import { API_BASE } from '../config/api';
+import { handleVipCode } from '../api/vip';
 
 const cookie = useCookie
 const errCodeList: any = [500];
@@ -20,6 +21,10 @@ export default createFetch({
             if (code === 401) {
                 window.location.href = '/signin';
                 return;
+            }
+            // VIP 限额错误码（U7/KTD5）：602 弹升级引导跳 /vip；603 纯提示（不引导升级）
+            if (handleVipCode(code, msg)) {
+                return Promise.resolve(false);
             }
             if (errCodeList.includes(code)) {
                 message.error(msg);
